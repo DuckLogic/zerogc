@@ -1,0 +1,21 @@
+[package]
+name = "zerogc"
+version = "0.1.0"
+authors = ["Techcable <Techcable@techcable.net>"]
+# We're almost ready, but not quite
+publish = false
+
+[dependencies]
+unreachable = "^1.0.0"
+num-traits = "^0.1.40"
+# Manually included tracing support for third party libraries
+# Providing support for these important libraries,
+# gives zerogc 'batteries included' support.
+petgraph = { version = "^0.4.10", optional = true }
+ordermap = { version = "^0.3.0", optional = true }
+smallvec = { version = "^0.5.0", optional = true }
+arrayvec = { version = "^0.4.6", optional = true }
+ndarray = { version = "^0.10.12", optional = true }
+zerogc-derive = { path = "zerogc-derive" }
+
+[workspace]
