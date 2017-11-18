@@ -2,6 +2,8 @@
 name = "zerogc"
 version = "0.1.0"
 authors = ["Techcable <Techcable@techcable.net>"]
+description = "Zero overhead tracing garbage collection for rust"
+repository = "https://github.com/DuckLogic/zerogc"
 # We're almost ready, but not quite
 publish = false
 

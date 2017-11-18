@@ -1,0 +1,15 @@
+[package]
+name = "zerogc-derive"
+version = "0.1.0"
+authors = ["Techcable <Techcable@techcable.net>"]
+description = "Automaticatically derives code for zerogc"
+repository = "https://github.com/DuckLogic/zerogc"
+readme = "../README.md"
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "^0.11.11"
+quote = "^0.3.15"

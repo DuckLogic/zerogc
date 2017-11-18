@@ -7,25 +7,29 @@
 //! There is no chance for collection to happen in between these safepoints,
 //! and you have unrestricted use of garbage collected pointers until you reach one.
 //!
-//! ## Major features
-//! - Easy to use, since `Gc<T>` is `Copy` and coerces to a reference.
-//!   - Absolutely zero overhead when modifying pointers, since `Gc<T>` is `Copy`.
-//!   - This gives a huge throughput advantage over reference counting,
-//!     since yhou can manipulate pointers nonstop with no bookeeping.
-//! - The borrow checker guarantees the lifetime of garbage collected references will be valid between `safepoint`s.
-//!   - The lifetime of these pointers are predictable, and only need extra work at a `safepoint`
-//!   - Unsafe code has no need to realize the memory is garbage collected,
-//! - Unsafe code has complete freedom to manipulate garbage collected pointers, and requires no cooperation unless a safepoint occurs.
-//! - You get to decide when you want garbage collection to occur by invoking a `safepoint!` macro.
-//!   - The garbage collector will only collect if it thinks it needs to clean up memory.
-//!   - Uses rust's lifetime system to ensure all roots are statically and safely known without runtime overhead.
-//!     - zerogc's explicit safepoint abstraction would be wildly unsafe in any other language, but in rust it's completely safe.
-//!   - Java and C# already list the roots using safepoints, although it's completely transparent to the user.
-//!     - zerogc simply makes these safepoints explicit and requires the user to explicitly state them.
-//! - See the readme for more details on how this works
+//! ## Major
+//! 1. Easy to use, since `Gc<T>` is `Copy` and coerces to a reference.
+//! 2. Absolutely zero overhead when modifying pointers, since `Gc<T>` is `Copy`.
+//! 3. Support for important libraries builtin to the collector
+//! 4. Unsafe code has complete freedom to manipulate garbage collected pointers, and it doesn't need to understand the distinction
+//! 5. Uses rust's lifetime system to ensure all roots are known at explicit safepoints, without any runtime overhead.
+//! 6. Collection can only happen with an explicit `safepoint` call and has no overhead between these calls,
+//! 7. Optional graceful handling of allocation failures.
 //!
 //! ## Usage
-//! Blegh, documentation.
+//! ````rust
+//! let collector = GarbageCollector::default();
+//! let retained: Gc<Vec<u32>> = collector.alloc(vec![1, 2, 3]);
+//! assert_eq!(retained[0], ) // Garbage collected references deref directly to slices
+//! let other =
+//! /*
+//! * Garbage collect `retained`
+//! * This will explicitly trace the retained object `retained`,
+//! * and sweep the rest (`sweeped`) away.
+//! */
+//! safepoint!(collector, retained);
+//! retained.; // This borrow checker will allow this since `retained` was retained
+//! ````
 
 /*
  * Since our compiler plugin's going to eventually require nightly directly,
@@ -68,30 +72,52 @@ use safepoints::{GcErase, GcUnErase, SafepointBag, SafepointState, SafepointId};
 use utils::{AtomicIdCounter, IdCounter, debug_unreachable};
 use utils::math::{CheckedMath, OverflowError};
 
-/// Activate a safepoint on this garbage collector, potentially collecting garbage
-/// and invalidating all other garbage collected pointers by 'mutating' the collector.
+
+
+/// Sweeps away the specified variables, treating them as the roots
 ///
-/// The garbage collected objects explicitly specified here are given a special exception,
-/// and manage to survive the safepoint completely intact,
-/// and have their garbage collected lifetimes rebound to the new lifetime of the garbage collector.
-/// All other unmanaged lifetimes remain untouched,
-/// so this only affects the lifetime of garbage collected pointers.
+/// ## Safety
+/// This is completely safe because `possible_collection!` is,
+/// and it operates in terms of that macro's abstractions.
+/// In other words `safepoint!(collector, first, second)` directly expands to
+/// ````
+/// let (first, second) = possible_collection
+/// ````
+/// This tricks the garbage collector into thinking the when really they're
+macro_rules! safepoint {
+    ($collector:expr) => {
+
+    };
+}
+
+/// The underlying macro behind `safepoint!`,
+/// which recreates the values after potentially performing garbage collection on them.
 ///
-/// The error messages from incorrectly using this will be incredibility cryptic,
+/// The specified objects are treated as the roots of the collection,
+/// invalidating all other garbage collected pointers by 'mutating' the collector.
+///
+/// ## Safety
+/// This macro expansion operates in terms of completely safe abstractions,
+/// and expands to no unsafe code.
+/// It is the underlying abstraction behind `safepoint!`,
+/// which is recomended for clarity in most circumstances.
+/// This is because the borrow checker considers the old objects
+/// Once the safepoint is created on the specified collector `$collector`
+///
+/// However, the downside is the error messages from incorrectly using this will be incredibility cryptic,
 /// involving the invocation of hidden methods and hidden traits.
 /// Until documentation is written on these indecipherable error messages,
 /// you'll pretty much have to guess what is wrong with your code.
-/// However, this macro expansion involves no unsafe code,
-/// and is simply a wrapper around a completely safe interface to the garbage collector.
-/// Therefore, all errors involving incorrect usage of the safepoint will be caught at compile time,
-/// and you can rest easily knowing that deciphering the safepoint's cryptic error messages
-/// has given you safe and zero overhead garbage collection on your standard rust installation.
+/// However, you can rest assured that the abstractions invoked by this macro is completely safe,
+/// and all errors involving incorrect usage will be completely caught at compile time.
+///
 #[macro_export]
-macro_rules! safepoint {
-    ($collector:ident, $value:expr) => {
+macro_rules! possible_collection {
+    ($collector:expr, $value:expr) => {
+        let collector = $collector;
         let safepoint = collector.initialize_safepoint($value);
         collector.activate_safepoint(safepoint);
-        collector.finish_safepoint(safepoint)
+        collector.finish_safepoint(safepoint);
     };
 }
 
@@ -226,7 +252,7 @@ impl GarbageCollector {
         let state = unsafe { self.assume_allocating() };
         let mut heap = self.heap.borrow_mut();
         if heap.can_alloc(GcHeap::size_of::<T>()) {
-            self.expand_heap(&mut *heap, GcHeap::size_of::<T>())?
+            self.expand_heap(&mut *heap, GcHeap::size_of::<T>())?;
         }
         unsafe {
             Ok(Gc::new(heap.try_alloc(state.expected_header, value)?))
