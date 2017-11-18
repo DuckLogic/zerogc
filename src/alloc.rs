@@ -118,14 +118,18 @@ impl GcHeap {
     #[inline]
     pub fn try_alloc<T>(&mut self, header: GcHeader, value: T) -> Result<Shared<T>, GcMemoryError> {
         if self.can_alloc(GcHeap::size_of::<T>()) {
-            let object = GcObject::new(header, value);
-            let ptr = Shared::from(&object.value);
-            self.values.push(object.erased());
-            self.size += object.size();
-            Ok(ptr)
+            Ok(self.force_alloc(header, value))
         } else {
             Err(GcMemoryError::new(mem::size_of::<T>(), self.remaining()))
         }
+    }
+    #[inline]
+    pub fn force_alloc<T>(&mut self, header: GcHeader, value: T) -> Result<Shared<T>, GcMemoryError> {
+        let object = GcObject::new(header, value);
+        let ptr = Shared::from(&object.value);
+        self.values.push(object.erased());
+        self.size += object.size();
+        Ok(ptr)
     }
     pub fn sweep(&mut self, keep: GcHeader, destroy: GcHeader) -> bool {
         assert_eq!(keep.collector_id(), destroy.collector_id());

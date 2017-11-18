@@ -226,7 +226,7 @@ impl GarbageCollector {
         let state = unsafe { self.assume_allocating() };
         let mut heap = self.heap.borrow_mut();
         if heap.can_alloc(GcHeap::size_of::<T>()) {
-            self.expand_heap(&mut *heap, GcHeap::size_of::<T>())
+            self.expand_heap(&mut *heap, GcHeap::size_of::<T>())?
         }
         unsafe {
             Ok(Gc::new(heap.try_alloc(state.expected_header, value)?))

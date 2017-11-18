@@ -13,32 +13,33 @@ you explicitly decide what objects you want to survive the potential collection.
 
 
 ## Status
-- This collector design should already be completely sound, and already have a very low overhead interface
+1. This collector design should already be completely sound, and already have a very low overhead interface
   - However, _I only think_ that my approach is sound, and someone might eventually point out a fatal flaw (however unlikely).
-- Certain popular libraries are 'blessed' and have garbage collection support include
-  - Although this favors popular libraries, 
-  - This is only to speed adoption of the collector, not because I hate 
-  - It should be quite easy to add support 
-  - 
-- Although there's a ton of documentation for everything, we really need a guide for new users.
-  - The documentation is somewhat long and in depth, and isn't aimed at beginners.
+2. Certain popular libraries are 'blessed' and have garbage collection support include
+  - Although this favors popular libraries, it will speed adoption of the collector
+    - I do not favor my own libraries, and I simply give them custom support.
+  - It should be quite easy to add support for your own libraries,
+3. Although there's a ton of documentation for everything, we really need a user guide.
   - As Mark Twain famously said "I would have written a shorter letter, but I did not have the time"
-- **Beware, construction is in progress!**
+4. Currently functions properly, but there are likely plenty of bugs since there's a ton of complicated unsafe code.
+5. There is a complex API hidden behind a macro, but absolutely no unsafe code.
+  - The API is designed to be usable even with `#[forbid(unsafe_code)]`,
+     in order to ensure the soundness of my approach
+  - Many of the internals that need to be used by macros are hidden from documentation,
+4. **Beware, construction is in progress!**
   - The above advertisements all assume this is a good idea to run in production, which it isn't (yet).
-    - Technically 
-- Currently functions properly, but there are likely plenty of bugs since there's a ton of complicated unsafe code.
-- The API is really complex, but it never requires any unsafe code.
-- There aren't many benchmarks done,
-  - Personally, i'm just happy to have a safe zero-overhead garbage collection abstraction
-- Allocation isn't very optimized, and is actually slightly slower than `malloc`.
-  - Copying collection should be possible in the future, which would enable bump-pointer allocation like Java.
-- Many of the internals that need to be used by macros are hidden from documentation,
-- The heuristics are currently somewhat sloppy.
-- Unfortunately there aren't very many unit tests, though I'll add more as the project matures.
-- There are some small soundness holes in the current implementation, but they should be easy to fix.
-  - The only currently known problem is the _unenforced rule_ that garbage collected types can't have explicit destructors.
-  - This is the reason why I require a nightly compiler,
-    so I can eventually write a compiler plugin to enforce these rules.
+  - Technically speaking the idea
+5. There aren't any benchmarks done.
+  - Personally, i'm just happy to have a safe zero-cost abstraction for garbage collection.
+  - Allocation isn't very optimized, and is actually slightly slower than `malloc`.
+6. Copying collection should be possible in the future, which would enable bump-pointer allocation like Java.
+7. The heuristics are currently somewhat sloppy.
+8. Unfortunately there aren't very many unit tests, though I'll add more as the project matures.
+9. There are some _small_ soundness holes in the current _implementation_,
+   but they should be easy to fix:
+  1. The _unenforced rule_ that garbage collected types can't have explicit destructors.
+    - This is the reason why I require a nightly compiler,
+      so I can eventually write a compiler plugin to enforce these rules.
 
 ## Features
 - Remember, this is [experimental software](#Status)
