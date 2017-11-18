@@ -3,6 +3,7 @@
 //! Since unsafe code and third-party libraries can't have an automatically derived `GarbageCollected` implementation,
 //! we need to manually provide them here.
 //! This is done for all stdlib types and some feature gated external libraries.
+#![doc(hidden)] // This is unstable
 
 /// Unsafely implement `GarbageCollected` for the specified type,
 /// by acquiring a 'lock' in order to trace the underlying value.

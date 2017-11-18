@@ -23,10 +23,10 @@
 //! assert_eq!(retained[0], ) // Garbage collected references deref directly to slices
 //! let other =
 //! /*
-//! * Garbage collect `retained`
-//! * This will explicitly trace the retained object `retained`,
-//! * and sweep the rest (`sweeped`) away.
-//! */
+//!  * Garbage collect `retained`
+//!  * This will explicitly trace the retained object `retained`,
+//!  * and sweep the rest (`sweeped`) away.
+//!  */
 //! safepoint!(collector, retained);
 //! retained.; // This borrow checker will allow this since `retained` was retained
 //! ````
@@ -74,7 +74,7 @@ use utils::math::{CheckedMath, OverflowError};
 
 
 
-/// Sweeps away the specified variables, treating them as the roots
+/// Sweeps away the specified variables, treating them as the roots of garbage collection
 ///
 /// ## Safety
 /// This is completely safe because `possible_collection!` is,
@@ -110,8 +110,8 @@ macro_rules! safepoint {
 /// you'll pretty much have to guess what is wrong with your code.
 /// However, you can rest assured that the abstractions invoked by this macro is completely safe,
 /// and all errors involving incorrect usage will be completely caught at compile time.
-///
 #[macro_export]
+#[doc(hidden)] // This is unstable
 macro_rules! possible_collection {
     ($collector:expr, $value:expr) => {
         let collector = $collector;
@@ -185,6 +185,7 @@ static COLLECTOR_COUNTER: AtomicIdCounter<u16> = AtomicIdCounter::new();
 /// This prevents garbage collected pointers from one collector being accidentally
 /// or intentionally used with an unexpected collector, which could cause undefined behavior.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[doc(hidden)]  // This is unstable
 pub struct CollectorId(u16);
 
 /// A completely safe, zero-overhead [garbage collector](https://en.wikipedia.org/wiki/Garbage_collection_\(computer_science\))

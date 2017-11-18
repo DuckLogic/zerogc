@@ -1,6 +1,10 @@
-ZeroGc ![docs.rs]
+ZeroGc
 =======
 Zero overhead tracing garbage collection for rust.
+
+In order to see proper usage and a quick overview, please read the crates's documentation.
+Please note that currently only stable items are documented,
+in order to simplify the documentation and avoid confusing new uesrs.
 
 ## [Major Features](Features.md)
 1. Easy to use, since `Gc<T>` is `Copy` and coerces to a reference.
@@ -10,6 +14,19 @@ Zero overhead tracing garbage collection for rust.
 5. Uses rust's lifetime system to ensure all roots are known at explicit safepoints, without any runtime overhead.
 6. Collection can only happen with an explicit `safepoint` call and has no overhead between these calls,
 7. Optional graceful handling of allocation failures.
+
+## [Current Status](Status.md)
+1. This is **experimental software** made by someone **overthinking** [the general problem](https://xkcd.com/1592/)
+2. Certain popular libraries are 'blessed' and have garbage collection support included
+3. Although there's a ton of documentation for everything, we really need a user guide.
+4. Currently functions properly, but there are likely plenty of bugs since there's a ton of complicated unsafe code.
+5. There is a complex API hidden behind a macro, but absolutely no unsafe code.
+6. There aren't any benchmarks done.
+7. Copying collection should be possible in the future
+8. The garbage collection heuristics are currently somewhat sloppy.
+9. Unfortunately there aren't very many unit tests, though I'll add more as the project matures.
+10. There are some _small_ soundness holes in the current _implementation_,
+   but they should be easy to fix:
 
 
 ## [Motivation](Motivation.md)
@@ -22,19 +39,6 @@ His collector uses runtime tracking to maintain the roots (slow),
 but my collector.
 Not only is this faster than runtime tracking or forcible garbage collection, but it is much more flexible,
 and paves the way for any combination of generational, incremental, and copying garbage collection.
-
-## [Status](Status.md)
-1. This is **experimental software** made by someone **overthinking** [the general problem](https://xkcd.com/1592/)
-2. Certain popular libraries are 'blessed' and have garbage collection support included
-3. Although there's a ton of documentation for everything, we really need a user guide.
-4. Currently functions properly, but there are likely plenty of bugs since there's a ton of complicated unsafe code.
-5. There is a complex API hidden behind a macro, but absolutely no unsafe code.
-6. There aren't any benchmarks done.
-7. Copying collection should be possible in the future
-8. The garbage collection heuristics are currently somewhat sloppy.
-9. Unfortunately there aren't very many unit tests, though I'll add more as the project matures.
-10. There are some _small_ soundness holes in the current _implementation_,
-   but they should be easy to fix:
 
 
 ### Known soundness holes
@@ -68,29 +72,7 @@ However, there are some known (temporary) soundness holes:
     - Safe code should always prefer automatic 
 
 
-## Safety
+## [Safety](Safety.md)
 All unchecked assumptions are encapsulated and hidden from the user as implementation details,
 and it's impossible to break them in user code due to either runtime checks,
 rust ownership rules, or strict rust encapsulation.
-
-The absolute upmost care is taken to make sure the design of this collector is safe above all else.
-I guarantee that is impossible to cause undefined behavior with the user's safe safe code, unless you trigger a bug in the implementation.
-This is simply the same guarantee of the (safe subset) of the rust language as a whole,
-which I took quite seriously when designing this collector.
-
-The implementation takes the upmost steps to maintain this safety,
-regardless of whatever actions safe code could possibly take.
-
-The most delicate part of the implementation is the safepoint since that involves a user-provided object,
-and tricking the borrow checker into thinking the lifetime of garbage collected pointers have changed.
-However, I have taken the upmost care that the worst behavior safe code could trigger is a panic or the collector being poisoned (unusable).
-For example, although the collector doesn't have explicitly check for poisoning,
-For example, beginning a safepoint then invoking `mem::forget` on it irreversibly scars the collector
-and prevents the user from ever starting another safepoint.
-In other words the collector demands that you finish what you've started, since that's what everybody expects.
-
-If I find a soundness hole in the API design, I will fix it even if it means yanking versions and making massive changes.
-There are even tests for putting the collector in an invalid state, to ensure this is always prevented.
-Another protection we have for mistakes of safe code,
-is that we always verify that a garbage collector is only tracing and marking objects it owns.
-That way we don't actually modify the headers of objects created by another garbage collector.
