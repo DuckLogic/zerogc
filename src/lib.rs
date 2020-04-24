@@ -7,7 +7,7 @@
 //! There is no chance for collection to happen in between these safepoints,
 //! and you have unrestricted use of garbage collected pointers until you reach one.
 //!
-//! ## Major
+//! ## Major Features
 //! 1. Easy to use, since `Gc<T>` is `Copy` and coerces to a reference.
 //! 2. Absolutely zero overhead when modifying pointers, since `Gc<T>` is `Copy`.
 //! 3. Support for important libraries builtin to the collector
@@ -20,7 +20,7 @@
 //! ````rust
 //! let collector = GarbageCollector::default();
 //! let retained: Gc<Vec<u32>> = collector.alloc(vec![1, 2, 3]);
-//! assert_eq!(retained[0], ) // Garbage collected references deref directly to slices
+//! assert_eq!(retained[0], 1) // Garbage collected references deref directly to slices
 //! let other =
 //! /*
 //!  * Garbage collect `retained`
@@ -40,18 +40,18 @@
 #![feature(
     const_fn, // I refuse to break encapsulation
     optin_builtin_traits, // These are much clearer to use.
-    shared, // Shared is a beautiful thing
     trace_macros // This is a godsend for debugging
 )]
 extern crate unreachable;
 extern crate num_traits;
+extern crate core;
 
 
 use std::mem::{self, ManuallyDrop};
-use std::ptr::Shared;
+use std::ptr::NonNull;
 use std::ops::Deref;
 use std::marker::PhantomData;
-use std::cell::RefCell;
+use std::cell::{RefCell, Cell};
 use std::fmt::{self, Display, Formatter};
 
 #[macro_use]
@@ -72,21 +72,20 @@ use safepoints::{GcErase, GcUnErase, SafepointBag, SafepointState, SafepointId};
 use utils::{AtomicIdCounter, IdCounter, debug_unreachable};
 use utils::math::{CheckedMath, OverflowError};
 
-
-
-/// Sweeps away the specified variables, treating them as the roots of garbage collection
+/// Potentially begin a garbage collection,
+/// treating the specified variables as the roots of garbage collection
 ///
 /// ## Safety
-/// This is completely safe because `possible_collection!` is,
+/// This is completely safe because `possible_collection` is,
 /// and it operates in terms of that macro's abstractions.
 /// In other words `safepoint!(collector, first, second)` directly expands to
 /// ````
-/// let (first, second) = possible_collection
+/// let (first, second) = possible_collection!(collector, first, second);
 /// ````
-/// This tricks the garbage collector into thinking the when really they're
+#[macro_export]
 macro_rules! safepoint {
-    ($collector:expr) => {
-
+    ($collector:expr, $($var:ident),*) => {
+        possible_collection($collector, $($var),*)
     };
 }
 
@@ -200,9 +199,9 @@ pub struct GarbageCollector {
     /// Counts the number of safepoints, to give them all unique ids
     safepoint_counter: IdCounter<u64>,
     /// The currently active safepoint, which needs to be finished before we can start a new one.
-    current_safepoint: Option<SafepointId>,
+    current_safepoint: Cell<Option<SafepointId>>,
     /// The threshold before we need to consider garbage collection.
-    collection_threshold: usize,
+    collection_threshold: Cell<usize>,
     marker: PhantomData<*mut ()>,
 }
 
@@ -217,8 +216,8 @@ impl GarbageCollector {
             }),
             heap: RefCell::new(GcHeap::with_capacity(config.initial_heap)),
             safepoint_counter: IdCounter::new(),
-            current_safepoint: None,
-            collection_threshold: ((config.initial_heap as f64) / config.collection_threshold).ceil() as usize,
+            current_safepoint: Cell::new(None),
+            collection_threshold: Cell::new(((config.initial_heap as f64) / config.collection_threshold).ceil() as usize),
             marker: PhantomData,
         }
     }
@@ -253,7 +252,7 @@ impl GarbageCollector {
         let state = unsafe { self.assume_allocating() };
         let mut heap = self.heap.borrow_mut();
         if heap.can_alloc(GcHeap::size_of::<T>()) {
-            self.expand_heap(&mut *heap, GcHeap::size_of::<T>())?;
+            self.expand_heap(&mut *heap, GcHeap::size_of::<T>());
         }
         unsafe {
             Ok(Gc::new(heap.try_alloc(state.expected_header, value)?))
@@ -262,12 +261,12 @@ impl GarbageCollector {
     #[cold]
     #[inline(never)]
     fn expand_heap(&self, heap: &mut GcHeap, additional_capacity: usize) {
-        assert_eq!(self.current_safepoint, None, "Safepoint in progress!");
+        assert_eq!(self.current_safepoint.get(), None, "Safepoint in progress!");
         if let Ok(increased_capacity) = self.config.compute_capacity(heap.current_size(), additional_capacity) {
             assert!(increased_capacity >= heap.limit);
             heap.limit = increased_capacity;
-            self.collection_threshold = ((increased_capacity as f64) /
-                self.config.collection_threshold).ceil() as usize
+            self.collection_threshold.set(((increased_capacity as f64) /
+                self.config.collection_threshold).ceil() as usize);
         }
     }
     /// Trace the specified value, preventing it from being destroyed by garbage collection.
@@ -306,9 +305,9 @@ impl GarbageCollector {
     ///
     /// Panics if a safepoint was already in progress, but hasn't been finished yet.
     #[inline]
-    pub fn initialize_safepoint<'unm, T>(&self, value: T) -> SafepointBag<'unm, T>
+    pub fn initialize_safepoint<'unm, T>(&mut self, value: T) -> SafepointBag<'unm, T>
         where T: GarbageCollected + GcErase<'unm> {
-        assert_eq!(self.current_safepoint, None, "Safepoint already in progress");
+        assert_eq!(self.current_safepoint.get(), None, "Safepoint already in progress");
         let id = SafepointId {
             collector: self.id,
             id: self.safepoint_counter.try_next().expect("Too many safepoints"),
@@ -318,7 +317,7 @@ impl GarbageCollector {
             id, state: SafepointState::Initialized,
             marker: PhantomData
         };
-        self.current_safepoint = Some(bag.id);
+        self.current_safepoint.set(Some(bag.id));
         bag
     }
     /// Activate a safepoint on this garbage collector, potentially collecting garbage
@@ -333,14 +332,14 @@ impl GarbageCollector {
     pub fn activate_safepoint<'unm, T>(
         &mut self, safepoint: &mut SafepointBag<'unm, T>
     ) where T: GarbageCollected + GcErase<'unm> {
-        assert_eq!(self.current_safepoint, Some(safepoint.id), "Unexpected safepoint");
+        assert_eq!(self.current_safepoint.get(), Some(safepoint.id), "Unexpected safepoint");
         /*
          * Now that we know this is a valid request and it'd be safe to collect,
          * we'll decide if it'd be worthwhile to perform a collection.
          * In other words, this is just an opprotunity for garbage collection,
          * not an actual demand that we perform it right now.
          */
-        if self.heap.borrow().current_size() >= self.collection_threshold {
+        if self.heap.borrow().current_size() >= self.collection_threshold.get() {
             let value = safepoint.begin_collection();
             unsafe {
                 self.perform_collection(value)
@@ -357,9 +356,9 @@ impl GarbageCollector {
     #[inline]
     pub fn finish_safepoint<'gc, 'unm, T>(&'gc self, safepoint: &mut SafepointBag<'unm, T>) -> T::Corrected
         where 'gc: 'unm, T: GarbageCollected + GcUnErase<'gc, 'unm> {
-        assert_eq!(self.current_safepoint, Some(safepoint.id), "Unexpected safepoint");
+        assert_eq!(self.current_safepoint.get(), Some(safepoint.id), "Unexpected safepoint");
         let result = safepoint.consume();
-        self.current_safepoint = None;
+        self.current_safepoint.set(None);
         unsafe { result.unerase() }
     }
     /// Update the trace of the specified garbage collected object,
@@ -370,7 +369,7 @@ impl GarbageCollector {
     /// otherwise we can do the fast-path since we've already traced the pointer.
     #[cold]
     #[inline(never)]
-    unsafe fn update_trace<T: GarbageCollected>(&mut self, value: &GcObject<T>) {
+    unsafe fn update_trace<T: GarbageCollected>(&mut self, value: &mut GcObject<T>) {
         /*
          * TODO: Is this panic safe or do we need a `defer!` guard to cleanup?.
          * I don't think we need to unless we decide to be `Send`/`Sync`,
@@ -397,6 +396,7 @@ impl GarbageCollector {
             expected_header, updated_header
         });
         self.trace(value);
+        self.heap.get_mut().sweep(updated_header, expected_header);
     }
     #[inline]
     fn is_tracing(&self) -> bool {
@@ -406,9 +406,9 @@ impl GarbageCollector {
         }
     }
     #[inline]
-    unsafe fn assume_tracing(&self) -> &TracingState {
+    unsafe fn assume_tracing(&mut self) -> &mut TracingState {
         match self.state {
-            GarbageCollectorState::Tracing(ref tracing) => tracing,
+            GarbageCollectorState::Tracing(ref mut tracing) => tracing,
             GarbageCollectorState::Allocating(_) => debug_unreachable(),
         }
     }
@@ -527,7 +527,7 @@ impl<'gc, T: ?Sized + GarbageCollected + 'gc> Gc<'gc, T> {
     /// Dark magic and evil pointer casts are performed to turn the pointer back into a `GcObject`,
     /// so you're assuming that this is valid to perform.
     #[inline]
-    unsafe fn new(value: Shared<T>) -> Gc<'gc, T> {
+    unsafe fn new(value: NonNull<T>) -> Gc<'gc, T> {
         Gc { ptr: &*value.as_ptr() }
     }
     #[inline(always)]
@@ -539,9 +539,9 @@ impl<'gc, T: ?Sized + GarbageCollected + 'gc> Gc<'gc, T> {
     /// This is safe to perform, since the wrapper can only be created by a `GarbageCollector`,
     /// which guarantees that this is part of a `GcObject`
     #[inline]
-    fn object_ptr(self) -> Shared<GcObject<T>> {
+    fn object_ptr(&self) -> NonNull<GcObject<T>> where T: Sized {
         unsafe {
-            GcObject::from_value_ptr(Shared::from(self.ptr))
+            GcObject::from_value_ptr(NonNull::from(self.ptr))
         }
     }
 }
@@ -627,7 +627,6 @@ pub unsafe trait GarbageCollected {
     /// - Reading your own memory (includes iteration)
     ///   - Interior mutation is undefined behavior, even if you use `GcCell`
     /// - Calling `GarbageCollector::trace` with the specified collector
-    ///   - Calling this with any other .
     ///   - `GarbageCollector::trace` already verifies that it owns the data, so you don't need to do that
     /// - Panicking
     ///   - This should be reserved for cases where you are seriously screwed up,
@@ -661,7 +660,8 @@ unsafe impl<'gc, T: GarbageCollected + 'gc> GarbageCollected for Gc<'gc, T> {
 
     #[inline]
     unsafe fn raw_trace(&self, collector: &mut GarbageCollector) {
-        let object = self.object_ptr().as_mut();
+        let mut object = self.object_ptr();
+        let object = object.as_mut();
         let tracing = collector.assume_tracing();
         if object.header != tracing.updated_header {
             // Only update this pointer if we haven't done it already

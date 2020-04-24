@@ -1,4 +1,5 @@
-use num_traits::{PrimInt, NumCast, ToPrimitive};
+use num_traits::{PrimInt, NumCast};
+use std::fmt::Debug;
 
 /// Internal utility trait for performing checked arithmetic on primitive integers.
 ///
@@ -6,22 +7,14 @@ use num_traits::{PrimInt, NumCast, ToPrimitive};
 /// and we have some utility methods like `ceil_divide`.
 /// I would gladly accept a PR to use them instead,
 /// if one of their methods elegantly covers my use cases.
-pub trait CheckedMath: Copy + NumCast + PrimInt {
-    #[inline]
-    fn from<T: ToPrimitive>(value: T) -> Result<Self, OverflowError> {
-        Self::from(value).ok_or(OverflowError)
-    }
-    #[inline]
-    fn into<T: CheckedMath>(self) -> Result<T, OverflowError> {
-        T::from(self)
-    }
+pub trait CheckedMath: Copy + NumCast + PrimInt + Debug {
     #[inline]
     fn add(self, other: Self) -> Result<Self, OverflowError> {
-        self.checked_add(other).ok_or(OverflowError)
+        self.checked_add(&other).ok_or(OverflowError)
     }
     #[inline]
     fn sub(self, other: Self) -> Result<Self, OverflowError> {
-        self.checked_sub(other).ok_or(OverflowError)
+        self.checked_sub(&other).ok_or(OverflowError)
     }
 
     /// Divide this number by `divisor`, rounding the result upwards
@@ -42,7 +35,8 @@ pub trait CheckedMath: Copy + NumCast + PrimInt {
     fn round_up_checked(self, increment: Self) -> Result<Self, OverflowError> {
         assert_ne!(increment, Self::zero(), "Division by zero!");
         // Exact same addition described in `ceil_divide`
-        let rounded_up = self.checked_add(increment - Self::one())?;
+        let rounded_up = self.checked_add(&(increment - Self::one()))
+            .ok_or(OverflowError)?;
         /*
          * This is the 'remainder' of what we would get by the addition in `ceil_divide`,
          * and we `rounded_up - rounding_remainder` value in order to properly ceil.

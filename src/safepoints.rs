@@ -29,11 +29,11 @@ use std::marker::PhantomData;
 /// since we only want to allow one safepoint (and one set of roots) to be considered active at a time.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SafepointId {
-    collector: CollectorId,
-    id: u64,
+    pub(crate) collector: CollectorId,
+    pub(crate) id: u64,
 }
 
-/// Carries a garbage collected value `T` across a safepoint safely,
+/// Carries a set of garbage collected value `T` across a safepoint,
 /// by treating it as the roots of potential garbage collection.
 ///
 /// All objects that need to survive the safepoint and are put in a `SafepointBag`,
@@ -89,14 +89,14 @@ pub struct SafepointBag<'unm, T: GarbageCollected + 'unm> {
     /// the user can explicitly recover the value with `finish_safepoint` at the proper time.
     /// This is the only way the value can be safely recovered by the user,
     /// and any other way will leak the value without dropping it.
-    value: ManuallyDrop<T>,
+    pub(crate) value: ManuallyDrop<T>,
     /// The dynamically tracked state of this bag,
     /// in order to ensure collections only happen once per safepoint.
-    state: SafepointState,
+    pub(crate) state: SafepointState,
     /// This magical marker makes our lifetime invariant.
     ///
     /// This whole bleeping thing is so confusing I just wish we could explicitly express our intent.
-    marker: PhantomData<*mut &'unm ()>,
+    pub(crate) marker: PhantomData<*mut &'unm ()>,
 }
 impl<'unm, T: GarbageCollected + 'unm> SafepointBag<'unm, T> {
     /// Give the globally unique id of this safepoint.
@@ -105,20 +105,16 @@ impl<'unm, T: GarbageCollected + 'unm> SafepointBag<'unm, T> {
         self.id
     }
     #[inline]
-    pub(crate) fn state(&self) -> SafepointState {
-        self.state
-    }
-    #[inline]
-    pub(crate) fn begin_collection(&mut self) -> &mut T {
+    pub fn begin_collection(&mut self) -> &mut T {
         self.state.update_state(SafepointState::Initialized, SafepointState::CollectionInProgress);
         &mut *self.value
     }
     #[inline]
-    pub(crate) fn finish_collection(&mut self) {
+    pub fn finish_collection(&mut self) {
         self.state.update_state(SafepointState::CollectionInProgress, SafepointState::Completed);
     }
     #[inline]
-    pub(crate) fn ignore_collection(&mut self) {
+    pub fn ignore_collection(&mut self) {
         self.state.update_state(SafepointState::Initialized, SafepointState::Completed);
     }
     /// Consumes ownership of the value,
@@ -135,7 +131,7 @@ impl<'unm, T: GarbageCollected + 'unm> SafepointBag<'unm, T> {
     /// Therefore, the value can safely have two physical owners,
     /// since the one in the safepoint is never used again.
     #[inline]
-    pub(crate) fn consume(&mut self) -> T {
+    pub fn consume(&mut self) -> T {
         self.state.update_state(SafepointState::Completed, SafepointState::Consumed);
         unsafe {
             ptr::read(&*self.value)
@@ -261,7 +257,9 @@ macro_rules! unsafe_erase {
 
             #[inline]
             unsafe fn erase(self) -> Self::Erased {
-                ::std::mem::transmute(self)
+                let erased = ::std::mem::transmute_copy(&self);
+                std::mem::forget(self);
+                erased
             }
         }
         unsafe impl<'unm: 'gc, 'gc, $($param),*> $crate::safepoints::GcUnErase<'unm, 'gc> for $target<$($param),*>
@@ -270,7 +268,9 @@ macro_rules! unsafe_erase {
 
             #[inline]
             unsafe fn unerase(self) -> Self::Corrected {
-                ::std::mem::transmute(self)
+                let unerased = ::std::mem::transmute_copy(&self);
+                std::mem::forget(self);
+                unerased
             }
         }
     };
@@ -303,7 +303,6 @@ pub unsafe trait GcErase<'unm>: GarbageCollected {
     /// The reason we can't just transmute the types in the first place,
     /// is because of the stupid lint that tells me we that `mem::transmute::<Self, Self::Erased>`
     /// might be invalid because the types aren't nessciarrly the same size.
-    /// Stop telling me what to do stupid compiler, all I'm trying to do is shoot myself in the foot!
     unsafe fn erase(self) -> Self::Erased;
 }
 

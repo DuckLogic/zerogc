@@ -10,7 +10,7 @@ use {GarbageCollected, GarbageCollector};
 /// Unlike a regular `Cell` this type implements `GarbageCollected`,
 /// and may eventually have read/write barriers.
 #[derive(Default, Clone, Debug)]
-pub struct GcCell<T: GarbageCollected>(Cell<T>);
+pub struct GcCell<T: GarbageCollected + Copy>(Cell<T>);
 impl<T: GarbageCollected + Copy> GcCell<T> {
     #[inline]
     pub fn new(value: T) -> Self {

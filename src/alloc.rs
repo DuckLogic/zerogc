@@ -1,6 +1,5 @@
 use std::mem;
-use std::ptr::Shared;
-use std::any::Any;
+use std::ptr::NonNull;
 
 use super::{GarbageCollected, CollectorId, GarbageCollector, GcMemoryError};
 
@@ -10,7 +9,7 @@ pub struct GcHeader(u32);
 impl GcHeader {
     #[inline]
     pub fn new(collector_id: CollectorId, mark: bool) -> Self {
-        GcHeader(collector_id.0 << 16 | (if mark { 1 } else { 0 }))
+        GcHeader((collector_id.0 as u32) << 16 | (if mark { 1 } else { 0 }))
     }
     /// The header's lowest mark bit.
     ///
@@ -34,10 +33,6 @@ impl GcHeader {
     pub fn flipped_mark(self) -> GcHeader {
         GcHeader(self.0 ^ 1)
     }
-    #[inline]
-    pub fn verify_collector(self, collector: u16) {
-        assert_eq!(self.collector_id(), collector, "Wrong garbage collector!")
-    }
     /// The integer id of the collector,
     /// filling the top 16 bits of the header.
     #[inline]
@@ -51,32 +46,36 @@ pub struct GcObject<T: ?Sized + GarbageCollected> {
     pub header: GcHeader,
     pub value: T
 }
+impl<T: GarbageCollected> GcObject<T> {
+    #[inline]
+    pub fn new(header: GcHeader, value: T) -> Box<Self> {
+        Box::new(GcObject { value, header })
+    }
+    #[inline]
+    pub unsafe fn from_value_ptr(value: NonNull<T>) -> NonNull<GcObject<T>> {
+        // Pointer arithmetic to retrieve the header of the object
+        let ptr = (value.as_ptr() as *mut u8)
+            .sub(mem::size_of::<GcHeader>());
+        // Cast it back into a `GcObject`
+        NonNull::new_unchecked(ptr as *mut GcObject<T>)
+    }
+    /// Erase the type information for this object (turning into an unsized type)
+    ///
+    /// This also erases all lifetime information to `'static`, making it unsafe
+    #[inline]
+    pub unsafe fn erased(self: Box<Self>) -> ErasedGcObject {
+        let temp_lifetime = self as Box<GcObject<dyn DynGarbageCollected + '_>>;
+        std::mem::transmute::<Box<GcObject<dyn DynGarbageCollected + '_>>, Box<GcObject<dyn DynGarbageCollected + 'static>>>(temp_lifetime)
+    }
+}
 impl<T: ?Sized + GarbageCollected> GcObject<T> {
     #[inline]
     pub fn size(&self) -> usize {
         // Remember to keep this consistent with `GcHeap::size_of`
         mem::size_of_val(self)
     }
-    #[inline]
-    pub fn new(header: GcHeader, value: T) -> Box<Self> {
-        Box::new(GcObject { value, header })
-    }
-    #[inline]
-    pub unsafe fn from_value_ptr(value: Shared<T>) -> Shared<GcObject<T>> {
-        // Pointer arithmetic to retrieve the header of the object
-        let ptr = (value.as_ptr() as *mut u8)
-            .offset(-(mem::size_of::<GcHeader>() as isize));
-        // Cast it back into a `GcObject`
-        Shared::from((ptr as *mut GcObject<T>))
-    }
-
-    #[inline]
-    pub fn erased(self: Box<Self>) -> ErasedGcObject {
-        self // This works because of coersion
-    }
-
 }
-pub type ErasedGcObject = Box<GcObject<AnyGcAssumed>>;
+pub type ErasedGcObject = Box<GcObject<dyn DynGarbageCollected>>;
 
 pub struct GcHeap {
     values: Vec<ErasedGcObject>,
@@ -116,33 +115,36 @@ impl GcHeap {
         requested <= self.remaining()
     }
     #[inline]
-    pub fn try_alloc<T>(&mut self, header: GcHeader, value: T) -> Result<Shared<T>, GcMemoryError> {
+    pub fn try_alloc<T>(&mut self, header: GcHeader, value: T) -> Result<NonNull<T>, GcMemoryError>
+        where T: GarbageCollected {
         if self.can_alloc(GcHeap::size_of::<T>()) {
-            Ok(self.force_alloc(header, value))
+            Ok(self.force_alloc(header, value)?)
         } else {
             Err(GcMemoryError::new(mem::size_of::<T>(), self.remaining()))
         }
     }
     #[inline]
-    pub fn force_alloc<T>(&mut self, header: GcHeader, value: T) -> Result<Shared<T>, GcMemoryError> {
+    pub fn force_alloc<T>(&mut self, header: GcHeader, value: T) -> Result<NonNull<T>, GcMemoryError>
+        where T: GarbageCollected {
         let object = GcObject::new(header, value);
-        let ptr = Shared::from(&object.value);
-        self.values.push(object.erased());
-        self.size += object.size();
+        let ptr = NonNull::from(&object.value);
+        let size = object.size();
+        self.values.push(unsafe { object.erased() /* NOTE: Erases lifetimes */ });
+        self.size += size;
         Ok(ptr)
     }
-    pub fn sweep(&mut self, keep: GcHeader, destroy: GcHeader) -> bool {
+    pub fn sweep(&mut self, keep: GcHeader, destroy: GcHeader) {
         assert_eq!(keep.collector_id(), destroy.collector_id());
         assert_ne!(keep.mark(), destroy.mark());
-        let mut size = &mut self.size;
         debug_assert_eq!(self.size, self.compute_size());
+        let size = &mut self.size;
         self.values.retain(|object| {
             if object.header != keep {
                 debug_assert_eq!(object.header, destroy);
                 *size -= object.size();
-                true
-            } else {
                 false
+            } else {
+                true
             }
         });
         debug_assert_eq!(self.size, self.compute_size());
@@ -152,19 +154,22 @@ impl GcHeap {
     }
 }
 
-
-/// Wrapper type for an `Any` trait object,
-/// indicating we're unsafely assuming it implements `GarbageCollected`.
-///
-/// The type should never actually be traced, and undefined behavior will occur if it does.
-pub struct AnyGcAssumed(Any);
-unsafe impl GarbageCollected for AnyGcAssumed {
-    /// It is undefined behavior to even consider invoking the trace function.
+#[doc(hidden)]
+pub unsafe trait DynGarbageCollected {
+    unsafe fn raw_trace(&self, collector: &mut GarbageCollector);
+}
+unsafe impl<T: ?Sized + GarbageCollected> DynGarbageCollected for T {
+    unsafe fn raw_trace(&self, collector: &mut GarbageCollector) {
+        GarbageCollected::raw_trace(self, collector)
+    }
+}
+unsafe impl<'a> GarbageCollected for dyn DynGarbageCollected + 'a {
+    /// We must conservatively assume that we need to be traced
     const NEEDS_TRACE: bool = true;
 
     #[inline]
     unsafe fn raw_trace(&self, collector: &mut GarbageCollector) {
-        unreachable!()
+        (self as &dyn DynGarbageCollected).raw_trace(collector)
     }
 }
 

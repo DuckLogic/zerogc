@@ -81,6 +81,7 @@ macro_rules! unsafe_trace_lock {
             #[inline]
             unsafe fn raw_trace(&self, target: &mut GarbageCollector) {
                 let $lock = self;
+                #[allow(unused_mut)]
                 let mut $guard = $acquire_guard;
                 let guard_value = $guard_value;
                 target.trace(guard_value);
@@ -204,7 +205,7 @@ macro_rules! unsafe_trace_iterable {
     ($target:ident, element = $element_type:ident) => {
         unsafe_trace_iterable!($target, element = &$element_type; $element_type);
     };
-    ($target:ident<$($param:p),*>; element = { $element_type:ty }) => {
+    ($target:ident<$($param:ident),*>; element = { $element_type:ty }) => {
         unsafe_erase!($target, $($param),*);
         unsafe impl<$($param),*> GarbageCollected for $target<$($param),*>
             where $($param: GarbageCollected),* {
@@ -212,9 +213,10 @@ macro_rules! unsafe_trace_iterable {
             const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
             #[inline]
             unsafe fn raw_trace(&self, target: &mut GarbageCollector) {
-                let iter = <&Self as IntoIterator<Item=$element_type>>::into_iter(self);
+                let iter = IntoIterator::into_iter(self);
                 for element in iter {
-                    target.trace(element)
+                    let element: $element_type = element;
+                    target.trace(&element)
                 }
             }
         }
@@ -249,7 +251,7 @@ macro_rules! unsafe_trace_primitive {
         unsafe impl GarbageCollected for $target {
             const NEEDS_TRACE: bool = false;
             #[inline(always)] // This method does nothing and is always a win to inline
-            unsafe fn raw_trace(&self, collector: &mut GarbageCollector) {}
+            unsafe fn raw_trace(&self, _collector: &mut GarbageCollector) {}
         }
     };
 }

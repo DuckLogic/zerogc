@@ -20,7 +20,6 @@ unsafe trait UncheckedCell<T> {
     unsafe fn unchecked_borrow_mut(&mut self) -> &mut T {
         &mut *self.as_ptr()
     }
-    #[inline]
     fn as_ptr(&self) -> *mut T;
 }
 unsafe impl<T> UncheckedCell<T> for Cell<T> {

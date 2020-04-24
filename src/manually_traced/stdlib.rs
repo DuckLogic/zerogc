@@ -5,15 +5,16 @@
 //! should go in this module.
 
 use ::{GarbageCollected, GarbageCollector};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::num::Wrapping;
 
 unsafe_trace_deref!(Vec, target = { &[T] }; T);
-unsafe_trace_iterable!(HashMap, element = { (&K, &V) }; K, V);
+unsafe_trace_iterable!(HashMap<K, V>; element = { (&K, &V) });
+unsafe_trace_iterable!(HashSet<V>; element = { &V });
 unsafe_trace_deref!(Box, target = T);
 unsafe_trace_deref!(Rc, target = T);
 unsafe_trace_deref!(Arc, target = T);
-/// We can trace `Wrapping` by simply tracing its interior
+// We can trace `Wrapping` by simply tracing its interior
 unsafe_trace_deref!(Wrapping, T; |wrapping| &wrapping.0);

@@ -20,7 +20,8 @@ macro_rules! trace_tuple {
              */
             const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
             #[inline]
-            unsafe fn raw_trace(&self, collector: &mut GarbageCollector) {
+            unsafe fn raw_trace(&self, #[allow(unused)] collector: &mut GarbageCollector) {
+                #[allow(non_snake_case)]
                 let ($(ref $param,)*) = *self;
                 $(collector.trace::<$param>($param);)*
             }
@@ -59,7 +60,7 @@ macro_rules! trace_array {
             const NEEDS_TRACE: bool = T::NEEDS_TRACE;
             #[inline]
             unsafe fn raw_trace(&self, collector: &mut GarbageCollector) {
-                collector.trace::<&[T]>(&*self);
+                collector.trace::<[T]>(self as &[T]);
             }
         }
     };
@@ -74,8 +75,8 @@ unsafe impl<'unm, T: GarbageCollected> GarbageCollected for &'unm [T] {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
     #[inline]
     unsafe fn raw_trace(&self, collector: &mut GarbageCollector) {
-        for element in self {
-            collector.trace
+        for element in *self {
+            collector.trace(element);
         }
     }
 }
@@ -105,8 +106,8 @@ unsafe impl<T: GarbageCollected> GarbageCollected for [T] {
 
     #[inline]
     unsafe fn raw_trace(&self, collector: &mut GarbageCollector) {
-        for value in collector {
-
+        for value in self {
+            collector.trace(value)
         }
     }
 }
