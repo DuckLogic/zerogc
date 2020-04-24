@@ -4,7 +4,7 @@
 //! but anything that requires the rest of the stdlib (including collections and allocations),
 //! should go in this module.
 
-use ::{GarbageCollected, GarbageCollector};
+use crate::{GarbageCollected, GarbageCollector};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;

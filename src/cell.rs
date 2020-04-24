@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell, Ref, RefMut};
 use std::ops::{Deref, DerefMut};
 
-use {GarbageCollected, GarbageCollector};
+use crate::{GarbageCollected, GarbageCollector};
 
 /// A `Cell` pointing to a garbage collected object.
 ///

@@ -5,7 +5,7 @@
 //! `RefCell` and `Cell` are intentionally ignored and do not have implementations,
 //! since you need to use their `GcRefCell` and `GcCell` counterparts.
 
-use {GarbageCollected, GarbageCollector};
+use crate::{GarbageCollected, GarbageCollector};
 
 macro_rules! trace_tuple {
     { $($param:ident)* } => {
