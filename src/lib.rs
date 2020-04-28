@@ -52,10 +52,8 @@ use std::ptr::NonNull;
 use std::ops::Deref;
 use std::marker::PhantomData;
 use std::cell::{RefCell, Cell, UnsafeCell};
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Display, Formatter, Debug};
 
-#[macro_use]
-pub mod safepoints;
 #[macro_use]
 mod manually_traced;
 mod alloc;
@@ -71,443 +69,130 @@ mod utils;
 use safepoints::{GcErase, GcUnErase};
 use utils::{AtomicIdCounter, debug_unreachable};
 use utils::math::{CheckedMath, OverflowError};
-use crate::alloc::DynGarbageCollected;
 
-/// Treat the specified variables as the roots of the garbage collector
+/// Indicate it's safe to begin a garbage collection,
+/// while keeping the specified root alive.
 ///
-/// The specified reference to the collector will be frozen at a safepoint,
-/// but a new reference to the collector will be created that you can continue allocating in.
+/// All other garbage collected pointers that aren't reachable from the root are invalidated.
+/// They have a lifetime that references the [GarbageCollectorRef]
+/// and the borrow checker considers the safepoint a 'mutation'.
+///
+/// The root is exempted from the "mutation" and rebound to the new lifetime.
 ///
 /// ## Example
-/// ````
-/// let (new_collector, root) = safepoint_recurse!(old_collector, root);
-/// ````
-#[macro_export]
-macro_rules! safepoint_recurse {
-    ($collector:expr, $value:expr) => {unsafe {
-        let mut collector = &mut $collector;
-        // TODO: Panic safety
-        let mut erased = $crate::safepoints::GcErase::erase($value);
-        let (system, frozen) = collector.freeze_safepoint(&mut erased);
-        let value = frozen.rebind_value();
-        (frozen.nested_collector(system), value)
-    }};
-}
-
-/// Potentially begin a garbage collection,
-///
-/// The specified objects are treated as the roots of the collection,
-/// invalidating all other garbage collected pointers by 'mutating' the collector.
+/// ```
+/// let root = safepoint!(collector, root);
+/// ```
 ///
 /// ## Safety
-/// This macro expansion operates in terms of completely safe abstractions,
-/// and expands to no unsafe code.
-/// It is the underlying abstraction behind `safepoint!`,
-/// which is recomended for clarity in most circumstances.
-/// This is because the borrow checker considers the old objects
-/// Once the safepoint is created on the specified collector `$collector`
-///
-/// However, the downside is the error messages from incorrectly using this will be incredibility cryptic,
-/// involving the invocation of hidden methods and hidden traits.
-/// Until documentation is written on these indecipherable error messages,
-/// you'll pretty much have to guess what is wrong with your code.
-/// However, you can rest assured that the abstractions invoked by this macro is completely safe,
-/// and all errors involving incorrect usage will be completely caught at compile time.
+/// This macro is completely safe, although it expands to unsafe code internally.
 #[macro_export]
 macro_rules! safepoint {
-    ($collector:expr, $value:expr) => {{
-        let (_new_collector, value) = safepoint_recurse!($collector, $value);
-        value
+    ($collector:ident, $value:expr) => {{
+        use std::mem::ManuallyDropped;
+        use $crate::{GarbageCollectorRef};
+        // TODO: What happens if we panic during a collection
+        let mut erased = GarbageCollectorRef::rebrand_static(&$collector, $value);
+        GarbageCollectorRef::basic_safepoint(&mut $collector, &mut erased);
+        GarbageCollectorRef::rebrand_self(&collector, erased)
     }};
 }
 
-/// Configures the garbage collector
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub struct GcConfig {
-    /// The initial size of the garbage collector's heap
-    pub initial_heap: usize,
-    /// The maximum size of the garbage collector's heap or `None` if unlimited.
-    ///
-    /// Attempting to go over this limit will trigger a panic.
-    pub maximum_heap: Option<usize>,
-    /// The threshold for collection-related things.
-    // TODO: Document and tune this better
-    pub collection_threshold: f64,
-}
-
-impl GcConfig {
-    #[inline]
-    pub fn new(initial_heap: usize, maximum_heap: Option<usize>) -> Self {
-        GcConfig {
-            initial_heap,
-            maximum_heap,
-            collection_threshold: 0.25,
-        }
-    }
-    fn validate(&self) {
-        if let Some(maximum_heap) = self.maximum_heap {
-            assert!(self.initial_heap <= maximum_heap);
-        }
-        assert!(
-            self.collection_threshold >= 0.0 && self.collection_threshold <= 1.0,
-            "Invalid collection threshold: {}",
-            self.collection_threshold
-        );
-    }
-    fn compute_capacity(&self, used_capacity: usize, additional_capacity: usize) -> Result<usize, OverflowError> {
-        let needed_capacity = used_capacity.add(additional_capacity)?;
-        let prefered_capacity = self.initial_heap.max(
-            needed_capacity.round_up_checked(self.initial_heap)?);
-        Ok(match self.maximum_heap {
-            Some(maximum_heap) => maximum_heap.min(prefered_capacity),
-            None => prefered_capacity
-        })
-    }
-}
-
-impl Default for GcConfig {
-    #[inline]
-    fn default() -> Self {
-        GcConfig::new(1024 * 1024, Some(8 * 1024 * 1024))
-    }
-}
-
-static COLLECTOR_COUNTER: AtomicIdCounter<u16> = AtomicIdCounter::new();
-
 /// The globally unique id of this garbage collector,
-/// which is used to brand everything this collector create.
+/// which is used to brand all garbage collected objects.
 ///
-/// We count these ids very carefully to ensure there are never any duplicates,
-/// and if we run out of ids creating a new collector will panic.
-/// This verifies that each object is being used with the proper collector,
-/// and not some other completely unexpected garbage collector.
+/// Some collectors may have multiple instances at runtime
+/// and this ensures that their objects don't get mixed up.
+/// Other collectors have a single global instance so they can just use a zero-sized type.
 ///
-/// This prevents garbage collected pointers from one collector being accidentally
-/// or intentionally used with an unexpected collector, which could cause undefined behavior.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-#[doc(hidden)]  // This is unstable
-pub struct CollectorId(u16);
-
-/// A completely safe, zero-overhead [garbage collector](https://en.wikipedia.org/wiki/Garbage_collection_\(computer_science\))
-/// for rust.
-///
-/// See module documentation for how to use this.
-pub struct GarbageCollectionSystem {
-    id: CollectorId,
-    config: GcConfig,
-    state: GarbageCollectorState,
-    heap: GcHeap,
-    /// The threshold before we need to consider garbage collection.
-    collection_threshold: usize,
-}
-
-impl GarbageCollectionSystem {
-    pub fn new(config: GcConfig) -> Self {
-        config.validate();
-        let id = CollectorId(COLLECTOR_COUNTER.try_next().expect("Too many collectors"));
-        GarbageCollectionSystem {
-            config: config.clone(),
-            id, state: GarbageCollectorState::Allocating(AllocationState {
-                expected_header: GcHeader::new(id, false)
-            }),
-            heap: GcHeap::with_capacity(config.initial_heap),
-            collection_threshold: ((config.initial_heap as f64) / config.collection_threshold).ceil() as usize,
+/// This also allows garbage collectors to perform call
+pub unsafe trait CollectorId: Copy + Eq + Debug {
+    #[inline(always)]
+    fn matches<T: CollectorId>(self, other: T) -> bool {
+        // NOTE: Type comparison will be constant after monomorphization
+        if TypeId::of::<Self>() == TypeId::of::<T> {
+            self == unsafe { mem::transmute::<T, Self>(other) }
+        } else {
+            false
         }
     }
+}
+
+/// A garbage collector implementation.
+///
+/// This is completely safe and zero-overhead.
+pub unsafe trait GarbageCollectionSystem {
+    type Id: CollectorId;
+
     /// Give the globally unique id of the collector.
     ///
-    /// This is guaranteed to be unique for two different collectors in the same process,
-    /// but not nessicarrily unique between different processes.
-    #[inline]
-    pub fn id(&self) -> CollectorId {
-        self.id
-    }
-    #[cold]
-    #[inline(never)]
-    fn expand_heap(&self, heap: &mut GcHeap, additional_capacity: usize) {
-        assert_eq!(self.current_safepoint.get(), None, "Safepoint in progress!");
-        if let Ok(increased_capacity) = self.config.compute_capacity(heap.current_size(), additional_capacity) {
-            assert!(increased_capacity >= heap.limit);
-            heap.limit = increased_capacity;
-            self.collection_threshold.set(((increased_capacity as f64) /
-                self.config.collection_threshold).ceil() as usize);
-        }
-    }
-    /// Trace the specified value, preventing it from being destroyed by garbage collection.
+    /// This must be unique for two different collectors in the same process,
+    /// but not necessarily unique between different processes.
+    fn id(&self) -> Self::Id;
+}
+
+/// A reference to a garbage collector,
+/// which can be frozen at a safepoint.
+///
+/// This is essentially used to maintain a reference to a set of roots,
+/// which are guarenteed not to be collected until a safepoint.
+///
+/// This reference doesn't necessarily support allocation (see `GcAllocatorRef` for that).
+pub trait GarbageCollectorRef {
+    type Id: CollectorId;
+    /// Inform the garbage collection system we are at a safepoint
+    /// and are ready for a potential garbage collection.
     ///
-    /// This method always ignores types that don't need to be garbage collected or traced.
-    ///
-    /// ## Safety
-    /// This method is unsafe, since it's completely undefined behavior to call it
-    /// unless the collector asks you to trace yourselves
-    ///
-    /// This method always verifies that it actually owns its input before tracing it,
-    /// so it's safe to call it even with garbage collected objects that you don't actually own.
-    /// The garbage collector optimistically assumes it owns the data it's tracing,
-    /// but we always check to make sure once we reach the pointers.
-    /// This is the equivelant of a bounds check for the pointers,
-    /// since there could be multiple garbage collectors
-    /// and the user accidentally allocated from the wrong one.
-    /// At that point we panic and stop collection,
-    /// leaving the collector in an unusable (but safe) state.
-    /*
-     * Forcibly inlining this is fine and should always improve code quality,
-     * since we just guard on a constant conditional then delegate to another method.
-     * In the worst case scenario, inlining adds extra `if false` or `if true` branches.
-     * However, even in debug builds constant branching should be completely removed.
-     * Therefore, even at zero optimization this should almost always be a net-win.
-     */
+    /// This method is unsafe, see the `safepoint!` macro for a safe wrapper.
+    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut T);
+
     #[inline(always)]
-    pub unsafe fn trace<T: ?Sized + GarbageCollected>(&mut self, value: &T) {
-        if T::NEEDS_TRACE {
-            debug_assert!(self.is_tracing());
-            T::raw_trace(value, self)
-        }
+    #[doc(hidden)]
+    unsafe fn rebrand_static<T: GcBrand<'static, Self::Id>>(&self, value: T) -> T::Branded {
+        mem::transmute(value)
     }
-    /// Update the trace of the specified garbage collected object,
-    /// tracing its innards if the object hasn't been traced yet.
-    ///
-    /// This is the fallback to 'lazily trace' garbage collected pointers,
-    /// so if we haven't seen this pointer yet we need to trace the innards,
-    /// otherwise we can do the fast-path since we've already traced the pointer.
-    #[cold]
-    #[inline(never)]
-    unsafe fn update_trace<T: GarbageCollected>(&mut self, value: &mut GcObject<T>) {
-        /*
-         * TODO: Is this panic safe or do we need a `defer!` guard to cleanup?.
-         * I don't think we need to unless we decide to be `Send`/`Sync`,
-         * since the mutable reference
-         */
-        let tracing = self.assume_tracing();
-        // This assert verifies we're using the
-        assert_eq!(value.header, tracing.expected_header);
-        value.header = tracing.updated_header;
-        // Trace the object's innards
-        value.value.raw_trace(self);
-    }
-
-    /// Forcibly trigger garbage collection,
-    /// if it decides there's work that we need to do in order to clean up.
-    ///
-    /// This is unsafe since it assumes the safepoint bag is valid.
-    #[cold]
-    #[inline(never)]
-    unsafe fn perform_collection<T: GarbageCollected>(&mut self, stack: &mut dyn GcStack) {
-        let expected_header = self.assume_allocating().expected_header;
-        let updated_header = expected_header.flipped_mark();
-        self.state = GarbageCollectorState::Tracing(TracingState {
-            expected_header, updated_header
-        });
-        self.trace(stack);
-        self.heap.get_mut().sweep(updated_header, expected_header);
-    }
-    #[inline]
-    fn is_tracing(&self) -> bool {
-        match self.state {
-            GarbageCollectorState::Tracing(_) => true,
-            GarbageCollectorState::Allocating(_) => false,
-        }
-    }
-    #[inline]
-    unsafe fn assume_tracing(&mut self) -> &mut TracingState {
-        match self.state {
-            GarbageCollectorState::Tracing(ref mut tracing) => tracing,
-            GarbageCollectorState::Allocating(_) => debug_unreachable(),
-        }
-    }
-    #[inline]
-    unsafe fn assume_allocating(&self) -> &AllocationState {
-        match self.state {
-            GarbageCollectorState::Tracing(_) => debug_unreachable(),
-            GarbageCollectorState::Allocating(ref allocating) => allocating,
-        }
+    #[inline(always)]
+    #[doc(hidden)]
+    unsafe fn rebrand_self<'a, T: GcBrand<'a, Self::Id>>(&'a self, value: T) -> T::Branded {
+        mem::transmute(self)
     }
 }
-
-/// As a precaution, prevent us from being `Send`.
-///
-/// At this point ,I haven't considered safepoint safety in the case where the collector is used by multiple threads by a lock.
-/// With a mutable reference for safepoint the user would never observe that state in single-threaded code.
-/// However in multithreaded code, we can't necessarily rely on locks poisoning and threads dying for safety.
-/// Alternative lock implementations like `antidote` and `parking_lot` are not guaranteed to poison.
-/// Before we do this, we need to seriously consider and discuss the safety of this change.
-/// I would need the guarantee that the collector is always in a valid state even after panics.
-impl !Send for GarbageCollectionSystem {}
-/// Both the collector and allocator are not designed to be shared between threads.
-///
-/// Sharing between threads wouldn't just have the `Send` problems for panic-safety,
-/// but allocation would also have trouble since it uses interior-mutability.
-impl !Sync for GarbageCollectionSystem {}
-
-/// A stack of `GarbageCollectorRef`s
-unsafe trait GcStack: DynGarbageCollected {}
-unsafe impl GcStack for () {}
-pub struct FrozenGc<'val, 'parent, T: GarbageCollected> {
-    parent: &'parent dyn GcStack,
-    safepoint_value: *mut T,
-    marker: PhantomData<&'val mut T>
-}
-impl<'val, 'parent, T: GarbageCollected> FrozenGc<'val, 'parent, T> {
-    #[inline]
-    pub unsafe fn nested_collector<'gc, 's>(&'gc self, system: &'s mut GarbageCollectionSystem) -> GarbageCollectorRef<'s, 'gc> {
-        GarbageCollectorRef {
-            system: RefCell::new(system),
-            parent: self
-        }
-    }
-    #[inline]
-    pub unsafe fn rebind_value<'gc>(&'gc self) -> &'gc T::Corrected where T: GcUnErase<'gc> {
-        /*
-         * NOTE: Because the marker trait is implemented,
-         * we know this pointer cast is safe
-         */
-        &*(self.safepoint_value as *const T)
-    }
-}
-unsafe impl<'val, 'parent, T: GarbageCollected> GarbageCollected for FrozenGc<'val, 'parent, T> {
-    const NEEDS_TRACE: bool = true;
-
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem) {
-        collector.trace(self.parent);
-        collector.trace(self.safepoint_value);
-    }
-}
-/// A reference to a garbage collector
-///
-/// References to garbage collectors can be nested,
-/// but only the bottom of the stack can be actively
-/// allocating new references.
-///
-/// All of the parents must still remain frozen if there's a safepoint.
-pub struct GarbageCollectorRef<'s, 'parent> {
-    parent: &'parent mut dyn GcStack,
-    system: RefCell<&'s mut GarbageCollectionSystem>,
-}
-impl<'s, 'parent> GarbageCollectorRef<'s, 'parent> {
+pub trait GcAllocatorRef: GarbageCollectorRef {
+    type MemoryErr;
     /// Allocate the specified object in this garbage collector,
-    /// binding it to the lifetime of this collector..
+    /// binding it to the lifetime of this collector.
     ///
-    /// Collections will never happen until the next safepoint,
+    /// The object will never be collecterd until the next safepoint,
     /// which is considered a mutation by the borrow checker and will be statically checked.
     /// Therefore, we can statically guarantee the pointers will survive until the next safepoint.
-    /// See `safepoint!` docs on how to properly handle this.
+    ///
+    /// See `safepoint!` docs on how to properly invoke a safepoint
+    /// and transfer values across it.
     ///
     /// This gives a immutable reference to the resulting object.
     /// Once allocated, the object can only be correctly modified with a `GcCell`
-    #[inline]
-    pub fn alloc<T: GarbageCollected>(&self, value: T) -> Gc<T> {
-        self.try_alloc(value).unwrap_or_else(|e| e.fail())
-    }
-    #[inline]
-    pub fn try_alloc<T: GarbageCollected>(&self, value: T) -> Result<Gc<T>, GcMemoryError> {
-        let mut system = self.system.borrow_mut();
-        /*
-         * This is safe, because the alternative state is tracing,
-         * and it's already considered undefined behavior to allocate while tracing.
-         */
-        let state = unsafe { system.assume_allocating() };
-        if !system.heap.can_alloc(GcHeap::size_of::<T>()) {
-            system.expand_heap(&mut system.heap, GcHeap::size_of::<T>());
-        }
-        unsafe {
-            Ok(Gc::new(system.heap.try_alloc(state.expected_header, value)?))
-        }
-    }
-    #[inline]
-    pub unsafe fn freeze_safepoint<'gc, 'val, T>(&'gc mut self, value: &'val mut T)
-        -> (&'s mut GarbageCollectionSystem, FrozenGc<'val, 'parent, T>)
-        where T: GarbageCollected {
-        let mut frozen = FrozenGc {
-            parent: self.parent,
-            safepoint_value: value,
-            marker: PhantomData
-        };
-        let system = self.system.get_mut();
-        system.perform_collection(&mut frozen);
-        (system, frozen)
-    }
-}
-
-enum GarbageCollectorState {
-    Tracing(TracingState),
-    Allocating(AllocationState)
-}
-
-struct AllocationState {
-    expected_header: GcHeader
-}
-
-struct TracingState {
-    expected_header: GcHeader,
-    updated_header: GcHeader
-}
-
-/// An error indicating that attempting to allocate a garbage collected type failed,
-/// because there wasn't enough memory available to satisfy the request.
-///
-/// By default encountering this error in `alloc` will trigger a panic,
-/// but it can be explicitly handled with `try_alloc`.
-#[derive(Debug, Clone)]
-pub struct GcMemoryError {
-    requested: usize,
-    available: usize,
-}
-impl GcMemoryError {
-    #[inline]
-    fn new(requested: usize, available: usize) -> Self {
-        assert!(requested < available);
-        GcMemoryError { requested, available }
-    }
-    /// Treat this allocation failure as a fatal error,
-    /// and panic with a descriptive error message.
-    ///
-    /// This should be prefered over `unwrap_err`,
-    /// since the error message is somewhat nicer.
-    /// However, since this takes ownership of the value,
-    /// you can simply call `unwrap_or_else(|e| e.fail())`
-    #[cold] #[inline(never)]
-    pub fn fail(self) -> ! {
-        panic!("{}", self)
-    }
-    /// The number of bytes of available memory
-    #[inline]
-    pub fn available(&self) -> usize {
-        self.available
-    }
-    /// The number of bytes of requested memory
-    #[inline]
-    pub fn requested(&self) -> usize {
-        self.requested
-    }
-}
-impl Display for GcMemoryError {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Out of memory: Unable to allocate {} bytes, since only {} bytes available",
-            self.requested, self.available)
-    }
-}
-impl ::std::error::Error for GcMemoryError {
-    #[inline]
-    fn description(&self) -> &str {
-        "Out of memory: GC"
-    }
+    fn alloc<T: GcSafe>(&self, value: T) -> Gc<T, Self::Id>;
+    /// Same as `alloc`, but return an error instead of panicing on failure
+    fn try_alloc<T: GcSafe>(&self, value: T) -> Result<Gc<T>, Self::MemoryErr>;
 }
 
 /// A garbage collected pointer to a value.
 ///
-/// This should be considered the equivelant of a garbage collected smart-pointer.
-/// It's so smart, you can even coerce it to a reference bound to the lifetime of the garbage collector.
-/// However, all those references are invalidated by the borrow checker as soon as a safepoint
-/// is called, and they can only survive garbage collection if they live in this smart-pointer.
+/// This is the equivalent of a garbage collected smart-pointer.
+/// It's so smart, you can even coerce it to a reference bound to the lifetime of the `GarbageCollectorRef`.
+/// However, all those references are invalidated by the borrow checker as soon as
+/// your reference to the collector reaches a safepoint.
+/// The objects can only survive garbage collection if they live in this smart-pointer.
 ///
-/// The smart pointer is simply a guarantees to the garbage collector
+/// The smart pointer is simply a guarantee to the garbage collector
 /// that this points to a garbage collected object with the correct header,
 /// and not some arbitrary bits that you've decided to heap allocate.
 #[derive(PartialEq, Eq, PartialOrd, Ord, )]
-pub struct Gc<'gc, T: GarbageCollected + ?Sized + 'gc> {
-    ptr: &'gc T
+pub struct Gc<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> {
+    id: Id,
+    ptr: UnsafeCell<NonNull<T>>
 }
-impl<'gc, T: ?Sized + GarbageCollected + 'gc> Gc<'gc, T> {
+impl<'gc, T: ?Sized + GarbageCollected, Id: CollectorId> Gc<'gc, T, Id> {
     /// Create a new garbage collected pointer to the specified value.
     ///
     /// ## Safety
@@ -518,60 +203,68 @@ impl<'gc, T: ?Sized + GarbageCollected + 'gc> Gc<'gc, T> {
     /// and included .
     /// Dark magic and evil pointer casts are performed to turn the pointer back into a `GcObject`,
     /// so you're assuming that this is valid to perform.
-    #[inline]
-    unsafe fn new(value: NonNull<T>) -> Gc<'gc, T> {
-        Gc { ptr: &*value.as_ptr() }
-    }
     #[inline(always)]
-    pub fn value(self) -> &'gc T {
-        self.ptr
+    pub unsafe fn new(id: Id, ptr: NonNull<T>) -> Self {
+        Gc { id, ptr: UnsafeCell::new(ptr) }
     }
-    /// View a pointer to the underlying `GcObject`.
-    ///
-    /// This is safe to perform, since the wrapper can only be created by a `GarbageCollector`,
-    /// which guarantees that this is part of a `GcObject`
     #[inline]
-    fn object_ptr(&self) -> NonNull<GcObject<T>> where T: Sized {
-        unsafe {
-            GcObject::from_value_ptr(NonNull::from(self.ptr))
-        }
+    pub fn value(self) -> &'gc T {
+        unsafe { self.ptr.into_inner().as_ref() }
     }
 }
-/// In the glorious future where we have a copying collector,
-/// we may need to use a `Cell` to allow changing the location of the pointer.
-///
-/// Therefore, we don't want a sync implementation to bind future versions to thread-safety.
-impl<'gc, T: GarbageCollected + 'gc> !Sync for Gc<'gc, T> {}
-impl<'gc, T: ?Sized + GarbageCollected + 'gc> Deref for Gc<'gc, T> {
+impl<'gc, T: ?Sized + GcSafe, Id: CollectorId> Deref for Gc<'gc, T, Id> {
     type Target = &'gc T;
 
     #[inline(always)]
     fn deref(&self) -> &&'gc T {
-        &self.ptr
+        &self.value()
     }
 }
-impl<'gc, T: GarbageCollected> Clone for Gc<'gc, T> {
+impl<'gc, T: GcSafe + ?Sized, Id: CollectorId> Clone for Gc<'gc, T, Id> {
     #[inline(always)]
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<'gc, T: GarbageCollected> Copy for Gc<'gc, T> {}
+impl<'gc, T: GcSafe + ?Sized, Id: CollectorId> Copy for Gc<'gc, T, Id> {}
+unsafe impl<'gc, 'new_gc, T, Id> GcBrand<'new_gc, Id> for Gc<'gc, T, Id>
+    where T: GcSafe + ?Sized + GcBrand<'new_gc, Id>,
+          Id: CollectorId {
+    type Branded = Gc<'new_gc, T::Branded, Id>;
+}
 
-/// Indicates that a type can be garbage collected,
-/// and properly traced by the `GarbageCollector`.
+/// Indicates that a type can be safely allocated by a garbage collector.
 ///
 /// ## Safety
-/// See the documentation of the `trace`
-/// In order to make garbage collected types always safe to deallocate,
-/// you can't have custom destructors that reference garbage collected pointers.
-/// The garbage collector assumes that dropping objects never does this,
-/// giving the implementation much more freedom than with java finalizers.
+/// Custom destructors must never reference garbage collected pointers.
+/// The garbage collector may have already freed the other objects
+/// before calling this type's drop function.
 ///
+/// Unlike java finalizers, this allows us to deallocate objects normally
+/// and avoids a second pass over the objects
+/// to check for resurrected objects.
+pub unsafe trait GcSafe: Trace {}
+
+/// Changes all references to garbage
+/// collected objects to match `'new_gc`.
 ///
-/// However, attempting to allocate or mutate garbage collected objects are always considered undefined behavior.
-/// Additionally drop functions are forbidden
-pub unsafe trait GarbageCollected {
+/// This indicates that its safe to transmute to the new `Branded` type
+/// and all that will change is the lifetimes.
+///
+/// Only pointers with the collector id type `Id` will have their lifetime changed.
+pub unsafe trait GcBrand<'new_gc, Id: CollectorId> {
+    type Branded: ?Sized + 'new_gc;
+}
+
+/// Indicates that a type can be traced by a garbage collector.
+///
+/// This doesn't necessarily mean that the type is safe to allocate in a garbage collector ([GcSafe]).
+///
+/// ## Safety
+/// See the documentation of the `trace` method for more info.
+/// Essentially, this object must faithfully trace anything that
+/// could contain garbage collected pointers or other `Trace` items.
+pub unsafe trait Trace {
     /// Whether this type needs to be traced by the garbage collector.
     ///
     /// Some primitive types don't need to be traced at all,
@@ -590,20 +283,11 @@ pub unsafe trait GarbageCollected {
     /// The fields which don't need tracing will always ignored by `GarbageCollector::trace`,
     /// while the fields that do will be properly traced.
     ///
-    /// False negatives will always result in completely undefined behavior,
-    /// but false positives could possibly result in some unnecessary tracing.
+    /// False negatives will always result in completely undefined behavior.
+    /// False positives could result in unessicarry tracing, but are perfectly safe otherwise.
     /// Therefore, when in doubt you always assume this is true.
     const NEEDS_TRACE: bool;
-    /// Trace this object, directly delegating to `GarbageCollector::trace`
-    ///
-    /// This method is simply a utility required to delegate to `GarbgeCollector::trace`,
-    /// and overriding it is undefined behavior
-    #[inline(always)] // This always delegates, so inlining has zero cost
-    unsafe fn trace(&self, collector: &mut GarbageCollectionSystem) {
-        collector.trace::<Self>(self)
-    }
-    /// Used by the garbage collector to perform a raw trace on this type,
-    /// usually just tracing each of their fields.
+    /// Visit each
     ///
     /// Users should never invoke this method, and always use `GarbageCollector::trace` instead.
     /// Only the collector itself is premited to call this method,
@@ -625,7 +309,7 @@ pub unsafe trait GarbageCollected {
     /// ## Always Permitted
     /// - Reading your own memory (includes iteration)
     ///   - Interior mutation is undefined behavior, even if you use `GcCell`
-    /// - Calling `GarbageCollector::trace` with the specified collector
+    /// - Calling `GcVisitor::visit` with the specified collector
     ///   - `GarbageCollector::trace` already verifies that it owns the data, so you don't need to do that
     /// - Panicking
     ///   - This should be reserved for cases where you are seriously screwed up,
@@ -634,58 +318,40 @@ pub unsafe trait GarbageCollected {
     ///   - This rule may change in future versions, depending on how we deal with multi-threading.
     /// ## Never Permitted Behavior
     /// - Forgetting a element of a collection, or field of a structure
-    ///   - If you forget an element undefined behavior will result and I will make you `0xDEADBEEF`
-    ///   - This is honestly quite serious, since we have absolutely no way of knowing
-    ///     it's used and we may decide to destroy it
+    ///   - If you forget an element undefined behavior will result
     ///   - This is why we always prefer automatically derived implementations where possible.
     ///     - You will never trigger undefined behavior with an automatic implementation,
     ///       and it'll always be completely sufficient for safe code (aside from destructors).
     ///     - With an automatically derived implementation you will never miss a field,
-    ///       and a bug is will always be my fault not yours.
-    /// - Invoking this function directly, without using the wrapper `GarbageCollector::trace` function
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem);
+    /// - Invoking this function directly, without delegating to `GcVisitor`
+    unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err>;
 }
+
+/// Visits garbage collected objects
+///
+/// This should only be used by a [GarbageCollectionSystem]
+pub unsafe trait GcVisitor {
+    type Err;
+    fn visit<T: Trace>(&mut self, value: &T) -> Result<(), Err>;
+    /// Visit a garbage collected pointer
+    fn visit_gc<T, Id>(&mut self, gc: &Gc<'_, T, Id>) -> Result<(), V::Err>
+        where T: GcSafe + ?Sized, Id: CollectorId;
+}
+
+
 
 //
 // Fundamental implementations
 //
 
-unsafe impl<'gc, T: GarbageCollected + 'gc> GarbageCollected for Gc<'gc, T> {
-    /// Garbage collected pointers always need to be unconditionally traced.
-    ///
-    /// They are the whole reason we trace in the first place,
-    /// since we need to mark them as used to prevent them from being freed.
+/// Double indirection is safe (but usually stupid)
+unsafe impl<'gc, T: GcSafe + ?Sized, Id: CollectorId> GcSafe for Gc<'gc, T, Id> {}
+
+unsafe impl<'gc, T: GcSafe + ?Sized, Id: CollectorId> Trace for Gc<'gc, T, Id> {
     const NEEDS_TRACE: bool = true;
 
-    #[inline]
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem) {
-        let mut object = self.object_ptr();
-        let object = object.as_mut();
-        let tracing = collector.assume_tracing();
-        if object.header != tracing.updated_header {
-            // Only update this pointer if we haven't done it already
-            collector.update_trace(object)
-        }
-    }
-
-}
-
-unsafe impl<'gc, 'unm: 'gc, T: GarbageCollected> GcErase<'unm> for Gc<'gc, T>
-    where T: 'gc + GcErase<'unm> {
-    type Erased = Gc<'unm, T::Erased>;
-
-    #[inline]
-    unsafe fn erase(self) -> Self::Erased {
-        mem::transmute(self)
-    }
-}
-
-unsafe impl<'unm, 'gc, T> GcUnErase<'unm, 'gc> for Gc<'unm, T>
-    where 'unm: 'gc, T: GarbageCollected + GcUnErase<'unm, 'gc> {
-    type Corrected = Gc<'gc, T::Corrected>;
-
-    #[inline]
-    unsafe fn unerase(self) -> Self::Corrected {
-        mem::transmute(self)
+    #[inline(always)]
+    unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
+        visitor.visit_gc(self)
     }
 }
