@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell, Ref, RefMut};
 use std::ops::{Deref, DerefMut};
 
-use crate::{GarbageCollected, GarbageCollector};
+use crate::{GarbageCollected, GarbageCollectionSystem};
 
 /// A `Cell` pointing to a garbage collected object.
 ///
@@ -33,7 +33,7 @@ unsafe impl<T: GarbageCollected + Copy> GarbageCollected for GcCell<T> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
 
     #[inline]
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollector) {
+    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem) {
         collector.trace(&self.get());
     }
 }

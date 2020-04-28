@@ -1,7 +1,7 @@
 use std::mem;
 use std::ptr::NonNull;
 
-use super::{GarbageCollected, CollectorId, GarbageCollector, GcMemoryError};
+use super::{GarbageCollected, CollectorId, GarbageCollectionSystem, GcMemoryError};
 
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -156,10 +156,10 @@ impl GcHeap {
 
 #[doc(hidden)]
 pub unsafe trait DynGarbageCollected {
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollector);
+    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem);
 }
 unsafe impl<T: ?Sized + GarbageCollected> DynGarbageCollected for T {
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollector) {
+    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem) {
         GarbageCollected::raw_trace(self, collector)
     }
 }
@@ -168,7 +168,7 @@ unsafe impl<'a> GarbageCollected for dyn DynGarbageCollected + 'a {
     const NEEDS_TRACE: bool = true;
 
     #[inline]
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollector) {
+    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem) {
         (self as &dyn DynGarbageCollected).raw_trace(collector)
     }
 }

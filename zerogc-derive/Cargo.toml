@@ -5,11 +5,12 @@ authors = ["Techcable <Techcable@techcable.net>"]
 description = "Automaticatically derives code for zerogc"
 repository = "https://github.com/DuckLogic/zerogc"
 readme = "../README.md"
-license = "MIT"
+edition = "2018"
 
 [lib]
 proc-macro = true
 
 [dependencies]
-syn = "^0.11.11"
-quote = "^0.3.15"
+syn = { version = "1.0.18", feature = ["clone-impls"] }
+quote = "1.0.3"
+proc-macro2 = "1.0.10"
