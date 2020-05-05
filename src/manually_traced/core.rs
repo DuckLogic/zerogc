@@ -5,11 +5,12 @@
 //! `RefCell` and `Cell` are intentionally ignored and do not have implementations,
 //! since you need to use their `GcRefCell` and `GcCell` counterparts.
 
+use crate::{Trace, GcSafe, GcVisitor};
 
 macro_rules! trace_tuple {
     { $($param:ident)* } => {
-        unsafe impl<$($param),*> GarbageCollected for ($($param,)*)
-            where $($param: GarbageCollected),* {
+        unsafe impl<$($param),*> Trace for ($($param,)*)
+            where $($param: Trace),* {
             /*
              * HACK: Macros don't allow using `||` as separator,
              * so we use it as a terminator, causing there to be an illegal trailing `||`.
@@ -19,33 +20,15 @@ macro_rules! trace_tuple {
              */
             const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
             #[inline]
-            unsafe fn raw_trace(&self, #[allow(unused)] collector: &mut GarbageCollectionSystem) {
+            unsafe fn visit<V: $crate::GcVisitor>(&self, #[allow(unused)] visitor: &mut V) {
                 #[allow(non_snake_case)]
                 let ($(ref $param,)*) = *self;
-                $(collector.trace::<$param>($param);)*
+                $(visitor.visit::<$param>($param);)*
             }
         }
-        unsafe impl<$($param),*> $crate::safepoints::GcErase for ($($param,)*)
-            where $($param: $crate::safepoints::GcErase),* {
-            type Erased = ($($param::Erased,)*);
-
-            #[inline]
-            unsafe fn erase(self) -> Self::Erased {
-                let erased = ::std::mem::transmute_copy(&self);
-                std::mem::forget(self);
-                erased
-            }
-        }
-        unsafe impl<'gc, $($param),*> $crate::safepoints::GcUnErase<'gc> for ($($param,)*)
-            where $($param: $crate::GarbageCollected + $crate::safepoints::GcUnErase<'gc>),* {
-            type Corrected = ($($param::Corrected,)*);
-
-            #[inline]
-            unsafe fn unerase(self) -> Self::Corrected {
-                let unerased = ::std::mem::transmute_copy(&self);
-                std::mem::forget(self);
-                unerased
-            }
+        unsafe impl<'new_gc, Id, $($param),*> $crate::GcBrand<'new_gc, Id> for ($($param,)*)
+            where Id: $crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id>),* {
+            type Branded = ($(<$param as $crate::GcBrand<'new_gc, Id>>::Branded,)*);
         }
     };
 }
@@ -77,11 +60,11 @@ trace_tuple! { A B C D E F G H I }
 
 macro_rules! trace_array {
     ($size:tt) => {
-        unsafe impl<T: GarbageCollected> GarbageCollected for [T; $size] {
+        unsafe impl<T: Trace> Trace for [T; $size] {
             const NEEDS_TRACE: bool = T::NEEDS_TRACE;
             #[inline]
-            unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem) {
-                collector.trace::<[T]>(self as &[T]);
+            unsafe fn visit<V: $crate::GcVisitor>(&self, visitor: &mut V) {
+                visitor.visit::<[T]>(self as &[T]);
             }
         }
     };
@@ -92,43 +75,37 @@ trace_array! {
     24, 32, 48, 64, 100, 128, 256, 512, 1024, 2048, 4096
 }
 
-unsafe impl<'unm, T: GarbageCollected> GarbageCollected for &'unm [T] {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-    #[inline]
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem) {
-        for element in *self {
-            collector.trace(element);
-        }
-    }
-}
-
 /// Implements tracing for references, by tracing the objects they refer to.
 ///
 /// However, the references can never be garbage collected themselves (and live across safepoints),
 /// so `GcErase` isn't implemented for this type.
-unsafe impl<'a, T: GarbageCollected> GarbageCollected for &'a T {
+unsafe impl<'a, T: Trace> Trace for &'a T {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-    #[inline]
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem) {
-        T::trace(*self, collector)
+    #[inline(always)]
+    unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
+        visitor.visit::<T>(*self)
     }
 }
+unsafe impl<'a, T: GcSafe> GcSafe for &'a T {}
 
-unsafe impl<'a, T: GarbageCollected> GarbageCollected for &'a mut T {
+unsafe impl<'a, T: Trace> Trace for &'a mut T {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-    #[inline]
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem) {
-        T::trace(*self, collector);
+    #[inline(always)]
+    unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
+        visitor.visit::<V>(*self, visitor)
     }
 }
+unsafe impl<'a, T: GcSafe> GcSafe for &'a mut T {}
+
 /// Implements tracing for slices, by tracing all the objects they refer to.
-unsafe impl<T: GarbageCollected> GarbageCollected for [T] {
+unsafe impl<T: Trace> Trace for [T] {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
 
     #[inline]
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem) {
+    unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) {
         for value in self {
-            collector.trace(value)
+            visitor.trace(value)
         }
     }
 }
+unsafe impl<T: GcSafe> GcSafe for [T] {}

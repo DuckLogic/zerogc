@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell, Ref, RefMut};
 use std::ops::{Deref, DerefMut};
 
-use crate::{GarbageCollected, GarbageCollectionSystem};
+use crate::{GcSafe, Trace, GcVisitor};
 
 /// A `Cell` pointing to a garbage collected object.
 ///
@@ -10,8 +10,8 @@ use crate::{GarbageCollected, GarbageCollectionSystem};
 /// Unlike a regular `Cell` this type implements `GarbageCollected`,
 /// and may eventually have read/write barriers.
 #[derive(Default, Clone, Debug)]
-pub struct GcCell<T: GarbageCollected + Copy>(Cell<T>);
-impl<T: GarbageCollected + Copy> GcCell<T> {
+pub struct GcCell<T: Trace + Copy>(Cell<T>);
+impl<T: Trace + Copy> GcCell<T> {
     #[inline]
     pub fn new(value: T) -> Self {
         GcCell(Cell::new(value))
@@ -29,14 +29,15 @@ impl<T: GarbageCollected + Copy> GcCell<T> {
     }
 }
 
-unsafe impl<T: GarbageCollected + Copy> GarbageCollected for GcCell<T> {
+unsafe impl<T: Trace + Copy> Trace for GcCell<T> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
 
     #[inline]
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem) {
-        collector.trace(&self.get());
+    unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
+        visitor.visit(&self.get());
     }
 }
+unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {}
 /// A `RefCell` pointing to a garbage collected object.
 ///
 /// Either this or a `GcCell` is needed in order to mutate a garbage collected object,
@@ -47,8 +48,8 @@ unsafe impl<T: GarbageCollected + Copy> GarbageCollected for GcCell<T> {
 /// Unlike a regular `RefCell` this type implements `GarbageCollected`,
 /// and may eventually have read/write barriers.
 #[derive(Default, Clone, Debug)]
-pub struct GcRefCell<T: GarbageCollected>(RefCell<T>);
-impl<T: GarbageCollected> GcRefCell<T> {
+pub struct GcRefCell<T: Trace>(RefCell<T>);
+impl<T: Trace> GcRefCell<T> {
     #[inline]
     pub fn new(value: T) -> Self {
         GcRefCell(RefCell::new(value))

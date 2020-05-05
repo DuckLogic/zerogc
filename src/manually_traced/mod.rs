@@ -28,7 +28,6 @@
 /// since raw pointers can't be automatically traced without additional type information.
 /// Otherwise, it's best to use an automatically derived implementation since that's always safe.
 /// However, using this macro is always better than a manual implementation, since it makes your intent clearer.
-
 ///
 /// ## Usage
 /// ````
@@ -52,7 +51,7 @@
 /// but it's still a possibility that causes the macro to be unsafe.
 ///
 ///
-/// This delegates to `unsafe_erase` to provide the `GcErase` implementation,
+/// This delegates to `unsafe_gc_brand` to provide the `GcBrand` implementation,
 /// so that could also trigger undefined behavior.
 #[macro_export]
 macro_rules! unsafe_trace_lock {
@@ -73,20 +72,22 @@ macro_rules! unsafe_trace_lock {
         );
     };
     ($target:ident; $($param:ident),*; |$guard:ident| $guard_value:expr, |$lock:ident| $acquire_guard:expr) => {
-        unsafe_erase!($target, $($param),*);
-        unsafe impl<$($param),*> GarbageCollected for $target<$($param),*>
-            where $($param: GarbageCollected),* {
-
+        unsafe_gc_brand!($target, $($param),*);
+        unsafe impl<$($param),*> Trace for $target<$($param),*>
+            where $($param: Trace),* {
             const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
+
             #[inline]
-            unsafe fn raw_trace(&self, target: &mut GarbageCollectionSystem) {
+            unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
                 let $lock = self;
                 #[allow(unused_mut)]
                 let mut $guard = $acquire_guard;
                 let guard_value = $guard_value;
-                target.trace(guard_value);
+                visitor.visit(guard_value);
             }
         }
+        unsafe impl<$($param),*> GcSafe for $target<$($param),*>
+            where $($param: GcSafe),* {}
     };
 }
 
@@ -134,7 +135,7 @@ macro_rules! unsafe_trace_lock {
 /// This usually isn't the case with collections and would be somewhat rare,
 /// but it's still a possibility that causes the macro to be unsafe.
 ///
-/// This delegates to `unsafe_erase` to provide the `GcErase` implementation,
+/// This delegates to `unsafe_gc_brand` to provide the [GcBrand] implementation,
 /// so that could also trigger undefined behavior.
 #[macro_export]
 macro_rules! unsafe_trace_deref {
@@ -152,20 +153,23 @@ macro_rules! unsafe_trace_deref {
         });
     };
     ($target:ident, $($param:ident),*; |$value:ident| $extract:expr) => {
-        unsafe_erase!($target, $($param),*);
-        unsafe impl<$($param),*> GarbageCollected for $target<$($param),*>
-            where $($param: GarbageCollected),* {
+        unsafe_gc_brand!($target, $($param),*);
+        unsafe impl<$($param),*> Trace for $target<$($param),*>
+            where $($param: Trace),* {
 
             const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
             #[inline]
-            unsafe fn raw_trace(&self, target: &mut GarbageCollectionSystem) {
+            unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
                 let extracted = {
                     let $value = self;
                     $extract
                 };
-                target.trace(extracted)
+                visitor.visit(extracted)
             }
         }
+        /// We trust ourselves to not do anything bad as long as our paramaters don't
+        unsafe impl<$($param),*> GcSafe for $target<$($param),*>
+            where $($param: GcSafe),*  {}
     };
 }
 
@@ -198,7 +202,7 @@ macro_rules! unsafe_trace_deref {
 /// but it's still a possibility that causes the macro to be unsafe.
 ///
 ///
-/// This delegates to `unsafe_erase` to provide the `GcErase` implementation,
+/// This delegates to `unsafe_gc_brand!` to provide the [GcBrand] implementation,
 /// so that could also trigger undefined behavior.
 #[macro_export]
 macro_rules! unsafe_trace_iterable {
@@ -206,20 +210,22 @@ macro_rules! unsafe_trace_iterable {
         unsafe_trace_iterable!($target, element = &$element_type; $element_type);
     };
     ($target:ident<$($param:ident),*>; element = { $element_type:ty }) => {
-        unsafe_erase!($target, $($param),*);
-        unsafe impl<$($param),*> GarbageCollected for $target<$($param),*>
-            where $($param: GarbageCollected),* {
-
+        unsafe_gc_brand!($target, $($param),*);
+        unsafe impl<$($param),*> Trace for $target<$($param),*>
+            where $($param: Trace),* {
             const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
-            #[inline]
-            unsafe fn raw_trace(&self, target: &mut GarbageCollectionSystem) {
+
+            unsafe fn visit<Visit: GcVisitor>(&self, visitor: &mut Visit) -> Result<(), Visit::Err> {
                 let iter = IntoIterator::into_iter(self);
                 for element in iter {
                     let element: $element_type = element;
-                    target.trace(&element)
+                    visitor.visit(&element)
                 }
             }
         }
+        /// We trust ourselves to not do anything bad as long as our paramaters don't
+        unsafe impl<$($param),*> GcSafe for $target<$($param),*>
+            where $($param: GcSafe),*  {}
     };
 }
 
@@ -241,17 +247,57 @@ macro_rules! unsafe_trace_iterable {
 /// Undefined behavior only if there are garbage collected pointers in the type's interior,
 /// since the implementation assumes there's nothing to trace in the first place.
 ///
-/// This delegates to `unsafe_erase` to provide the `GcErase` implementation,
-/// but that will never cause undefined behavior unless you have garbage collected pointers inside
+/// This delegates to `unsafe_gc_brand!` to provide the [GcBrand] implementation,
+/// but that will never cause undefined behavior unless you
+/// already have garbage collected pointers inside
 /// (which are already undefined behavior for tracing).
 #[macro_export]
 macro_rules! unsafe_trace_primitive {
     ($target:ty) => {
-        unsafe_erase!($target);
-        unsafe impl GarbageCollected for $target {
+        unsafe_gc_brand!($target);
+        unsafe impl Trace for $target {
             const NEEDS_TRACE: bool = false;
             #[inline(always)] // This method does nothing and is always a win to inline
-            unsafe fn raw_trace(&self, _collector: &mut GarbageCollectionSystem) {}
+            unsafe fn visit<V: $crate::GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {}
+        }
+        /// No drop/custom behavior -> GcSafe
+        unsafe impl GcSafe for $target {}
+    };
+}
+
+
+/// Unsafely assume that the generic implementation of [GcBrand] is valid,
+/// if and only if it's valid for the generic lifetime and type parameters.
+///
+/// Always _prefer automatically derived implementations where possible_,
+/// since they can never cause undefined behavior.
+/// This macro is only necessary if you have raw pointers internally,
+/// which can't have automatically derived safe implementations.
+/// This is basically an _unsafe automatically derived_ implementation,
+/// to be used only when a safe automatically derived implementation isn't possible (like with `Vec`).
+///
+/// This macro takes a varying number of parameters referring to the type's generic parameters,
+/// which are all properly bounded and required to implement [GcBrand] correctly.
+///
+/// This macro can only cause undefined behavior if there are garbage collected pointers
+/// that aren't included in the type parameter.
+/// For example including `Gc<u32>` would be completely undefined behavior,
+/// since we'd blindly erase its lifetime.
+///
+/// However, generally this macro provides the correct implementation
+/// for straighrtforward wrapper/collection types.
+/// Currently the only exception is when you have garbage collected lifetimes like `Gc`.
+#[macro_export]
+macro_rules! unsafe_gc_brand {
+    ($target:tt) => {
+        unsafe impl<'new_gc, Id: $crate::CollectorId> $crate::GcBrand<'new_gc, Id> for $target {
+            type Branded = Self;
+        }
+    };
+    ($target:ident, $($param:ident),+) => {
+        unsafe impl<'new_gc, Id, $($param),*> $crate::GcBrand<'new_gc, Id> for $target<$($param),*>
+            where Id: crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id>),* {
+            type Branded = $target<$(<$param as $crate::GcBrand<'new_gc, Id>>::Branded),*>;
         }
     };
 }

@@ -32,9 +32,7 @@
 //! ````
 
 /*
- * Since our compiler plugin's going to eventually require nightly directly,
- * we might as well just require nightly for the collector itself.
- * However, I want this library to use 'mostly' stable features,
+ * I want this library to use 'mostly' stable features,
  * unless there's good justification to use an unstable feature.
  */
 #![feature(
@@ -47,28 +45,22 @@ extern crate num_traits;
 extern crate core;
 
 
-use std::mem::{self, ManuallyDrop};
+use std::mem;
 use std::ptr::NonNull;
 use std::ops::Deref;
-use std::marker::PhantomData;
-use std::cell::{RefCell, Cell, UnsafeCell};
-use std::fmt::{self, Display, Formatter, Debug};
+use std::cell::{UnsafeCell};
+use std::fmt::{Debug};
 
 #[macro_use]
 mod manually_traced;
-mod alloc;
 pub mod cell;
 
 
-use self::alloc::{GcObject, GcHeader, GcHeap};
 pub use self::cell::{GcCell, GcRefCell};
 
 mod utils;
 
-
-use safepoints::{GcErase, GcUnErase};
-use utils::{AtomicIdCounter, debug_unreachable};
-use utils::math::{CheckedMath, OverflowError};
+use std::any::TypeId;
 
 /// Indicate it's safe to begin a garbage collection,
 /// while keeping the specified root alive.
@@ -131,20 +123,20 @@ pub unsafe trait GarbageCollectionSystem {
     fn id(&self) -> Self::Id;
 }
 
-/// A reference to a garbage collector,
+/// The context of garbage collection,
 /// which can be frozen at a safepoint.
 ///
-/// This is essentially used to maintain a reference to a set of roots,
+/// This is essentially used to maintain a shadow-stack to a set of roots,
 /// which are guarenteed not to be collected until a safepoint.
 ///
-/// This reference doesn't necessarily support allocation (see `GcAllocatorRef` for that).
-pub trait GarbageCollectorRef {
+/// This context doesn't necessarily support allocation (see [GcAllocContext] for that).
+pub trait GcContext {
     type Id: CollectorId;
     /// Inform the garbage collection system we are at a safepoint
     /// and are ready for a potential garbage collection.
     ///
     /// This method is unsafe, see the `safepoint!` macro for a safe wrapper.
-    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut T);
+    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &T);
 
     #[inline(always)]
     #[doc(hidden)]
@@ -156,13 +148,22 @@ pub trait GarbageCollectorRef {
     unsafe fn rebrand_self<'a, T: GcBrand<'a, Self::Id>>(&'a self, value: T) -> T::Branded {
         mem::transmute(self)
     }
+
+    /// Stop the collector at a safepoint,
+    /// then invoke the closure with a temporary [GcContext].
+    ///
+    /// The specified value is used both as a root for the initial safepoint
+    /// and is guarenteed to live throughout the created context for the closure.
+    fn recurse_context<T, F, R>(&mut self, value: T, func: F) -> R
+        where T: Trace,
+              F: for<'a, 'b> FnOnce(&'a mut Self, &'b <T as GcBrand<'b, Self::Id>>::Branded) -> R;
 }
-pub trait GcAllocatorRef: GarbageCollectorRef {
-    type MemoryErr;
+pub trait GcAllocContext: GcContext {
+    type MemoryErr: Debug;
     /// Allocate the specified object in this garbage collector,
     /// binding it to the lifetime of this collector.
     ///
-    /// The object will never be collecterd until the next safepoint,
+    /// The object will never be collected until the next safepoint,
     /// which is considered a mutation by the borrow checker and will be statically checked.
     /// Therefore, we can statically guarantee the pointers will survive until the next safepoint.
     ///
@@ -171,9 +172,16 @@ pub trait GcAllocatorRef: GarbageCollectorRef {
     ///
     /// This gives a immutable reference to the resulting object.
     /// Once allocated, the object can only be correctly modified with a `GcCell`
-    fn alloc<T: GcSafe>(&self, value: T) -> Gc<T, Self::Id>;
-    /// Same as `alloc`, but return an error instead of panicing on failure
-    fn try_alloc<T: GcSafe>(&self, value: T) -> Result<Gc<T>, Self::MemoryErr>;
+    #[inline]
+    fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T, Self::Id> {
+        self.try_alloc(value)
+            .unwrap_or_else(|cause| {
+                panic!("Failed to allocate: {:?}", cause)
+            })
+    }
+
+    /// Same as `alloc`, but returns an error instead of panicing on failure
+    fn try_alloc<T: GcSafe>(&self, value: T) -> Result<Gc<'_, T, Self::Id>, Self::MemoryErr>;
 }
 
 /// A garbage collected pointer to a value.
@@ -192,7 +200,7 @@ pub struct Gc<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> {
     id: Id,
     ptr: UnsafeCell<NonNull<T>>
 }
-impl<'gc, T: ?Sized + GarbageCollected, Id: CollectorId> Gc<'gc, T, Id> {
+impl<'gc, T: ?Sized + GcSafe, Id: CollectorId> Gc<'gc, T, Id> {
     /// Create a new garbage collected pointer to the specified value.
     ///
     /// ## Safety
@@ -332,9 +340,9 @@ pub unsafe trait Trace {
 /// This should only be used by a [GarbageCollectionSystem]
 pub unsafe trait GcVisitor {
     type Err;
-    fn visit<T: Trace>(&mut self, value: &T) -> Result<(), Err>;
+    fn visit<T: Trace>(&mut self, value: &T) -> Result<(), Self::Err>;
     /// Visit a garbage collected pointer
-    fn visit_gc<T, Id>(&mut self, gc: &Gc<'_, T, Id>) -> Result<(), V::Err>
+    fn visit_gc<T, Id>(&mut self, gc: &Gc<'_, T, Id>) -> Result<(), Self::Err>
         where T: GcSafe + ?Sized, Id: CollectorId;
 }
 

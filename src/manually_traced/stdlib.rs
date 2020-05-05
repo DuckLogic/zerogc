@@ -4,7 +4,7 @@
 //! but anything that requires the rest of the stdlib (including collections and allocations),
 //! should go in this module.
 
-use crate::{GarbageCollected, GarbageCollectionSystem};
+use crate::{Trace, GcSafe, GcVisitor};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -18,15 +18,16 @@ unsafe_trace_deref!(Rc, target = T);
 unsafe_trace_deref!(Arc, target = T);
 // We can trace `Wrapping` by simply tracing its interior
 unsafe_trace_deref!(Wrapping, T; |wrapping| &wrapping.0);
-unsafe impl<T: GarbageCollected> GarbageCollected for Option<T> {
+
+unsafe impl<T: Trace> Trace for Option<T> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
 
     #[inline]
-    unsafe fn raw_trace(&self, collector: &mut GarbageCollectionSystem) {
+    unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) {
         match *self {
             None => {},
-            Some(ref value) => collector.trace(value),
+            Some(ref value) => visitor.visit(value),
         }
     }
 }
-unsafe_erase!(Option, T);
+unsafe_gc_brand!(Option, T);
