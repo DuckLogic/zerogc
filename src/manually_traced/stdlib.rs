@@ -11,12 +11,13 @@ use std::sync::Arc;
 use std::num::Wrapping;
 
 // NOTE: Delegate to slice to avoid code duplication
-unsafe_trace_deref!(Vec, target = { &[T] }; T);
+unsafe_trace_deref!(Vec, target = { [T] }; T);
 unsafe_trace_deref!(Box, target = T);
-unsafe_trace_deref!(Rc, target = T);
-unsafe_trace_deref!(Arc, target = T);
+// We can only trace `Rc` and `Arc` if the inner type implements `TraceImmutable`
+unsafe_trace_deref!(Rc, T; immut = required; |rc| &**rc);
+unsafe_trace_deref!(Arc, T; immut = required; |arc| &**arc);
 // We can trace `Wrapping` by simply tracing its interior
-unsafe_trace_deref!(Wrapping, T; immut = false; |wrapping| &wrapping.0);
+unsafe_trace_deref!(Wrapping, T; immut = false; |wrapping| &mut wrapping.0);
 unsafe impl<T: TraceImmutable> TraceImmutable for Wrapping<T> {
     #[inline]
     fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
@@ -52,18 +53,13 @@ unsafe impl<V: TraceImmutable> Trace for HashSet<V> {
     const NEEDS_TRACE: bool = V::NEEDS_TRACE;
 
     fn visit<Visit: GcVisitor>(&mut self, visitor: &mut Visit) -> Result<(), Visit::Err> {
-        for value in self {
+        for value in self.iter() {
             visitor.visit_immutable(value)?;
         }
         Ok(())
     }
 }
-unsafe impl<T: GcSafe + TraceImmutable> GcSafe for HashSet<T> {}
-unsafe impl<'new_gc, Id, V> GcBrand<'new_gc, Id> for HashSet<V>
-    where Id: CollectorId, V: TraceImmutable + GcBrand<'new_gc, Id>,
-        <V as GcBrand<'new_gc, Id>>::Branded: TraceImmutable + Sized {
-    type Branded = HashSet<<V as GcBrand<'new_gc, Id>>::Branded>;
-}
+unsafe_gc_brand!(HashSet, immut = required; V);
 
 unsafe impl<T: Trace> Trace for Option<T> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
@@ -72,7 +68,7 @@ unsafe impl<T: Trace> Trace for Option<T> {
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
         match *self {
             None => Ok(()),
-            Some(ref value) => visitor.visit(value),
+            Some(ref mut value) => visitor.visit(value),
         }
     }
 }

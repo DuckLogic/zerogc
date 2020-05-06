@@ -40,10 +40,8 @@
     optin_builtin_traits, // These are much clearer to use.
     trace_macros // This is a godsend for debugging
 )]
-extern crate unreachable;
 extern crate num_traits;
 extern crate core;
-
 
 use std::mem;
 use std::ptr::NonNull;
@@ -56,8 +54,6 @@ pub mod cell;
 
 
 pub use self::cell::{GcCell, GcRefCell};
-
-mod utils;
 
 use std::any::TypeId;
 use std::marker::PhantomData;
@@ -141,12 +137,16 @@ pub trait GcContext {
     #[inline(always)]
     #[doc(hidden)]
     unsafe fn rebrand_static<T: GcBrand<'static, Self::Id>>(&self, value: T) -> T::Branded {
-        mem::transmute(value)
+        let  branded = mem::transmute_copy(&value);
+        mem::forget(value);
+        branded
     }
     #[inline(always)]
     #[doc(hidden)]
     unsafe fn rebrand_self<'a, T: GcBrand<'a, Self::Id>>(&'a self, value: T) -> T::Branded {
-        mem::transmute(self)
+        let branded = mem::transmute_copy(&value);
+        mem::forget(value);
+        branded
     }
 
     /// Stop the collector at a safepoint,
@@ -214,11 +214,11 @@ impl<'gc, T: ?Sized + GcSafe, Id: CollectorId> Gc<'gc, T, Id> {
     /// so you're assuming that this is valid to perform.
     #[inline(always)]
     pub unsafe fn new(id: Id, ptr: NonNull<T>) -> Self {
-        Gc { id, ptr }
+        Gc { id, ptr, marker: PhantomData }
     }
-    #[inline]
+    #[inline(always)]
     pub fn value(self) -> &'gc T {
-        unsafe { self.ptr.as_ref() }
+        unsafe { &*self.ptr.as_ptr() }
     }
 }
 impl<'gc, T: ?Sized + GcSafe, Id: CollectorId> Deref for Gc<'gc, T, Id> {
@@ -226,7 +226,7 @@ impl<'gc, T: ?Sized + GcSafe, Id: CollectorId> Deref for Gc<'gc, T, Id> {
 
     #[inline(always)]
     fn deref(&self) -> &&'gc T {
-        &self.value()
+        unsafe { &*(&self.ptr as *const NonNull<T> as *const &'gc T) }
     }
 }
 impl<'gc, T: GcSafe + ?Sized, Id: CollectorId> Clone for Gc<'gc, T, Id> {
@@ -263,8 +263,7 @@ pub unsafe trait GcSafe: Trace {}
 ///
 /// Only pointers with the collector id type `Id` will have their lifetime changed.
 pub unsafe trait GcBrand<'new_gc, Id: CollectorId>: Trace {
-    // TODO: Should we require sized here?
-    type Branded: ?Sized + 'new_gc;
+    type Branded: Trace + 'new_gc;
 }
 
 /// Indicates that a type can be traced by a garbage collector.
@@ -362,8 +361,8 @@ pub unsafe trait NullTrace: Trace + TraceImmutable {}
 /// This should only be used by a [GarbageCollectionSystem]
 pub unsafe trait GcVisitor {
     type Err: Debug;
-    fn visit<T: Trace>(&mut self, value: &mut T) -> Result<(), Self::Err>;
-    fn visit_immutable<T: TraceImmutable>(&mut self, value: &T) -> Result<(), Self::Err> {}
+    fn visit<T: Trace + ?Sized>(&mut self, value: &mut T) -> Result<(), Self::Err>;
+    fn visit_immutable<T: TraceImmutable + ?Sized>(&mut self, value: &T) -> Result<(), Self::Err>;
     /// Visit a garbage collected pointer
     fn visit_gc<T, Id>(&mut self, gc: &mut Gc<'_, T, Id>) -> Result<(), Self::Err>
         where T: GcSafe + ?Sized, Id: CollectorId;

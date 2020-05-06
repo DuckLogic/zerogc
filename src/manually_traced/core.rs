@@ -33,7 +33,8 @@ macro_rules! trace_tuple {
             fn visit_immutable<V: $crate::GcVisitor>(&self, #[allow(unused)] visitor: &mut V) -> Result<(), V::Err> {
                 #[allow(non_snake_case)]
                 let ($(ref $param,)*) = *self;
-                $(visitor.visit_immutable::<$param>($param);)*
+                $(visitor.visit_immutable::<$param>($param)?;)*
+                Ok(())
             }
         }
         unsafe impl<$($param: NullTrace),*> NullTrace for ($($param,)*) {}
@@ -135,7 +136,7 @@ unsafe impl<'a, T: Trace> Trace for &'a mut T {
 unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a mut T {
     #[inline(always)]
     fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
-        visitor.visit_immutable::<T>(&**self, visitor)
+        visitor.visit_immutable::<T>(&**self)
     }
 }
 unsafe impl<'a, T: NullTrace> NullTrace for &'a mut T {}

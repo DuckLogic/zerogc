@@ -79,7 +79,7 @@ impl<T: Trace> GcRefCell<T> {
     }
 
 }
-unsafe_trace_lock!(GcRefCell, target = T; |cell| cell.get_mut(), |cell| cell.borrow());
+unsafe_trace_lock!(GcRefCell, target = T; |cell| cell.get_mut(), |cell| cell.borrow_mut());
 
 pub struct GcRef<'a, T: 'a>(Ref<'a, T>);
 impl<'a, T> Deref for GcRef<'a, T> {
