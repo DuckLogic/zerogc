@@ -119,7 +119,10 @@ pub trait GcContext {
     /// Inform the garbage collection system we are at a safepoint
     /// and are ready for a potential garbage collection.
     ///
-    /// This method is unsafe, see the `safepoint!` macro for a safe wrapper.
+    /// ## Safety
+    /// This method is unsafe and should never be invoked by user code.
+    ///
+    /// See the [safepoint!] macro for a safe wrapper.
     unsafe fn basic_safepoint<T: Trace>(&mut self, value: &T);
 
     #[inline(always)]
@@ -142,6 +145,11 @@ pub trait GcContext {
     ///
     /// The specified value is used both as a root for the initial safepoint
     /// and is guarenteed to live throughout the created context for the closure.
+    ///
+    /// ## Safety
+    /// This macro should never be invoked by user code.
+    ///
+    /// See the [safepoint_recurse!] macro for a safe wrapper
     unsafe fn recurse_context<T, F, R>(&mut self, value: T, func: F) -> R
         where T: Trace,
               F: for<'a, 'b> FnOnce(&'a mut Self, &'b mut <T as GcBrand<'b, Self::Id>>::Branded) -> R;
