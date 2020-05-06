@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell, Ref, RefMut};
 use std::ops::{Deref, DerefMut};
 
-use crate::{GcSafe, Trace, GcVisitor};
+use crate::{GcSafe, Trace, GcVisitor, NullTrace, TraceImmutable};
 
 /// A `Cell` pointing to a garbage collected object.
 ///
@@ -16,6 +16,7 @@ impl<T: Trace + Copy> GcCell<T> {
     pub fn new(value: T) -> Self {
         GcCell(Cell::new(value))
     }
+    #[inline]
     pub fn get_mut(&mut self) -> &mut T {
         self.0.get_mut()
     }
@@ -33,10 +34,20 @@ unsafe impl<T: Trace + Copy> Trace for GcCell<T> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
 
     #[inline]
-    unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
-        visitor.visit(&self.get());
+    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+        visitor.visit(self.get_mut())
     }
 }
+/// Since a cell has interior mutablity, it can implement `TraceImmutable`
+/// even if the interior type is only `Trace`
+unsafe impl<T: GcSafe + Copy> TraceImmutable for GcCell<T> {
+    #[inline]
+    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
+        let mut value = self.get();
+        visitor.visit(&mut value)
+    }
+}
+unsafe impl<T: GcSafe + Copy + NullTrace> NullTrace for GcCell<T> {}
 unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {}
 /// A `RefCell` pointing to a garbage collected object.
 ///
@@ -68,7 +79,7 @@ impl<T: Trace> GcRefCell<T> {
     }
 
 }
-unsafe_trace_lock!(GcRefCell, target = T; |cell| cell.borrow());
+unsafe_trace_lock!(GcRefCell, target = T; |cell| cell.get_mut(), |cell| cell.borrow());
 
 pub struct GcRef<'a, T: 'a>(Ref<'a, T>);
 impl<'a, T> Deref for GcRef<'a, T> {

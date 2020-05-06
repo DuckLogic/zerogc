@@ -5,7 +5,7 @@
 //! `RefCell` and `Cell` are intentionally ignored and do not have implementations,
 //! since you need to use their `GcRefCell` and `GcCell` counterparts.
 
-use crate::{Trace, GcSafe, GcVisitor};
+use crate::{Trace, GcSafe, GcVisitor, NullTrace, GcBrand, CollectorId, TraceImmutable};
 
 macro_rules! trace_tuple {
     { $($param:ident)* } => {
@@ -20,14 +20,26 @@ macro_rules! trace_tuple {
              */
             const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
             #[inline]
-            unsafe fn visit<V: $crate::GcVisitor>(&self, #[allow(unused)] visitor: &mut V) {
+            fn visit<Visit: $crate::GcVisitor>(&mut self, #[allow(unused)] visitor: &mut Visit) -> Result<(), Visit::Err> {
                 #[allow(non_snake_case)]
-                let ($(ref $param,)*) = *self;
-                $(visitor.visit::<$param>($param);)*
+                let ($(ref mut $param,)*) = *self;
+                $(visitor.visit::<$param>($param)?;)*
+                Ok(())
             }
         }
+        unsafe impl<$($param),*> TraceImmutable for ($($param,)*)
+            where $($param: TraceImmutable),* {
+            #[inline]
+            fn visit_immutable<V: $crate::GcVisitor>(&self, #[allow(unused)] visitor: &mut V) -> Result<(), V::Err> {
+                #[allow(non_snake_case)]
+                let ($(ref $param,)*) = *self;
+                $(visitor.visit_immutable::<$param>($param);)*
+            }
+        }
+        unsafe impl<$($param: NullTrace),*> NullTrace for ($($param,)*) {}
         unsafe impl<'new_gc, Id, $($param),*> $crate::GcBrand<'new_gc, Id> for ($($param,)*)
-            where Id: $crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id>),* {
+            where Id: $crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id>,)*
+                 $(<$param as $crate::GcBrand<'new_gc, Id>>::Branded: Sized,)* {
             type Branded = ($(<$param as $crate::GcBrand<'new_gc, Id>>::Branded,)*);
         }
     };
@@ -63,9 +75,22 @@ macro_rules! trace_array {
         unsafe impl<T: Trace> Trace for [T; $size] {
             const NEEDS_TRACE: bool = T::NEEDS_TRACE;
             #[inline]
-            unsafe fn visit<V: $crate::GcVisitor>(&self, visitor: &mut V) {
-                visitor.visit::<[T]>(self as &[T]);
+            fn visit<V: $crate::GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+                visitor.visit::<[T]>(self as &mut [T])
             }
+        }
+        unsafe impl<T: $crate::TraceImmutable> $crate::TraceImmutable for [T; $size] {
+            #[inline]
+            fn visit_immutable<V: $crate::GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
+                visitor.visit_immutable::<[T]>(self as &[T])
+            }
+        }
+        unsafe impl<T: $crate::NullTrace> $crate::NullTrace for [T; $size] {}
+        unsafe impl<T: GcSafe> GcSafe for [T; $size] {}
+        unsafe impl<'new_gc, Id: CollectorId, T> $crate::GcBrand<'new_gc, Id> for [T; $size]
+            where T: CollectorId, T: GcBrand<'new_gc, Id>,
+                  <T as GcBrand<'new_gc, Id>>::Branded: Sized {
+            type Branded = [<T as GcBrand<'new_gc, Id>>::Branded; $size];
         }
     };
     { $($size:tt),* } => ($(trace_array!($size);)*)
@@ -75,37 +100,73 @@ trace_array! {
     24, 32, 48, 64, 100, 128, 256, 512, 1024, 2048, 4096
 }
 
-/// Implements tracing for references, by tracing the objects they refer to.
+/// Implements tracing for references.
 ///
-/// However, the references can never be garbage collected themselves (and live across safepoints),
-/// so `GcErase` isn't implemented for this type.
-unsafe impl<'a, T: Trace> Trace for &'a T {
+/// The underlying data must support `TraceImmutable` since we
+/// only have an immutable reference.
+unsafe impl<'a, T: TraceImmutable> Trace for &'a T {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
     #[inline(always)]
-    unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
-        visitor.visit::<T>(*self)
+    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+        visitor.visit_immutable::<T>(*self)
     }
 }
-unsafe impl<'a, T: GcSafe> GcSafe for &'a T {}
+unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a T {
+    #[inline(always)]
+    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
+        visitor.visit_immutable::<T>(*self)
+    }
+}
+unsafe impl<'a, T: NullTrace> NullTrace for &'a T {}
+unsafe impl<'a, T: GcSafe + TraceImmutable> GcSafe for &'a T {}
+/// TODO: Right now we can only rebrand unmanaged types (NullTrace)
+unsafe impl<'a: 'new_gc, 'new_gc, Id: CollectorId, T: NullTrace> GcBrand<'new_gc, Id> for &'a T {
+    type Branded = Self;
+}
 
+/// Implements tracing for mutable references.
 unsafe impl<'a, T: Trace> Trace for &'a mut T {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
     #[inline(always)]
-    unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
-        visitor.visit::<V>(*self, visitor)
+    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+        visitor.visit::<T>(*self)
     }
 }
+unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a mut T {
+    #[inline(always)]
+    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
+        visitor.visit_immutable::<T>(&**self, visitor)
+    }
+}
+unsafe impl<'a, T: NullTrace> NullTrace for &'a mut T {}
 unsafe impl<'a, T: GcSafe> GcSafe for &'a mut T {}
+/// TODO: Right now we can only rebrand unmanaged types (NullTrace)
+unsafe impl<'a: 'new_gc, 'new_gc, Id: CollectorId, T: NullTrace> GcBrand<'new_gc, Id> for &'a mut T {
+    type Branded = Self;
+}
 
 /// Implements tracing for slices, by tracing all the objects they refer to.
 unsafe impl<T: Trace> Trace for [T] {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
+    const NEEDS_TRACE: bool = T::NEEDS_TRACE ;
 
     #[inline]
-    unsafe fn visit<V: GcVisitor>(&self, visitor: &mut V) {
+    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+        if !T::NEEDS_TRACE { return Ok(()) };
         for value in self {
-            visitor.trace(value)
+            visitor.visit(value)?;
         }
+        Ok(())
     }
 }
+unsafe impl<T: TraceImmutable> TraceImmutable for [T] {
+    #[inline]
+    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
+        if !T::NEEDS_TRACE { return Ok(()) };
+        for value in self {
+            visitor.visit_immutable(value)?;
+        }
+        Ok(())
+    }
+}
+unsafe impl<T: NullTrace> NullTrace for [T] {}
 unsafe impl<T: GcSafe> GcSafe for [T] {}
