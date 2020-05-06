@@ -84,10 +84,18 @@ macro_rules! safepoint {
 /// This also allows garbage collectors to perform call
 pub unsafe trait CollectorId: Copy + Eq + Debug + 'static {
     #[inline]
-    fn matches<T: CollectorId>(&self, other: &T) -> bool {
+    fn try_cast<T: CollectorId>(&self) -> Option<&T> {
         // NOTE: Type comparison will be constant after monomorphization
         if TypeId::of::<Self>() == TypeId::of::<T>() {
-            self == unsafe { &*(other as *const T as *const Self) }
+            Some(unsafe { &*(self as *const Self as *const T) })
+        } else {
+            None
+        }
+    }
+    #[inline]
+    fn matches<T: CollectorId>(&self, other: &T) -> bool {
+        if let Some(other) = other.try_cast::<Self>() {
+            self == other
         } else {
             false
         }
@@ -114,7 +122,7 @@ pub unsafe trait GarbageCollectionSystem {
 /// which are guarenteed not to be collected until a safepoint.
 ///
 /// This context doesn't necessarily support allocation (see [GcAllocContext] for that).
-pub trait GcContext {
+pub unsafe trait GcContext {
     type Id: CollectorId;
     /// Inform the garbage collection system we are at a safepoint
     /// and are ready for a potential garbage collection.
@@ -123,7 +131,7 @@ pub trait GcContext {
     /// This method is unsafe and should never be invoked by user code.
     ///
     /// See the [safepoint!] macro for a safe wrapper.
-    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &T);
+    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut T);
 
     #[inline(always)]
     #[doc(hidden)]
@@ -151,10 +159,10 @@ pub trait GcContext {
     ///
     /// See the [safepoint_recurse!] macro for a safe wrapper
     unsafe fn recurse_context<T, F, R>(&mut self, value: T, func: F) -> R
-        where T: Trace,
+        where T: Trace + for <'a> GcBrand<'a, Self::Id>,
               F: for<'a, 'b> FnOnce(&'a mut Self, &'b mut <T as GcBrand<'b, Self::Id>>::Branded) -> R;
 }
-pub trait GcAllocContext: GcContext {
+pub unsafe trait GcAllocContext: GcContext {
     type MemoryErr: Debug;
     /// Allocate the specified object in this garbage collector,
     /// binding it to the lifetime of this collector.
@@ -216,6 +224,14 @@ impl<'gc, T: ?Sized + GcSafe, Id: CollectorId> Gc<'gc, T, Id> {
     pub fn value(self) -> &'gc T {
         unsafe { &*self.ptr.as_ptr() }
     }
+    #[inline]
+    pub unsafe fn as_raw_ptr(self) -> *mut T {
+        self.ptr.as_ptr()
+    }
+    #[inline]
+    pub fn id(self) -> Id {
+        self.id
+    }
 }
 impl<'gc, T: ?Sized + GcSafe, Id: CollectorId> Deref for Gc<'gc, T, Id> {
     type Target = &'gc T;
@@ -233,7 +249,7 @@ impl<'gc, T: GcSafe + ?Sized, Id: CollectorId> Clone for Gc<'gc, T, Id> {
 }
 impl<'gc, T: GcSafe + ?Sized, Id: CollectorId> Copy for Gc<'gc, T, Id> {}
 unsafe impl<'gc, 'new_gc, T, Id> GcBrand<'new_gc, Id> for Gc<'gc, T, Id>
-    where T: GcSafe + ?Sized + GcBrand<'new_gc, Id>,
+    where T: GcSafe + GcBrand<'new_gc, Id>,
           <T as GcBrand<'new_gc, Id>>::Branded: GcSafe,
           Id: CollectorId {
     type Branded = Gc<'new_gc, T::Branded, Id>;
@@ -361,7 +377,7 @@ pub unsafe trait GcVisitor {
     fn visit_immutable<T: TraceImmutable + ?Sized>(&mut self, value: &T) -> Result<(), Self::Err>;
     /// Visit a garbage collected pointer
     fn visit_gc<T, Id>(&mut self, gc: &mut Gc<'_, T, Id>) -> Result<(), Self::Err>
-        where T: GcSafe + ?Sized, Id: CollectorId;
+        where T: GcSafe, Id: CollectorId;
 }
 
 //
@@ -369,8 +385,8 @@ pub unsafe trait GcVisitor {
 //
 
 /// Double indirection is safe (but usually stupid)
-unsafe impl<'gc, T: GcSafe + ?Sized, Id: CollectorId> GcSafe for Gc<'gc, T, Id> {}
-unsafe impl<'gc, T: GcSafe + ?Sized, Id: CollectorId> Trace for Gc<'gc, T, Id> {
+unsafe impl<'gc, T: GcSafe, Id: CollectorId> GcSafe for Gc<'gc, T, Id> {}
+unsafe impl<'gc, T: GcSafe, Id: CollectorId> Trace for Gc<'gc, T, Id> {
     const NEEDS_TRACE: bool = true;
 
     #[inline(always)]
