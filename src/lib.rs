@@ -1,13 +1,6 @@
 //! Zero overhead tracing garbage collection for rust, by abusing the borrow checker.
 //!
-//!
-//! The idea behind this collector that by making all potential for collections explicit,
-//! we can take advantage of the borrow checker to statically guarantee everything's valid.
-//! We call these potential collections 'safepoints' and the borrow checker can statically prove all uses are valid in between.
-//! There is no chance for collection to happen in between these safepoints,
-//! and you have unrestricted use of garbage collected pointers until you reach one.
-//!
-//! ## Major Features
+//! ## Planned Features
 //! 1. Easy to use, since `Gc<T>` is `Copy` and coerces to a reference.
 //! 2. Absolutely zero overhead when modifying pointers, since `Gc<T>` is `Copy`.
 //! 3. Support for important libraries builtin to the collector
@@ -15,34 +8,11 @@
 //! 5. Uses rust's lifetime system to ensure all roots are known at explicit safepoints, without any runtime overhead.
 //! 6. Collection can only happen with an explicit `safepoint` call and has no overhead between these calls,
 //! 7. Optional graceful handling of allocation failures.
-//!
-//! ## Usage
-//! ````rust
-//! let collector = GarbageCollector::default();
-//! let retained: Gc<Vec<u32>> = collector.alloc(vec![1, 2, 3]);
-//! assert_eq!(retained[0], 1) // Garbage collected references deref directly to slices
-//! let other =
-//! /*
-//!  * Garbage collect `retained`
-//!  * This will explicitly trace the retained object `retained`,
-//!  * and sweep the rest (`sweeped`) away.
-//!  */
-//! safepoint!(collector, retained);
-//! retained.; // This borrow checker will allow this since `retained` was retained
-//! ````
 
 /*
  * I want this library to use 'mostly' stable features,
  * unless there's good justification to use an unstable feature.
  */
-#![feature(
-    const_fn, // I refuse to break encapsulation
-    optin_builtin_traits, // These are much clearer to use.
-    trace_macros // This is a godsend for debugging
-)]
-extern crate num_traits;
-extern crate core;
-
 use std::mem;
 use std::ptr::NonNull;
 use std::ops::Deref;
@@ -57,6 +27,25 @@ pub use self::cell::{GcCell, GcRefCell};
 
 use std::any::TypeId;
 use std::marker::PhantomData;
+
+/// Stop the collector at a safepoint,
+/// then invoke the closure with a temporary [GcContext].
+///
+/// The specified value is used both as a root for the initial safepoint
+/// and is also guarenteed to live throughout the created context (and therefore the entire closure).
+///
+/// # Safety
+/// This macro is completely safe, although it expands to unsafe code internally.
+#[macro_export]
+macro_rules! safepoint_recurse {
+    ($collector:ident, $root:expr, |$sub_collector:ident, $new_root:ident| $closure:expr) => {unsafe {
+        use $crate::{GcContext};
+        // TODO: Panic safety
+        // TODO: Allow returning garbage-collected values from closure (requires rebranding)
+        let erased = GcContext::rebrand_static(&$collector, $value);
+        GcContext::recuse_context(&mut $collector, erased, |$sub_collector, $new_root| $closure)
+    }};
+}
 
 /// Indicate it's safe to begin a garbage collection,
 /// while keeping the specified root alive.
@@ -76,13 +65,12 @@ use std::marker::PhantomData;
 /// This macro is completely safe, although it expands to unsafe code internally.
 #[macro_export]
 macro_rules! safepoint {
-    ($collector:ident, $value:expr) => {{
-        use std::mem::ManuallyDropped;
-        use $crate::{GarbageCollectorRef};
+    ($collector:ident, $value:expr) => {unsafe {
+        use $crate::{GcContext};
         // TODO: What happens if we panic during a collection
-        let mut erased = GarbageCollectorRef::rebrand_static(&$collector, $value);
-        GarbageCollectorRef::basic_safepoint(&mut $collector, &mut erased);
-        GarbageCollectorRef::rebrand_self(&collector, erased)
+        let mut erased = GcContext::rebrand_static(&$collector, $value);
+        GcContext::basic_safepoint(&mut $collector, &mut erased);
+        GcContext::rebrand_self(&collector, erased)
     }};
 }
 
@@ -154,9 +142,9 @@ pub trait GcContext {
     ///
     /// The specified value is used both as a root for the initial safepoint
     /// and is guarenteed to live throughout the created context for the closure.
-    fn recurse_context<T, F, R>(&mut self, value: T, func: F) -> R
+    unsafe fn recurse_context<T, F, R>(&mut self, value: T, func: F) -> R
         where T: Trace,
-              F: for<'a, 'b> FnOnce(&'a mut Self, &'b <T as GcBrand<'b, Self::Id>>::Branded) -> R;
+              F: for<'a, 'b> FnOnce(&'a mut Self, &'b mut <T as GcBrand<'b, Self::Id>>::Branded) -> R;
 }
 pub trait GcAllocContext: GcContext {
     type MemoryErr: Debug;
