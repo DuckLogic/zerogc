@@ -4,13 +4,11 @@ version = "0.1.0"
 authors = ["Techcable <Techcable@techcable.net>"]
 description = "Zero overhead tracing garbage collection for rust"
 repository = "https://github.com/DuckLogic/zerogc"
-# We're almost ready, but not quite
+# We're very experimental
 publish = false
 edition = "2018"
 
 [dependencies]
-unreachable = "^1.0.0"
-num-traits = "^0.1.40"
 # Manually included tracing support for third party libraries
 # Providing support for these important libraries,
 # gives zerogc 'batteries included' support.
