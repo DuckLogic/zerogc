@@ -41,19 +41,19 @@ macro_rules! safepoint_recurse {
     ($collector:ident, $root:expr, |$sub_collector:ident, $new_root:ident| $closure:expr) => {unsafe {
         use $crate::{GcContext};
         // TODO: Panic safety
-        let erased = GcContext::rebrand_static(&$collector, $value);
-        GcContext::recuse_context(&mut $collector, erased, |$sub_collector, $new_root| $closure)
+        let erased = $collector.rebrand_static($root);
+        $collector.recurse_context(erased, |mut $sub_collector, $new_root| $closure)
     }};
-    ($collector:ident, $root:expr, @managed_result |$sub_collector:ident, $new_root:ident| $closure:expr) => {unsafe {
+    ($collector:ident, $root:expr, @managed_result, |$sub_collector:ident, $new_root:ident| $closure:expr) => {unsafe {
         use $crate::{GcContext};
         // TODO: Panic safety
-        let erased_root = GcContext::rebrand_static(&$collector, $value);
-        let result = GcContext::recuse_context(&mut $collector, erased, |$sub_collector, $new_root| {
+        let erased_root = $collector.rebrand_static($root);
+        let result = $collector.recurse_context(erased_root, |mut $sub_collector, $new_root| {
             let result = $closure;
             // NOTE: We're assuming there's only a safepoint at the start (not at the end)
-            GcContext::rebrand_static(&$sub_collector, result)
+            GcContext::rebrand_static($sub_collector, result)
         });
-        GcContext::rebrand_self(&$collector, result)
+        $collector.rebrand_self(result)
     }};
 }
 
@@ -78,9 +78,9 @@ macro_rules! safepoint {
     ($collector:ident, $value:expr) => {unsafe {
         use $crate::{GcContext};
         // TODO: What happens if we panic during a collection
-        let mut erased = GcContext::rebrand_static(&$collector, $value);
-        GcContext::basic_safepoint(&mut $collector, &mut erased);
-        GcContext::rebrand_self(&collector, erased)
+        let mut erased = $collector.rebrand_static($value);
+        $collector.basic_safepoint(&mut erased);
+        $collector.rebrand_self(erased)
     }};
 }
 

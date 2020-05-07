@@ -5,11 +5,14 @@
     negative_impls, // impl !Send is much cleaner than PhantomData<Rc<()>>
     exhaustive_patterns, // Allow exhaustive matching against never
 )]
-use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcBrand, GcVisitor, Gc, TraceImmutable, GcAllocContext};
+use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcBrand, GcVisitor, TraceImmutable, GcAllocContext};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::Layout;
 use std::cell::RefCell;
 use std::ptr::NonNull;
+
+/// An alias to `zerogc::Gc<T, SimpleCollectorId>` to simplify use with zerogc-simple
+pub type Gc<'gc, T> = zerogc::Gc<'gc, T, SimpleCollectorId>;
 
 static NEXT_COLLECTOR_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -221,7 +224,7 @@ unsafe impl<'a> GcVisitor for CollectionTask<'a> {
         value.visit_immutable(self)
     }
 
-    fn visit_gc<T, Id>(&mut self, gc: &mut Gc<'_, T, Id>) -> Result<(), Self::Err>
+    fn visit_gc<T, Id>(&mut self, gc: &mut zerogc::Gc<'_, T, Id>) -> Result<(), Self::Err>
         where T: GcSafe, Id: CollectorId {
         match gc.id().try_cast::<SimpleCollectorId>() {
             Some(&other_id) => {
@@ -312,7 +315,7 @@ unsafe impl GcAllocContext for SimpleCollectorContext {
     // Right now Box doesn't implement failable alloc
     type MemoryErr = !;
 
-    fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T, Self::Id> {
+    fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
         let mut object = Box::new(GcObject {
             value, state: MarkState::White
         });
@@ -330,7 +333,7 @@ unsafe impl GcAllocContext for SimpleCollectorContext {
     }
 
     #[inline]
-    fn try_alloc<T: GcSafe>(&self, value: T) -> Result<Gc<'_, T, Self::Id>, Self::MemoryErr> {
+    fn try_alloc<T: GcSafe>(&self, value: T) -> Result<Gc<'_, T>, Self::MemoryErr> {
         Ok(self.alloc(value))
     }
 }
