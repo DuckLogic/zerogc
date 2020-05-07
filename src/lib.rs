@@ -15,7 +15,7 @@
  */
 use std::mem;
 use std::ptr::NonNull;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::fmt::{Debug};
 
 #[macro_use]
@@ -281,6 +281,58 @@ unsafe impl<'gc, 'new_gc, T, Id> GcBrand<'new_gc, Id> for Gc<'gc, T, Id>
 /// and avoids a second pass over the objects
 /// to check for resurrected objects.
 pub unsafe trait GcSafe: Trace {}
+
+/// A wrapper type that assumes its contents don't need to be traced
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug)]
+pub struct AssumeNotTraced<T>(T);
+impl<T> AssumeNotTraced<T> {
+    /// Assume the specified value doesn't need to be traced
+    ///
+    /// ## Safety
+    /// Undefined behavior if the value contains anything that need to be traced
+    /// by a garbage collector.
+    #[inline]
+    pub unsafe fn new(value: T) -> Self {
+        AssumeNotTraced(value)
+    }
+    #[inline]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+impl<T> Deref for AssumeNotTraced<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl<T> DerefMut for AssumeNotTraced<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+unsafe impl<T> Trace for AssumeNotTraced<T> {
+    const NEEDS_TRACE: bool = false;
+    #[inline(always)] // This method does nothing and is always a win to inline
+    fn visit<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
+        Ok(())
+    }
+}
+unsafe impl<T> TraceImmutable for AssumeNotTraced<T> {
+    #[inline(always)]
+    fn visit_immutable<V: GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
+        Ok(())
+    }
+}
+unsafe impl<T> NullTrace for AssumeNotTraced<T> {}
+/// No tracing implies GcSafe
+unsafe impl<T> GcSafe for AssumeNotTraced<T> {}
+unsafe_gc_brand!(AssumeNotTraced, T);
 
 /// Changes all references to garbage
 /// collected objects to match `'new_gc`.
