@@ -206,6 +206,11 @@ pub struct Gc<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> {
     marker: PhantomData<&'gc T>
 }
 impl<'gc, T: ?Sized + GcSafe, Id: CollectorId> Gc<'gc, T, Id> {
+    #[inline]
+    #[doc(hidden)]
+    pub unsafe fn from_raw(ptr: NonNull<T>, id: Id) -> Self {
+        Gc { ptr, id, marker: PhantomData }
+    }
     /// Create a new garbage collected pointer to the specified value.
     ///
     /// ## Safety

@@ -5,11 +5,11 @@
     negative_impls, // impl !Send is much cleaner than PhantomData<Rc<()>>
     exhaustive_patterns, // Allow exhaustive matching against never
 )]
-use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcBrand, GcVisitor, Gc, TraceImmutable};
+use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcBrand, GcVisitor, Gc, TraceImmutable, GcAllocContext};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::rc::{Rc,};
 use std::alloc::Layout;
 use std::cell::RefCell;
+use std::ptr::NonNull;
 
 static NEXT_COLLECTOR_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -27,7 +27,28 @@ impl SimpleCollectorId {
     }
 }
 unsafe impl CollectorId for SimpleCollectorId {}
-pub struct SimpleCollector(Rc<RawSimpleCollector>);
+pub struct SimpleCollector(Box<RawSimpleCollector>);
+impl SimpleCollector {
+    pub fn create() -> SimpleCollector {
+        let id = SimpleCollectorId::acquire();
+        SimpleCollector(Box::new(RawSimpleCollector {
+            id, shadow_stack: RefCell::new(ShadowStack(Vec::new())),
+            heap: RefCell::new(GcHeap {
+                allocated_size: 0,
+                last_retained_size: None,
+                objects: Vec::with_capacity(32)
+            })
+        }))
+    }
+
+    /// Make this collector into a context
+    #[inline]
+    pub fn into_context(self) -> SimpleCollectorContext {
+        SimpleCollectorContext {
+            collector: self.0
+        }
+    }
+}
 
 unsafe impl GarbageCollectionSystem for SimpleCollector {
     type Id = SimpleCollectorId;
@@ -148,7 +169,7 @@ impl<'a> CollectionTask<'a> {
                     unsafe { &mut *target }
                 }
             };
-            unsafe { (*target_value).trace(self) };
+            (*target_value).trace(self);
             match target {
                 GreyElement::Object(obj) => {
                     unsafe {
@@ -178,6 +199,10 @@ impl<'a> CollectionTask<'a> {
                 }
             }
         });
+        // Reset all remaining objects to white
+        for obj in &mut self.heap.objects {
+            obj.state = MarkState::White;
+        }
         assert_eq!(expected_size, actual_size);
         self.heap.allocated_size = actual_size;
         self.heap.last_retained_size = Some(actual_size);
@@ -249,8 +274,8 @@ unsafe impl<'a> GcVisitor for CollectionTask<'a> {
 /// A simple collector can only be used from a single thread
 impl !Send for RawSimpleCollector {}
 
-struct SimpleCollectorContext {
-    collector: Rc<RawSimpleCollector>
+pub struct SimpleCollectorContext {
+    collector: Box<RawSimpleCollector>
 }
 unsafe impl GcContext for SimpleCollectorContext {
     type Id = SimpleCollectorId;
@@ -272,7 +297,7 @@ unsafe impl GcContext for SimpleCollectorContext {
         // NOTE: We can just rebind self for new collector context ^_^
         let result = func(
             &mut *self,
-            unsafe { &mut *(&mut value as *mut T as *mut <T as GcBrand<'_, Self::Id>>::Branded) }
+            &mut *(&mut value as *mut T as *mut <T as GcBrand<'_, Self::Id>>::Branded)
         );
         assert_eq!(
             self.collector.shadow_stack.borrow_mut().pop(),
@@ -281,6 +306,32 @@ unsafe impl GcContext for SimpleCollectorContext {
         // Explicitly drop the value now that we're done using it
         std::mem::drop(value);
         result
+    }
+}
+unsafe impl GcAllocContext for SimpleCollectorContext {
+    // Right now Box doesn't implement failable alloc
+    type MemoryErr = !;
+
+    fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T, Self::Id> {
+        let mut object = Box::new(GcObject {
+            value, state: MarkState::White
+        });
+        let gc = unsafe { Gc::from_raw(
+            NonNull::new_unchecked(&mut object.value),
+            self.collector.id
+        ) };
+        {
+            let mut heap = self.collector.heap.borrow_mut();
+            let size = object.size();
+            heap.objects.push(unsafe { object.into_erased_static() });
+            heap.allocated_size += size;
+        }
+        gc
+    }
+
+    #[inline]
+    fn try_alloc<T: GcSafe>(&self, value: T) -> Result<Gc<'_, T, Self::Id>, Self::MemoryErr> {
+        Ok(self.alloc(value))
     }
 }
 
@@ -297,27 +348,21 @@ impl<T: ?Sized + DynTrace> GcObject<T> {
 }
 impl<T: DynTrace> GcObject<T> {
     #[inline]
-    pub unsafe fn from_raw(raw: *mut T) -> Box<GcObject<T>> {
-        Box::from_raw(Self::ptr_from_raw(raw))
+    pub unsafe fn into_erased_static(self: Box<Self>) -> Box<GcObject<(dyn DynTrace + 'static)>> {
+        std::mem::transmute::<_, Box<GcObject<(dyn DynTrace + 'static)>>>(
+            self as Box<GcObject<(dyn DynTrace + '_)>>
+        )
     }
     #[inline]
     pub unsafe fn ptr_from_raw(raw: *mut T) -> *mut GcObject<T> {
-        raw.cast::<u8>()
+        let result = raw.cast::<u8>()
             .sub(object_value_offset(&*raw))
-            .cast::<GcObject<T>>()
-    }
-
-    #[inline]
-    pub fn into_raw(self: Box<Self>) -> *mut T {
-        // In debug mode, verify that from_raw can correctly recover this
+            .cast::<GcObject<T>>();
         debug_assert!(std::ptr::eq(
-            (&*self as *const Self)
-                .cast::<u8>()
-                .wrapping_add(object_value_offset(&self.value))
-                as *const T,
-            &self.value as *const T
+            &mut (*result).value,
+            raw.wrapping_sub(object_value_offset(&*raw))
         ));
-        unsafe { &mut (*Box::into_raw(self)).value }
+        result
     }
 }
 #[inline]
