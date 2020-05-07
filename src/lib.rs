@@ -41,9 +41,19 @@ macro_rules! safepoint_recurse {
     ($collector:ident, $root:expr, |$sub_collector:ident, $new_root:ident| $closure:expr) => {unsafe {
         use $crate::{GcContext};
         // TODO: Panic safety
-        // TODO: Allow returning garbage-collected values from closure (requires rebranding)
         let erased = GcContext::rebrand_static(&$collector, $value);
         GcContext::recuse_context(&mut $collector, erased, |$sub_collector, $new_root| $closure)
+    }};
+    ($collector:ident, $root:expr, @managed_result |$sub_collector:ident, $new_root:ident| $closure:expr) => {unsafe {
+        use $crate::{GcContext};
+        // TODO: Panic safety
+        let erased_root = GcContext::rebrand_static(&$collector, $value);
+        let result = GcContext::recuse_context(&mut $collector, erased, |$sub_collector, $new_root| {
+            let result = $closure;
+            // NOTE: We're assuming there's only a safepoint at the start (not at the end)
+            GcContext::rebrand_static(&$sub_collector, result)
+        });
+        GcContext::rebrand_self(&$collector, result)
     }};
 }
 
