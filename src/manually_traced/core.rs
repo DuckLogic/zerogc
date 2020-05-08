@@ -142,8 +142,9 @@ unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a mut T {
 unsafe impl<'a, T: NullTrace> NullTrace for &'a mut T {}
 unsafe impl<'a, T: GcSafe> GcSafe for &'a mut T {}
 /// TODO: Right now we can only rebrand unmanaged types (NullTrace)
-unsafe impl<'a: 'new_gc, 'new_gc, Id: CollectorId, T: NullTrace> GcBrand<'new_gc, Id> for &'a mut T {
-    type Branded = Self;
+unsafe impl<'a, 'new_gc, Id, T> GcBrand<'new_gc, Id> for &'a mut T
+    where 'a: 'new_gc, Id: CollectorId, T: GcBrand<'new_gc, Id> {
+    type Branded = &'new_gc mut <T as GcBrand<'new_gc, Id>>::Branded;
 }
 
 /// Implements tracing for slices, by tracing all the objects they refer to.

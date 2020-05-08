@@ -5,11 +5,12 @@
     negative_impls, // impl !Send is much cleaner than PhantomData<Rc<()>>
     exhaustive_patterns, // Allow exhaustive matching against never
 )]
-use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcBrand, GcVisitor, TraceImmutable, GcAllocContext};
+use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcVisitor, TraceImmutable, GcAllocContext};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::Layout;
 use std::cell::RefCell;
 use std::ptr::NonNull;
+use std::rc::Rc;
 
 /// An alias to `zerogc::Gc<T, SimpleCollectorId>` to simplify use with zerogc-simple
 pub type Gc<'gc, T> = zerogc::Gc<'gc, T, SimpleCollectorId>;
@@ -30,11 +31,11 @@ impl SimpleCollectorId {
     }
 }
 unsafe impl CollectorId for SimpleCollectorId {}
-pub struct SimpleCollector(Box<RawSimpleCollector>);
+pub struct SimpleCollector(Rc<RawSimpleCollector>);
 impl SimpleCollector {
     pub fn create() -> SimpleCollector {
         let id = SimpleCollectorId::acquire();
-        SimpleCollector(Box::new(RawSimpleCollector {
+        SimpleCollector(Rc::new(RawSimpleCollector {
             id, shadow_stack: RefCell::new(ShadowStack(Vec::new())),
             heap: RefCell::new(GcHeap {
                 allocated_size: 0,
@@ -278,7 +279,7 @@ unsafe impl<'a> GcVisitor for CollectionTask<'a> {
 impl !Send for RawSimpleCollector {}
 
 pub struct SimpleCollectorContext {
-    collector: Box<RawSimpleCollector>
+    collector: Rc<RawSimpleCollector>
 }
 unsafe impl GcContext for SimpleCollectorContext {
     type Id = SimpleCollectorId;
@@ -292,22 +293,18 @@ unsafe impl GcContext for SimpleCollectorContext {
         );
     }
 
-    unsafe fn recurse_context<T, F, R>(&mut self, mut value: T, func: F) -> R
-        where T: Trace + for <'a> GcBrand<'a, Self::Id>,
-              F: for<'a, 'b> FnOnce(&'a mut Self, &'b mut <T as GcBrand<'b, Self::Id>>::Branded) -> R {
-        let dyn_ptr = self.collector.shadow_stack.borrow_mut().push(&mut value);
-        self.collector.maybe_collect();
-        // NOTE: We can just rebind self for new collector context ^_^
-        let result = func(
-            &mut *self,
-            &mut *(&mut value as *mut T as *mut <T as GcBrand<'_, Self::Id>>::Branded)
-        );
+    unsafe fn recurse_context<T, F, R>(&self, value: &mut T, func: F) -> R
+        where T: Trace, F: FnOnce(&mut Self, &Self, &mut T) -> R {
+        let dyn_ptr = self.collector.shadow_stack.borrow_mut().push(value);
+        let mut sub_context = SimpleCollectorContext {
+            collector: self.collector.clone()
+        };
+        let result = func(&mut sub_context, &*self, value);
+        drop(sub_context);
         assert_eq!(
             self.collector.shadow_stack.borrow_mut().pop(),
             Some(dyn_ptr)
         );
-        // Explicitly drop the value now that we're done using it
-        std::mem::drop(value);
         result
     }
 }

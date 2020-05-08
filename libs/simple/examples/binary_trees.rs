@@ -43,7 +43,7 @@ fn inner(
     depth: i32, iterations: u32
 ) -> String {
     let chk: i32 = (0 .. iterations).into_iter().map(|_| {
-        safepoint_recurse!(gc, (), |gc, new_root| {
+        safepoint_recurse!(gc, |gc, new_root| {
             let () = new_root;
             let a = bottom_up_tree(&gc, depth);
             item_check(&a)
@@ -70,16 +70,14 @@ fn main() {
 
     let long_lived_tree = bottom_up_tree(&gc, max_depth);
 
-    let mut messages = Vec::new();
-    let long_lived_tree = safepoint_recurse!(gc, long_lived_tree, @managed_result, |gc, long_lived_tree| {
-        messages.extend((min_depth / 2..max_depth / 2 + 1).into_iter().map(|half_depth| {
+    let (long_lived_tree, messages) = safepoint_recurse!(gc, long_lived_tree, |gc, long_lived_tree| {
+        (min_depth / 2..max_depth / 2 + 1).into_iter().map(|half_depth| {
             let depth = half_depth * 2;
             let iterations = 1 << ((max_depth - depth + min_depth) as u32);
-            safepoint_recurse!(gc, (), |new_gc, new_root| {
+            safepoint_recurse!(gc, |new_gc, new_root| {
                 inner(&mut new_gc, depth, iterations)
             })
-        }));
-        *long_lived_tree
+        }).collect::<Vec<String>>()
     });
 
     for message in messages {

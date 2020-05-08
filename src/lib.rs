@@ -28,30 +28,86 @@ pub use self::cell::{GcCell, GcRefCell};
 use std::any::TypeId;
 use std::marker::PhantomData;
 
-/// Stop the collector at a safepoint,
-/// then invoke the closure with a temporary [GcContext].
+/// Invoke the closure with a temporary [GcContext],
+/// then perform a safepoint afterwards.
 ///
-/// The specified value is used both as a root for the initial safepoint
-/// and is also guarenteed to live throughout the created context (and therefore the entire closure).
+/// Normally returns a tuple `($updated_root, $closure_result)`.
+///
+/// If a value is provided it is considered as a root of garbage collection
+/// both for the safepoint and the duration of the entire context.
 ///
 /// # Safety
 /// This macro is completely safe, although it expands to unsafe code internally.
-#[macro_export]
+// TODO: Document all forms of this macro
+#[macro_export(local_inner_macros)]
 macro_rules! safepoint_recurse {
-    ($context:ident, $root:expr, |$sub_context:ident, $new_root:ident| $closure:expr) => {unsafe {
-        use $crate::{GcContext};
-        // TODO: Panic safety
-        let erased = $context.rebrand_static($root);
-        $context.recurse_context(erased, |mut $sub_context, $new_root| $closure)
+    ($context:ident, |$sub_context:ident, $new_root:ident| $closure:expr) => {{
+        let ((), result) = safepoint_recurse!($context, (), |$sub_context, $new_root| $closure);
+        result
+    }};
+    ($context:ident, $root:expr, |$sub_context:ident, $new_root:ident| $closure:expr) => {{
+        let mut root = $root;
+        let result = unsafe { __recurse_context!($context, &mut root, |$sub_context, $new_root| {
+            $closure
+        }) };
+        /*
+         * NOTE: We're assuming result is unmanaged here
+         * The borrow checker will verify this is true (by marking this as a mutation).
+         * If you need a manged result, use the @managed_result variant
+         */
+        let updated_root = safepoint!($context, $root);
+        (updated_root, result)
     }};
     ($context:ident, $root:expr, @managed_result, |$sub_context:ident, $new_root:ident| $closure:expr) => {{
         use $crate::{GcContext};
-        let result = safepoint_recurse!($context, $root, |$sub_context, $new_root| {
-            let result = $closure;
-            // NOTE: We're assuming there's only a safepoint at the start (not at the end)
-            unsafe { GcContext::rebrand_static($sub_context, result) }
+        let mut root = $root;
+        let erased_result = unsafe { __recurse_context!(
+            $context, &mut root,
+            |$sub_context, $new_root| {
+                let result = $closure;
+                $sub_context.rebrand_static(result)
+            }
+        ) };
+        /*
+         * Rebrand back to the current collector lifetime
+         * It could have possibly been allocated from the sub-context inside the closure,
+         * but as long as it was valid at the end of the closure it's valid now.
+         * We trust that GcContext::recurse_context
+         * did not perform a collection after calling the closure.
+         */
+        let result = unsafe { $context.rebrand_self(erased_result) };
+        safepoint!($context, (root, result))
+    }};
+}
+
+/// Create a new sub-context for the duration of the closure
+///
+/// The specified `root` object will be appended to the shadowstack
+/// and is guarenteed to live for the entire lifetime of the closure (and the created sub-context).
+///
+/// Unlike `safepoint_recurse!` this doesn't imply a safepoint anywhere.
+///
+/// # Safety
+/// This doesn't actually mutate the original collector.
+/// It is possible user code could trigger a collection in the closure
+/// without the borrow checker noticing invalid pointers elsewhere.
+/// (See docs for [GcContext::recurse_context])
+///
+/// It is not publicly exposed for this reason
+#[macro_export]
+macro_rules! __recurse_context {
+    ($context:ident, $root:expr, |$sub_context:ident, $new_root:ident| $closure:expr) => {{
+        use $crate::{GcContext};
+        // TODO: Panic safety
+        $context.recurse_context(&mut $root, |mut $sub_context, root_context, erased_root| {
+            /*
+             * NOTE: Guarenteed to live for the lifetime of the entire closure.
+             * It's been appended to the shadow stack so its considered a root.
+             * We're passed a dummy `$root_context` corresponding to this lifetime
+             */
+            let $new_root = $context.rebrand_self(erased_root);
+            $closure
         })
-        unsafe { $context.rebrand_self(result) }
     }};
 }
 
@@ -156,19 +212,24 @@ pub unsafe trait GcContext {
         branded
     }
 
-    /// Stop the collector at a safepoint,
-    /// then invoke the closure with a temporary [GcContext].
+    /// Invoke the closure with a temporary [GcContext].
     ///
-    /// The specified value is used both as a root for the initial safepoint
-    /// and is guarenteed to live throughout the created context for the closure.
+    /// The specified value is
+    /// guarenteed to live throughout the created context for the closure.
+    ///
     ///
     /// ## Safety
-    /// This macro should never be invoked by user code.
+    /// This macro doesn't imply garbage collection,
+    /// so it doesn't mutate the collector directly.
+    /// However the specified closure could trigger a collection in the sub-context.
+    /// This would in undefined behavior if the collection
+    /// invalidates a pointer tied to this context.
+    ///
+    /// For this reason, this function should never be invoked by user code.
     ///
     /// See the [safepoint_recurse!] macro for a safe wrapper
-    unsafe fn recurse_context<T, F, R>(&mut self, value: T, func: F) -> R
-        where T: Trace + for <'a> GcBrand<'a, Self::Id>,
-              F: for<'a, 'b> FnOnce(&'a mut Self, &'b mut <T as GcBrand<'b, Self::Id>>::Branded) -> R;
+    unsafe fn recurse_context<T, F, R>(&self, value: &mut T, func: F) -> R
+        where T: Trace, F: FnOnce(&mut Self, &Self, &mut T) -> R;
 }
 pub unsafe trait GcAllocContext: GcContext {
     type MemoryErr: Debug;
