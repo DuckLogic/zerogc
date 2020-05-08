@@ -38,22 +38,20 @@ use std::marker::PhantomData;
 /// This macro is completely safe, although it expands to unsafe code internally.
 #[macro_export]
 macro_rules! safepoint_recurse {
-    ($collector:ident, $root:expr, |$sub_collector:ident, $new_root:ident| $closure:expr) => {unsafe {
+    ($context:ident, $root:expr, |$sub_context:ident, $new_root:ident| $closure:expr) => {unsafe {
         use $crate::{GcContext};
         // TODO: Panic safety
-        let erased = $collector.rebrand_static($root);
-        $collector.recurse_context(erased, |mut $sub_collector, $new_root| $closure)
+        let erased = $context.rebrand_static($root);
+        $context.recurse_context(erased, |mut $sub_context, $new_root| $closure)
     }};
-    ($collector:ident, $root:expr, @managed_result, |$sub_collector:ident, $new_root:ident| $closure:expr) => {unsafe {
+    ($context:ident, $root:expr, @managed_result, |$sub_context:ident, $new_root:ident| $closure:expr) => {{
         use $crate::{GcContext};
-        // TODO: Panic safety
-        let erased_root = $collector.rebrand_static($root);
-        let result = $collector.recurse_context(erased_root, |mut $sub_collector, $new_root| {
+        let result = safepoint_recurse!($context, $root, |$sub_context, $new_root| {
             let result = $closure;
             // NOTE: We're assuming there's only a safepoint at the start (not at the end)
-            GcContext::rebrand_static($sub_collector, result)
-        });
-        $collector.rebrand_self(result)
+            unsafe { GcContext::rebrand_static($sub_context, result) }
+        })
+        unsafe { $context.rebrand_self(result) }
     }};
 }
 
