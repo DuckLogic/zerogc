@@ -358,10 +358,8 @@ impl<T: DynTrace> GcObject<T> {
         let result = raw.cast::<u8>()
             .sub(object_value_offset(&*raw))
             .cast::<GcObject<T>>();
-        debug_assert!(std::ptr::eq(
-            &mut (*result).value,
-            raw.wrapping_sub(object_value_offset(&*raw))
-        ));
+        // Debug verify object_value_offset is working
+        debug_assert_eq!(&mut (*result).value as *mut T, raw);
         result
     }
 }
