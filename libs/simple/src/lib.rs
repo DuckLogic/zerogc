@@ -39,7 +39,7 @@ impl SimpleCollector {
             id, shadow_stack: RefCell::new(ShadowStack(Vec::new())),
             heap: RefCell::new(GcHeap {
                 allocated_size: 0,
-                last_retained_size: None,
+                threshold: INITIAL_COLLECTION_THRESHOLD,
                 objects: Vec::with_capacity(32)
             })
         }))
@@ -91,26 +91,19 @@ impl ShadowStack {
     }
 }
 
+
+/// The initial memory usage to start a collection
+const INITIAL_COLLECTION_THRESHOLD: usize = 2048;
+
 struct GcHeap {
     allocated_size: usize,
-    last_retained_size: Option<usize>,
+    threshold: usize,
     objects: Vec<Box<GcObject<dyn DynTrace>>>,
 }
 impl GcHeap {
+    #[inline]
     fn should_collect(&self) -> bool {
-        /// The minimum memory usage to start a collection
-        const MIN_COLLECTION_THRESHOLD: usize = 8192;
-        match self.last_retained_size {
-            None => self.allocated_size >= MIN_COLLECTION_THRESHOLD,
-            Some(last_size) => {
-                if self.allocated_size < MIN_COLLECTION_THRESHOLD {
-                    return false
-                }
-                let extra_usage = self.allocated_size - last_size;
-                // Trigger if we are 50% larger than the last retained size
-                extra_usage >= last_size / 2
-            }
-        }
+        self.allocated_size >= self.threshold
     }
 }
 
@@ -209,7 +202,8 @@ impl<'a> CollectionTask<'a> {
         }
         assert_eq!(expected_size, actual_size);
         self.heap.allocated_size = actual_size;
-        self.heap.last_retained_size = Some(actual_size);
+        // Update the threshold to be 150% of currently used size
+        self.heap.threshold = actual_size + (actual_size / 2);
     }
 }
 unsafe impl<'a> GcVisitor for CollectionTask<'a> {
