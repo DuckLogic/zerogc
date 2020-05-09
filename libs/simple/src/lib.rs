@@ -8,7 +8,7 @@
 use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcVisitor, TraceImmutable, GcAllocContext};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::Layout;
-use std::cell::RefCell;
+use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
@@ -16,6 +16,7 @@ use std::rc::Rc;
 pub type Gc<'gc, T> = zerogc::Gc<'gc, T, SimpleCollectorId>;
 
 static NEXT_COLLECTOR_ID: AtomicUsize = AtomicUsize::new(0);
+
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SimpleCollectorId(usize);
@@ -31,17 +32,16 @@ impl SimpleCollectorId {
     }
 }
 unsafe impl CollectorId for SimpleCollectorId {}
-pub struct SimpleCollector(Rc<RawSimpleCollector>);
+pub struct SimpleCollector<A: SimpleAlloc = DebugAlloc>(Rc<RawSimpleCollector<A>>);
 impl SimpleCollector {
     pub fn create() -> SimpleCollector {
         let id = SimpleCollectorId::acquire();
         SimpleCollector(Rc::new(RawSimpleCollector {
             id, shadow_stack: RefCell::new(ShadowStack(Vec::new())),
-            heap: RefCell::new(GcHeap {
-                allocated_size: 0,
-                threshold: INITIAL_COLLECTION_THRESHOLD,
-                objects: Vec::with_capacity(32)
-            })
+            heap: GcHeap {
+                threshold: Cell::new(INITIAL_COLLECTION_THRESHOLD),
+                allocator: DebugAlloc::new(id)
+            }
         }))
     }
 
@@ -64,10 +64,10 @@ unsafe impl GarbageCollectionSystem for SimpleCollector {
 }
 
 trait DynTrace {
-    fn trace<'a>(&mut self, visitor: &mut CollectionTask<'a>);
+    fn trace<'a>(&mut self, visitor: &mut MarkVisitor<'a>);
 }
 impl<T: Trace + ?Sized> DynTrace for T {
-    fn trace<'a>(&mut self, visitor: &mut CollectionTask<'a>) {
+    fn trace<'a>(&mut self, visitor: &mut MarkVisitor<'a>) {
         let Ok(()) = self.visit(visitor);
     }
 }
@@ -95,39 +95,108 @@ impl ShadowStack {
 /// The initial memory usage to start a collection
 const INITIAL_COLLECTION_THRESHOLD: usize = 2048;
 
-struct GcHeap {
-    allocated_size: usize,
-    threshold: usize,
-    objects: Vec<Box<GcObject<dyn DynTrace>>>,
+struct GcHeap<A: SimpleAlloc> {
+    threshold: Cell<usize>,
+    allocator: A
 }
-impl GcHeap {
+impl<A: SimpleAlloc> GcHeap<A> {
     #[inline]
     fn should_collect(&self) -> bool {
-        self.allocated_size >= self.threshold
+        self.allocator.allocated_size() >= self.threshold.get()
     }
 }
 
+/// The internal trait for an allocator backend
+#[doc(hidden)]
+pub unsafe trait SimpleAlloc {
+    fn allocated_size(&self) -> usize;
+    fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T>;
+    unsafe fn sweep(&self);
+}
+#[doc(hidden)]
+pub struct DebugAlloc {
+    id: SimpleCollectorId,
+    allocated_size: Cell<usize>,
+    objects: RefCell<Vec<Box<GcObject<dyn DynTrace>>>>
+}
+impl DebugAlloc {
+    fn new(id: SimpleCollectorId) -> DebugAlloc {
+        DebugAlloc {
+            id, allocated_size: Cell::new(0),
+            objects: RefCell::new(Vec::with_capacity(32))
+        }
+    }
+}
+unsafe impl SimpleAlloc for DebugAlloc {
+    #[inline]
+    fn allocated_size(&self) -> usize {
+        self.allocated_size.get()
+    }
+    fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
+        let mut objects = self.objects.borrow_mut();
+        let mut object = Box::new(GcObject {
+            value, state: MarkState::White
+        });
+        let gc = unsafe { Gc::from_raw(
+            NonNull::new_unchecked(&mut object.value),
+            self.id
+        ) };
+        {
+            let size = object.size();
+            objects.push(unsafe { GcObject::erase_box_lifetime(object) });
+            self.allocated_size.set(self.allocated_size() + size);
+        }
+        gc
+    }
+    unsafe fn sweep(&self) {
+        let mut expected_size = self.allocated_size.get();
+        let mut actual_size = 0;
+        let mut objects = self.objects.borrow_mut();
+        objects.retain(|obj| {
+            match obj.state {
+                MarkState::White => {
+                    // Free the object
+                    expected_size -= obj.size();
+                    false
+                },
+                MarkState::Grey => panic!("All gray objects should've been processed"),
+                MarkState::Black => {
+                    // Retain the object
+                    actual_size += obj.size();
+                    true
+                }
+            }
+        });
+        // Reset all remaining objects to white
+        for obj in &mut *objects {
+            obj.state = MarkState::White;
+        }
+        assert_eq!(expected_size, actual_size);
+        self.allocated_size.set(actual_size);
+    }
+}
+
+
 /// The internal data for a simple collector
-struct RawSimpleCollector {
+struct RawSimpleCollector<A: SimpleAlloc> {
     id: SimpleCollectorId,
     shadow_stack: RefCell<ShadowStack>,
-    heap: RefCell<GcHeap>
+    heap: GcHeap<A>
 }
-impl RawSimpleCollector {
+impl<A: SimpleAlloc> RawSimpleCollector<A> {
     #[inline]
     unsafe fn maybe_collect(&self) {
-        if self.heap.borrow().should_collect() {
+        if self.heap.should_collect() {
             self.perform_collection()
         }
     }
     #[cold]
     #[inline(never)]
     unsafe fn perform_collection(&self) {
-        let mut heap = self.heap.borrow_mut();
         let mut task = CollectionTask {
             id: self.id,
             gray_stack: Vec::with_capacity(64),
-            heap: &mut *heap
+            heap: &self.heap
         };
         let shadow_stack = self.shadow_stack.borrow();
         for &root in &shadow_stack.0 {
@@ -140,19 +209,13 @@ enum GreyElement {
     Object(*mut GcObject<dyn DynTrace>),
     Other(*mut dyn DynTrace)
 }
-struct CollectionTask<'a> {
+struct CollectionTask<'a, A: SimpleAlloc> {
     id: SimpleCollectorId,
     gray_stack: Vec<GreyElement>,
-    heap: &'a mut GcHeap
+    heap: &'a GcHeap<A>
 }
-impl<'a> CollectionTask<'a> {
+impl<'a, A: SimpleAlloc> CollectionTask<'a, A> {
     fn run(&mut self) {
-        if cfg!(debug_assertions) {
-            // Verify everything is white
-            for obj in &self.heap.objects {
-                assert_eq!(obj.state, MarkState::White);
-            }
-        }
         // Mark
         while let Some(target) = self.gray_stack.pop() {
             let target_value = match target {
@@ -166,7 +229,11 @@ impl<'a> CollectionTask<'a> {
                     unsafe { &mut *target }
                 }
             };
-            (*target_value).trace(self);
+            let mut visitor = MarkVisitor {
+                id: self.id,
+                gray_stack: &mut self.gray_stack
+            };
+            (*target_value).trace(&mut visitor);
             match target {
                 GreyElement::Object(obj) => {
                     unsafe {
@@ -179,34 +246,17 @@ impl<'a> CollectionTask<'a> {
             }
         }
         // Sweep
-        let mut expected_size = self.heap.allocated_size;
-        let mut actual_size = 0;
-        self.heap.objects.retain(|obj| {
-            match obj.state {
-                MarkState::White => {
-                    // Free the object
-                    expected_size -= obj.size();
-                    false
-                },
-                MarkState::Grey => panic!("All grey objects should've been processed"),
-                MarkState::Black => {
-                    // Retain the object
-                    actual_size += obj.size();
-                    true
-                }
-            }
-        });
-        // Reset all remaining objects to white
-        for obj in &mut self.heap.objects {
-            obj.state = MarkState::White;
-        }
-        assert_eq!(expected_size, actual_size);
-        self.heap.allocated_size = actual_size;
+        unsafe { self.heap.allocator.sweep() };
+        let updated_size = self.heap.allocator.allocated_size();
         // Update the threshold to be 150% of currently used size
-        self.heap.threshold = actual_size + (actual_size / 2);
+        self.heap.threshold.set(updated_size + (updated_size / 2));
     }
 }
-unsafe impl<'a> GcVisitor for CollectionTask<'a> {
+struct MarkVisitor<'a> {
+    id: SimpleCollectorId,
+    gray_stack: &'a mut Vec<GreyElement>
+}
+unsafe impl<'a> GcVisitor for MarkVisitor<'a> {
     type Err = !;
 
     #[inline(always)]
@@ -270,12 +320,12 @@ unsafe impl<'a> GcVisitor for CollectionTask<'a> {
 }
 
 /// A simple collector can only be used from a single thread
-impl !Send for RawSimpleCollector {}
+impl<A: SimpleAlloc> !Send for RawSimpleCollector<A> {}
 
-pub struct SimpleCollectorContext {
-    collector: Rc<RawSimpleCollector>
+pub struct SimpleCollectorContext<A: SimpleAlloc = DebugAlloc> {
+    collector: Rc<RawSimpleCollector<A>>
 }
-unsafe impl GcContext for SimpleCollectorContext {
+unsafe impl<A: SimpleAlloc> GcContext for SimpleCollectorContext<A> {
     type Id = SimpleCollectorId;
 
     unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut T) {
@@ -303,24 +353,12 @@ unsafe impl GcContext for SimpleCollectorContext {
     }
 }
 unsafe impl GcAllocContext for SimpleCollectorContext {
-    // Right now Box doesn't implement failable alloc
+    // Right now we don't support failable alloc
     type MemoryErr = !;
 
+    #[inline]
     fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
-        let mut object = Box::new(GcObject {
-            value, state: MarkState::White
-        });
-        let gc = unsafe { Gc::from_raw(
-            NonNull::new_unchecked(&mut object.value),
-            self.collector.id
-        ) };
-        {
-            let mut heap = self.collector.heap.borrow_mut();
-            let size = object.size();
-            heap.objects.push(unsafe { object.into_erased_static() });
-            heap.allocated_size += size;
-        }
-        gc
+        self.collector.heap.allocator.alloc(value)
     }
 
     #[inline]
@@ -342,9 +380,15 @@ impl<T: ?Sized + DynTrace> GcObject<T> {
 }
 impl<T: DynTrace> GcObject<T> {
     #[inline]
-    pub unsafe fn into_erased_static(self: Box<Self>) -> Box<GcObject<(dyn DynTrace + 'static)>> {
+    unsafe fn erase_box_lifetime(val: Box<Self>) -> Box<GcObject<(dyn DynTrace + 'static)>> {
         std::mem::transmute::<_, Box<GcObject<(dyn DynTrace + 'static)>>>(
-            self as Box<GcObject<(dyn DynTrace + '_)>>
+            val as Box<GcObject<(dyn DynTrace + '_)>>
+        )
+    }
+    #[inline]
+    unsafe fn erase_pointer_lifetime(ptr: *mut Self) -> *mut GcObject<(dyn DynTrace + 'static)> {
+        std::mem::transmute::<_, *mut GcObject<(dyn DynTrace + 'static)>>(
+            ptr as *mut GcObject<(dyn DynTrace + '_)>
         )
     }
     #[inline]
