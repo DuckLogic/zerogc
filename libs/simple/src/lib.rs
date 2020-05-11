@@ -4,16 +4,25 @@
     never_type, // Used for errors (which are currently impossible)
     negative_impls, // impl !Send is much cleaner than PhantomData<Rc<()>>
     exhaustive_patterns, // Allow exhaustive matching against never
+    drain_filter, // Used internally
+    raw, // Gives the raw definition of trait objects
 )]
-use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcVisitor, TraceImmutable, GcAllocContext};
+use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcVisitor, GcAllocContext};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::Layout;
 use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::collections::HashMap;
+
+mod raw_arena;
 
 /// An alias to `zerogc::Gc<T, SimpleCollectorId>` to simplify use with zerogc-simple
 pub type Gc<'gc, T> = zerogc::Gc<'gc, T, SimpleCollectorId>;
+/// A garbage collector that internally compacts memory
+pub type CompactingCollector = SimpleCollector<CompactingAlloc>;
+/// A context for a [CompactingCollector]
+pub type CompactingCollectorContext = SimpleCollectorContext<CompactingAlloc>;
 
 static NEXT_COLLECTOR_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -34,20 +43,29 @@ impl SimpleCollectorId {
 unsafe impl CollectorId for SimpleCollectorId {}
 pub struct SimpleCollector<A: SimpleAlloc = DebugAlloc>(Rc<RawSimpleCollector<A>>);
 impl SimpleCollector {
-    pub fn create() -> SimpleCollector {
+    pub fn create() -> Self {
+        SimpleCollector::from_alloc(DebugAlloc::new)
+    }
+}
+impl SimpleCollector<CompactingAlloc> {
+    pub fn create_debug() -> Self {
+        SimpleCollector::from_alloc(CompactingAlloc::new)
+    }
+}
+impl<A: SimpleAlloc> SimpleCollector<A> {
+    fn from_alloc(func: fn(SimpleCollectorId) -> A) -> Self {
         let id = SimpleCollectorId::acquire();
         SimpleCollector(Rc::new(RawSimpleCollector {
             id, shadow_stack: RefCell::new(ShadowStack(Vec::new())),
             heap: GcHeap {
                 threshold: Cell::new(INITIAL_COLLECTION_THRESHOLD),
-                allocator: DebugAlloc::new(id)
+                allocator: func(id)
             }
         }))
     }
-
     /// Make this collector into a context
     #[inline]
-    pub fn into_context(self) -> SimpleCollectorContext {
+    pub fn into_context(self) -> SimpleCollectorContext<A> {
         SimpleCollectorContext {
             collector: self.0
         }
@@ -63,11 +81,17 @@ unsafe impl GarbageCollectionSystem for SimpleCollector {
     }
 }
 
-trait DynTrace {
+/// Used internally to dynamically dispatch to our visitors
+#[doc(hidden)]
+pub trait DynTrace {
     fn trace<'a>(&mut self, visitor: &mut MarkVisitor<'a>);
+    fn compact<'a>(&mut self, visitor: &mut CompactVisitor<'a>);
 }
 impl<T: Trace + ?Sized> DynTrace for T {
     fn trace<'a>(&mut self, visitor: &mut MarkVisitor<'a>) {
+        let Ok(()) = self.visit(visitor);
+    }
+    fn compact<'a>(&mut self, visitor: &mut CompactVisitor<'a>) {
         let Ok(()) = self.visit(visitor);
     }
 }
@@ -111,7 +135,7 @@ impl<A: SimpleAlloc> GcHeap<A> {
 pub unsafe trait SimpleAlloc {
     fn allocated_size(&self) -> usize;
     fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T>;
-    unsafe fn sweep(&self);
+    unsafe fn sweep<'a>(&self, roots: &[*mut (dyn DynTrace + 'a)]);
 }
 #[doc(hidden)]
 pub struct DebugAlloc {
@@ -148,7 +172,7 @@ unsafe impl SimpleAlloc for DebugAlloc {
         }
         gc
     }
-    unsafe fn sweep(&self) {
+    unsafe fn sweep<'a>(&self, _roots: &[*mut (dyn DynTrace + 'a)]) {
         let mut expected_size = self.allocated_size.get();
         let mut actual_size = 0;
         let mut objects = self.objects.borrow_mut();
@@ -176,6 +200,154 @@ unsafe impl SimpleAlloc for DebugAlloc {
     }
 }
 
+#[doc(hidden)]
+pub struct CompactingAlloc {
+    id: SimpleCollectorId,
+    arena: raw_arena::Arena,
+    // NOTE: Doesn't include arena-internal padding
+    approx_allocated_bytes: Cell<usize>,
+    objects: RefCell<Vec<*mut GcObject<dyn DynTrace>>>
+}
+impl CompactingAlloc {
+    pub fn new(id: SimpleCollectorId) -> Self {
+        CompactingAlloc {
+            id, arena: raw_arena::Arena::new(),
+            approx_allocated_bytes: Cell::new(0),
+            objects: RefCell::new(Vec::with_capacity(32))
+        }
+    }
+}
+unsafe impl SimpleAlloc for CompactingAlloc {
+    #[inline]
+    fn allocated_size(&self) -> usize {
+        // NOTE: Arena::used_bytes is O(n) the number of chunks
+        self.approx_allocated_bytes.get()
+    }
+
+    #[inline]
+    fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
+        /*
+         * This is much faster than malloc, by a factor of 10x to 100x.
+         * This is the compacting collector's main advantage.
+         * We can inline since it's just a bounds check and pointer increment
+         * in the common case.
+         */
+        let obj = self.arena.alloc(GcObject {
+            value, state: MarkState::White,
+        });
+        self.approx_allocated_bytes.set(self.approx_allocated_bytes.get() + obj.size());
+        /*
+         * TODO: How does this Vec::push impact efficiency?
+         * It's certinally much simpler (and safer) than iterating
+         * over the arena's raw memory in our reset() method.
+         * We could add a linked list internal to GcObject, but that would
+         * add memory overhead......
+         */
+        unsafe {
+            self.objects.borrow_mut().push(GcObject::erase_pointer_lifetime(obj));
+            Gc::from_raw(NonNull::from(&obj.value), self.id)
+        }
+    }
+
+    unsafe fn sweep<'a>(&self, roots: &[*mut (dyn DynTrace + 'a)]) {
+        assert!(self.arena.num_chunks() >= 1);
+        let used_arena_bytes = self.arena.total_used();
+        let mut objects = self.objects.borrow_mut();
+        assert!(self.approx_allocated_bytes.get() <= used_arena_bytes);
+        /*
+         * Ensure that the arena's 'current' chunk has enough memory
+         * to hold all currently used bytes
+         * After compaction, we want all memory confined to a single chunk.
+         */
+        if self.arena.current_chunk_capacity() < used_arena_bytes {
+            self.arena.create_raw_chunk(used_arena_bytes);
+        }
+        /*
+         * Reset all chunks. Marking all their memory as 'unused'
+         * This will not perform any writes or drops,
+         * so its safe to use as temporary scratch.
+         */
+        {
+            let chunks = self.arena.raw_chunks();
+            for chunk in &*chunks {
+                chunk.reset();
+            }
+        }
+        let expected_num_chunks = self.arena.num_chunks();
+        // NOTE: Consider replacing with Vec that we sort at the end?
+        let mut relocation_map = HashMap::with_capacity(objects.len());
+        for &ptr in &**objects {
+            let obj = &*ptr;
+            match obj.state {
+                MarkState::White => {
+                    /*
+                     * This is an object we'll want to clear
+                     * In a compacting collector, we can just ignore it :D
+                     * However we do want to run the Drop functions/
+                     * It implements the unsafe marker GcSafe, so it's destructor promises
+                     * not to resurrect objects.
+                     */
+                    std::ptr::drop_in_place(ptr);
+                },
+                MarkState::Grey => {
+                    /*
+                     * Safety:
+                     * Technically we leave this panic in a memory-safe (but nonsensical)
+                     * state. Some white (unreachable) objects are dropped
+                     * and some black (reachable) objects have been moved.
+                     * But we haven't performed any other operations at this point.
+                     */
+                    panic!("All grey objects should've been marked")
+                },
+                MarkState::Black => {
+                    let layout = Layout::for_value(obj);
+                    let moved = self.arena.alloc_layout(layout);
+                    std::ptr::copy_nonoverlapping(
+                        ptr as *const u8,
+                        moved,
+                        layout.size()
+                    );
+                    let old_obj = std::mem::transmute::<
+                        *mut GcObject<dyn DynTrace>, std::raw::TraitObject
+                    >(ptr);
+                    relocation_map.insert(old_obj.data as usize, moved);
+                },
+            }
+        }
+        // Verify that moving memory didn't unexpectedly allocate any more chunks
+        assert_eq!(expected_num_chunks, self.arena.num_chunks());
+        // Cleanup and relocate our our internal list
+        objects.drain_filter(|obj| {
+            use std::raw::TraitObject;;
+            let old_obj = std::mem::transmute::<*mut _, TraitObject>(*obj);
+            match relocation_map.get(&(old_obj.data as usize)) {
+                Some(&updated_location) => {
+                    *obj = std::mem::transmute::<_, *mut GcObject<dyn DynTrace>>(TraitObject {
+                        data: updated_location as *mut (),
+                        vtable: old_obj.vtable
+                    });
+                    // Update object to white to prepare for next collection
+                    (**obj).state = MarkState::White;
+                    false // do not drain
+                }
+                None => true // drain
+            }
+        }).for_each(std::mem::drop); // ignore everything we drain
+        // Actually perform relocations
+        {
+            let mut visitor = CompactVisitor {
+                relocations: &relocation_map,
+                id: self.id
+            };
+            for &root in roots {
+                (*root).compact(&mut visitor);
+            }
+        }
+        self.arena.free_old_chunks();
+        // We should've compacted down to one
+        assert_eq!(self.arena.num_chunks(), 1);
+    }
+}
 
 /// The internal data for a simple collector
 struct RawSimpleCollector<A: SimpleAlloc> {
@@ -195,13 +367,10 @@ impl<A: SimpleAlloc> RawSimpleCollector<A> {
     unsafe fn perform_collection(&self) {
         let mut task = CollectionTask {
             id: self.id,
+            roots: self.shadow_stack.borrow().0.clone(),
             gray_stack: Vec::with_capacity(64),
             heap: &self.heap
         };
-        let shadow_stack = self.shadow_stack.borrow();
-        for &root in &shadow_stack.0 {
-            task.gray_stack.push(GreyElement::Other(root));
-        }
         task.run();
     }
 }
@@ -211,11 +380,14 @@ enum GreyElement {
 }
 struct CollectionTask<'a, A: SimpleAlloc> {
     id: SimpleCollectorId,
+    roots: Vec<*mut dyn DynTrace>,
     gray_stack: Vec<GreyElement>,
     heap: &'a GcHeap<A>
 }
 impl<'a, A: SimpleAlloc> CollectionTask<'a, A> {
     fn run(&mut self) {
+        self.gray_stack.extend(self.roots.iter()
+            .map(|&ptr| GreyElement::Other(ptr)));
         // Mark
         while let Some(target) = self.gray_stack.pop() {
             let target_value = match target {
@@ -246,28 +418,52 @@ impl<'a, A: SimpleAlloc> CollectionTask<'a, A> {
             }
         }
         // Sweep
-        unsafe { self.heap.allocator.sweep() };
+        unsafe { self.heap.allocator.sweep(&self.roots) };
         let updated_size = self.heap.allocator.allocated_size();
         // Update the threshold to be 150% of currently used size
         self.heap.threshold.set(updated_size + (updated_size / 2));
     }
 }
-struct MarkVisitor<'a> {
+
+#[doc(hidden)] // Used by DynTrace
+pub struct CompactVisitor<'a> {
+    id: SimpleCollectorId,
+    relocations: &'a HashMap<usize, *mut u8>
+}
+unsafe impl<'a> GcVisitor for CompactVisitor<'a> {
+    type Err = !;
+
+    fn visit_gc<T, Id>(&mut self, gc: &mut zerogc::Gc<'_, T, Id>) -> Result<(), Self::Err>
+        where T: GcSafe, Id: CollectorId {
+        match gc.id().try_cast::<SimpleCollectorId>() {
+            Some(&other_id) => {
+                // If other instanceof SimpleCollectorId, assert runtime match
+                assert_eq!(other_id, self.id);
+            }
+            None => {
+                return Ok(());  // Belongs to another collector
+            }
+        }
+        let old_ptr = unsafe { GcObject::ptr_from_raw(gc.as_raw_ptr()) };
+        let updated_location = self.relocations[&(old_ptr as usize)] as *mut GcObject<T>;
+        unsafe {
+            // Check it's state has been updated to white :)
+            debug_assert_eq!((*updated_location).state, MarkState::White);
+            // Actually perform the relocation
+            let updated_gc = Gc::new(self.id, NonNull::new_unchecked(&mut (*updated_location).value));
+            // We know `Id == SimpleCollectorId`
+            *gc = std::mem::transmute_copy::<Gc<T>, zerogc::Gc<T, Id>>(&updated_gc);
+        }
+        Ok(())
+    }
+}
+#[doc(hidden)] // Used by DynTrace
+pub struct MarkVisitor<'a> {
     id: SimpleCollectorId,
     gray_stack: &'a mut Vec<GreyElement>
 }
 unsafe impl<'a> GcVisitor for MarkVisitor<'a> {
     type Err = !;
-
-    #[inline(always)]
-    fn visit<T: Trace + ?Sized>(&mut self, value: &mut T) -> Result<(), Self::Err> {
-        value.visit(self)
-    }
-
-    #[inline(always)]
-    fn visit_immutable<T: TraceImmutable + ?Sized>(&mut self, value: &T) -> Result<(), Self::Err> {
-        value.visit_immutable(self)
-    }
 
     fn visit_gc<T, Id>(&mut self, gc: &mut zerogc::Gc<'_, T, Id>) -> Result<(), Self::Err>
         where T: GcSafe, Id: CollectorId {

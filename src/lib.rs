@@ -497,10 +497,17 @@ pub unsafe trait NullTrace: Trace + TraceImmutable {}
 /// Visits garbage collected objects
 ///
 /// This should only be used by a [GarbageCollectionSystem]
-pub unsafe trait GcVisitor {
+pub unsafe trait GcVisitor: Sized {
     type Err: Debug;
-    fn visit<T: Trace + ?Sized>(&mut self, value: &mut T) -> Result<(), Self::Err>;
-    fn visit_immutable<T: TraceImmutable + ?Sized>(&mut self, value: &T) -> Result<(), Self::Err>;
+
+    #[inline(always)]
+    fn visit<T: Trace + ?Sized>(&mut self, value: &mut T) -> Result<(), Self::Err> {
+        value.visit(self)
+    }
+    #[inline(always)]
+    fn visit_immutable<T: TraceImmutable + ?Sized>(&mut self, value: &T) -> Result<(), Self::Err> {
+        value.visit_immutable(self)
+    }
     /// Visit a garbage collected pointer
     fn visit_gc<T, Id>(&mut self, gc: &mut Gc<'_, T, Id>) -> Result<(), Self::Err>
         where T: GcSafe, Id: CollectorId;
