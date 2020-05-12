@@ -462,6 +462,8 @@ unsafe impl GcVisitor for CompactVisitor {
                     let updated_gc = Gc::new(self.id, NonNull::new_unchecked(&mut (*updated_location).value));
                     // We know `Id == SimpleCollectorId`
                     *gc = std::mem::transmute_copy::<Gc<T>, zerogc::Gc<T, Id>>(&updated_gc);
+                    // Visit children (TODO: Stack overflow?)
+                    (*updated_location).value.visit(self)?;
                 }
             }
         }
