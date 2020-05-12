@@ -13,7 +13,6 @@ use std::alloc::Layout;
 use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::collections::HashMap;
 
 mod raw_arena;
 
@@ -85,13 +84,13 @@ unsafe impl GarbageCollectionSystem for SimpleCollector {
 #[doc(hidden)]
 pub trait DynTrace {
     fn trace<'a>(&mut self, visitor: &mut MarkVisitor<'a>);
-    fn compact<'a>(&mut self, visitor: &mut CompactVisitor<'a>);
+    fn compact(&mut self, visitor: &mut CompactVisitor);
 }
 impl<T: Trace + ?Sized> DynTrace for T {
     fn trace<'a>(&mut self, visitor: &mut MarkVisitor<'a>) {
         let Ok(()) = self.visit(visitor);
     }
-    fn compact<'a>(&mut self, visitor: &mut CompactVisitor<'a>) {
+    fn compact(&mut self, visitor: &mut CompactVisitor) {
         let Ok(()) = self.visit(visitor);
     }
 }
@@ -250,18 +249,11 @@ unsafe impl SimpleAlloc for CompactingAlloc {
     }
 
     unsafe fn sweep<'a>(&self, roots: &[*mut (dyn DynTrace + 'a)]) {
+        // TODO: scopeguard to safely abort-on-panic
         assert!(self.arena.num_chunks() >= 1);
         let used_arena_bytes = self.arena.total_used();
         let mut objects = self.objects.borrow_mut();
         assert!(self.approx_allocated_bytes.get() <= used_arena_bytes);
-        /*
-         * Ensure that the arena's 'current' chunk has enough memory
-         * to hold all currently used bytes
-         * After compaction, we want all memory confined to a single chunk.
-         */
-        if self.arena.current_chunk_capacity() < used_arena_bytes {
-            self.arena.create_raw_chunk(used_arena_bytes);
-        }
         /*
          * Reset all chunks. Marking all their memory as 'unused'
          * This will not perform any writes or drops,
@@ -273,12 +265,20 @@ unsafe impl SimpleAlloc for CompactingAlloc {
                 chunk.reset();
             }
         }
+        /*
+         * Ensure that the arena's 'current' chunk has enough memory
+         * to hold all currently used bytes
+         * After compaction, we want all memory confined to a single chunk.
+         */
+        if used_arena_bytes > self.arena.current_chunk_capacity() {
+            self.arena.create_raw_chunk(used_arena_bytes);
+        }
+        // Clear old chunks
         let expected_num_chunks = self.arena.num_chunks();
-        // NOTE: Consider replacing with Vec that we sort at the end?
-        let mut relocation_map = HashMap::with_capacity(objects.len());
         for &ptr in &**objects {
             let obj = &*ptr;
-            match obj.state {
+            debug_assert!(std::mem::align_of_val(obj) >= std::mem::align_of::<*mut u8>());
+            let relocated_ptr = match obj.state {
                 MarkState::White => {
                     /*
                      * This is an object we'll want to clear
@@ -288,15 +288,9 @@ unsafe impl SimpleAlloc for CompactingAlloc {
                      * not to resurrect objects.
                      */
                     std::ptr::drop_in_place(ptr);
+                    std::ptr::null_mut()
                 },
                 MarkState::Grey => {
-                    /*
-                     * Safety:
-                     * Technically we leave this panic in a memory-safe (but nonsensical)
-                     * state. Some white (unreachable) objects are dropped
-                     * and some black (reachable) objects have been moved.
-                     * But we haven't performed any other operations at this point.
-                     */
                     panic!("All grey objects should've been marked")
                 },
                 MarkState::Black => {
@@ -307,36 +301,36 @@ unsafe impl SimpleAlloc for CompactingAlloc {
                         moved,
                         layout.size()
                     );
-                    let old_obj = std::mem::transmute::<
-                        *mut GcObject<dyn DynTrace>, std::raw::TraitObject
-                    >(ptr);
-                    relocation_map.insert(old_obj.data as usize, moved);
-                },
-            }
+                    moved
+                }
+            };
+            let old_obj = std::mem::transmute::<
+                *mut GcObject<dyn DynTrace>, std::raw::TraitObject
+            >(ptr);
+            std::ptr::write(old_obj.data as *mut *mut u8, relocated_ptr);
         }
         // Verify that moving memory didn't unexpectedly allocate any more chunks
         assert_eq!(expected_num_chunks, self.arena.num_chunks());
         // Cleanup and relocate our our internal list
         objects.drain_filter(|obj| {
-            use std::raw::TraitObject;;
+            use std::raw::TraitObject;
             let old_obj = std::mem::transmute::<*mut _, TraitObject>(*obj);
-            match relocation_map.get(&(old_obj.data as usize)) {
-                Some(&updated_location) => {
-                    *obj = std::mem::transmute::<_, *mut GcObject<dyn DynTrace>>(TraitObject {
-                        data: updated_location as *mut (),
-                        vtable: old_obj.vtable
-                    });
-                    // Update object to white to prepare for next collection
-                    (**obj).state = MarkState::White;
-                    false // do not drain
-                }
-                None => true // drain
+            let relocated_ptr = std::ptr::read(old_obj.data as *mut *mut u8);
+            if relocated_ptr.is_null() {
+                true // drain
+            } else {
+                *obj = std::mem::transmute::<_, *mut GcObject<dyn DynTrace>>(TraitObject {
+                    data: relocated_ptr as *mut (),
+                    vtable: old_obj.vtable
+                });
+                // Update object to white to prepare for next collection
+                (**obj).state = MarkState::White;
+                false // do not drain
             }
         }).for_each(std::mem::drop); // ignore everything we drain
         // Actually perform relocations
         {
             let mut visitor = CompactVisitor {
-                relocations: &relocation_map,
                 id: self.id
             };
             for &root in roots {
@@ -427,11 +421,10 @@ impl<'a, A: SimpleAlloc> CollectionTask<'a, A> {
 }
 
 #[doc(hidden)] // Used by DynTrace
-pub struct CompactVisitor<'a> {
-    id: SimpleCollectorId,
-    relocations: &'a HashMap<usize, *mut u8>
+pub struct CompactVisitor {
+    id: SimpleCollectorId
 }
-unsafe impl<'a> GcVisitor for CompactVisitor<'a> {
+unsafe impl GcVisitor for CompactVisitor {
     type Err = !;
 
     fn visit_gc<T, Id>(&mut self, gc: &mut zerogc::Gc<'_, T, Id>) -> Result<(), Self::Err>
@@ -445,9 +438,10 @@ unsafe impl<'a> GcVisitor for CompactVisitor<'a> {
                 return Ok(());  // Belongs to another collector
             }
         }
-        let old_ptr = unsafe { GcObject::ptr_from_raw(gc.as_raw_ptr()) };
-        let updated_location = self.relocations[&(old_ptr as usize)] as *mut GcObject<T>;
+        debug_assert!(std::mem::align_of::<GcObject<T>>() >= std::mem::align_of::<*mut GcObject<T>>());
         unsafe {
+            let old_ptr = GcObject::ptr_from_raw(gc.as_raw_ptr());
+            let updated_location = (old_ptr as *mut *mut GcObject<T>).read();
             // Check it's state has been updated to white :)
             debug_assert_eq!((*updated_location).state, MarkState::White);
             // Actually perform the relocation
@@ -565,6 +559,7 @@ unsafe impl<A: SimpleAlloc> GcAllocContext for SimpleCollectorContext<A> {
 }
 
 /// A heap-allocated GC object
+#[repr(align(8))] // Minimum alignment is pointer-sized
 struct GcObject<T: ?Sized + DynTrace> {
     state: MarkState,
     value: T
