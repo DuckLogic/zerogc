@@ -2,11 +2,12 @@ use std::ptr::NonNull;
 use std::cell::{Cell, RefCell, Ref};
 use std::alloc::Layout;
 
+#[derive(Debug)]
 pub struct Chunk {
     data: Vec<u8>,
-    /// The back of the data (our limit since we grow backwards)
+    /// The start of the data (our limit since we grow backwards)
     limit: NonNull<u8>,
-    /// NOTE: This grows backwards to make computing alignment easier
+    /// NOTE: This grows backwards (towards the front) make computing alignment easier
     current: Cell<NonNull<u8>>,
 }
 impl Chunk {
@@ -25,14 +26,14 @@ impl Chunk {
     }
     #[inline]
     pub fn used_bytes(&self) -> usize {
-        let limit = self.limit.as_ptr() as usize;
+        let back = self.data.as_ptr().wrapping_add(self.capacity()) as usize;
         let current = self.current.get().as_ptr() as usize;
-        debug_assert!(current > limit);
-        current - limit
+        back - current
     }
     /// Reset the chunk, without freeing any of the underlying memory
     pub unsafe fn reset(&self) {
         let capacity = self.capacity();
+        debug_assert_eq!(self.data.as_ptr(), self.limit.as_ptr());
         let back = self.data.as_ptr().add(capacity);
         self.current.set(NonNull::new_unchecked(back as *mut u8));
     }
@@ -41,16 +42,13 @@ impl Chunk {
         unsafe {
             // This chops off lower bits, rounding down
             debug_assert!(layout.align().is_power_of_two());
-            let current = self.current.as_ptr();
+            let current = self.current.get().as_ptr();
             let limit = self.limit.as_ptr();
             debug_assert!(limit as usize <= current as usize);
-            let aligned_ptr = (current as usize & !(layout.align() - 1)) as *mut u8;
-            // NOTE: aligned_ptr cloud in theory be out of bounds (so we use wrapping_offset_of)
-            let remaining_len = aligned_ptr as isize - limit as isize;
-            debug_assert!(remaining_len + layout.align() as isize >= 0);
-            // NOTE: If layout.size() overflows isize this test will implicitly fail
-            if remaining_len >= layout.size() as isize {
-                self.current.set(NonNull::new_unchecked(aligned_ptr.sub(layout.size())));
+            let ptr = (current as usize).checked_sub(layout.size())?;
+            let aligned_ptr = (ptr & !(layout.align() - 1)) as *mut u8;
+            if aligned_ptr >= limit {
+                self.current.set(NonNull::new_unchecked(aligned_ptr));
                 Some(NonNull::new_unchecked(aligned_ptr))
             } else {
                 None

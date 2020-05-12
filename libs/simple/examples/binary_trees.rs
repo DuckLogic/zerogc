@@ -1,6 +1,6 @@
 use zerogc::{safepoint, safepoint_recurse, GcAllocContext, GcCell, Trace, GcVisitor, GcBrand, GcSafe, CollectorId};
 
-use zerogc_simple::{SimpleCollector, SimpleCollectorContext, Gc};
+use zerogc_simple::{CompactingCollector, CompactingCollectorContext, Gc};
 
 struct Tree<'gc> {
     children: GcCell<Option<(Gc<'gc, Tree<'gc>>, Gc<'gc, Tree<'gc>>)>>,
@@ -27,7 +27,7 @@ fn item_check(tree: &Tree) -> i32 {
     }
 }
 
-fn bottom_up_tree<'gc>(collector: &'gc SimpleCollectorContext, depth: i32)
+fn bottom_up_tree<'gc>(collector: &'gc CompactingCollectorContext, depth: i32)
                        -> Gc<'gc, Tree<'gc>> {
     let tree = collector.alloc(Tree { children: GcCell::new(None) });
     if depth > 0 {
@@ -39,7 +39,7 @@ fn bottom_up_tree<'gc>(collector: &'gc SimpleCollectorContext, depth: i32)
 }
 
 fn inner(
-    gc: &mut SimpleCollectorContext,
+    gc: &mut CompactingCollectorContext,
     depth: i32, iterations: u32
 ) -> String {
     let chk: i32 = (0 .. iterations).into_iter().map(|_| {
@@ -59,7 +59,7 @@ fn main() {
     let min_depth = 4;
     let max_depth = if min_depth + 2 > n { min_depth + 2 } else { n };
 
-    let collector = SimpleCollector::create();
+    let collector = CompactingCollector::create_compacting();
     let mut gc = collector.into_context();
     {
         let depth = max_depth + 1;

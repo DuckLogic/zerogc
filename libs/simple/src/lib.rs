@@ -48,7 +48,7 @@ impl SimpleCollector {
     }
 }
 impl SimpleCollector<CompactingAlloc> {
-    pub fn create_debug() -> Self {
+    pub fn create_compacting() -> Self {
         SimpleCollector::from_alloc(CompactingAlloc::new)
     }
 }
@@ -344,6 +344,7 @@ unsafe impl SimpleAlloc for CompactingAlloc {
             }
         }
         self.arena.free_old_chunks();
+        self.approx_allocated_bytes.set(self.arena.total_used());
         // We should've compacted down to one
         assert_eq!(self.arena.num_chunks(), 1);
     }
@@ -548,7 +549,7 @@ unsafe impl<A: SimpleAlloc> GcContext for SimpleCollectorContext<A> {
         result
     }
 }
-unsafe impl GcAllocContext for SimpleCollectorContext {
+unsafe impl<A: SimpleAlloc> GcAllocContext for SimpleCollectorContext<A> {
     // Right now we don't support failable alloc
     type MemoryErr = !;
 
