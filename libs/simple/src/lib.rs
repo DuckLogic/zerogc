@@ -140,19 +140,19 @@ impl<A: SimpleAlloc> GcHeap<A> {
 pub unsafe trait SimpleAlloc {
     fn allocated_size(&self) -> usize;
     fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T>;
-    unsafe fn sweep<'a>(&self, roots: &[*mut (dyn DynTrace + 'a)]);
+    unsafe fn sweep<'a>(&self, new_size: usize, roots: &[*mut (dyn DynTrace + 'a)]);
 }
 #[doc(hidden)]
 pub struct DebugAlloc {
     id: SimpleCollectorId,
     allocated_size: Cell<usize>,
-    objects: RefCell<Vec<Box<GcObject<dyn DynTrace>>>>
+    object_link: Cell<*mut GcObject<()>>
 }
 impl DebugAlloc {
     fn new(id: SimpleCollectorId) -> DebugAlloc {
         DebugAlloc {
             id, allocated_size: Cell::new(0),
-            objects: RefCell::new(Vec::with_capacity(32))
+            object_link: Cell::new(std::ptr::null_mut())
         }
     }
 }
@@ -162,9 +162,8 @@ unsafe impl SimpleAlloc for DebugAlloc {
         self.allocated_size.get()
     }
     fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
-        let mut objects = self.objects.borrow_mut();
         let mut object = Box::new(GcObject {
-            value, state: MarkState::White
+            value, state: MarkState::White, prev: self.object_link.get()
         });
         let gc = unsafe { Gc::from_raw(
             NonNull::new_unchecked(&mut object.value),
@@ -172,36 +171,34 @@ unsafe impl SimpleAlloc for DebugAlloc {
         ) };
         {
             let size = object.size();
-            objects.push(unsafe { GcObject::erase_box_lifetime(object) });
+            self.object_link.set(Box::into_raw(object) as *mut GcObject<()>);
             self.allocated_size.set(self.allocated_size() + size);
         }
         gc
     }
-    unsafe fn sweep<'a>(&self, _roots: &[*mut (dyn DynTrace + 'a)]) {
-        let mut expected_size = self.allocated_size.get();
-        let mut actual_size = 0;
-        let mut objects = self.objects.borrow_mut();
-        objects.retain(|obj| {
+    unsafe fn sweep<'a>(&self, new_size: usize, _roots: &[*mut (dyn DynTrace + 'a)]) {
+        assert!(new_size <= self.allocated_size.get());
+        let mut last_linked = std::ptr::null_mut();
+        while !self.object_link.get().is_null() {
+            let obj = &mut *self.object_link.get();
+            self.object_link.set(obj.prev);
             match obj.state {
                 MarkState::White => {
                     // Free the object
-                    expected_size -= obj.size();
-                    false
+                    drop(Box::from_raw(obj));
                 },
                 MarkState::Grey => panic!("All gray objects should've been processed"),
                 MarkState::Black => {
                     // Retain the object
-                    actual_size += obj.size();
-                    true
+                    obj.prev = last_linked;
+                    last_linked = obj;
+                    // Reset state to white
+                    obj.state = MarkState::White;
                 }
             }
-        });
-        // Reset all remaining objects to white
-        for obj in &mut *objects {
-            obj.state = MarkState::White;
         }
-        assert_eq!(expected_size, actual_size);
-        self.allocated_size.set(actual_size);
+        self.object_link.set(last_linked);
+        self.allocated_size.set(new_size);
     }
 }
 
@@ -239,6 +236,8 @@ unsafe impl SimpleAlloc for CompactingAlloc {
          */
         let obj = self.arena.alloc(GcObject {
             value, state: MarkState::White,
+            // TODO: Take advantage of linked list.....
+            prev: std::ptr::null_mut()
         });
         self.approx_allocated_bytes.set(self.approx_allocated_bytes.get() + obj.size());
         /*
@@ -254,7 +253,7 @@ unsafe impl SimpleAlloc for CompactingAlloc {
         }
     }
 
-    unsafe fn sweep<'a>(&self, roots: &[*mut (dyn DynTrace + 'a)]) {
+    unsafe fn sweep<'a>(&self, _new_size: usize, roots: &[*mut (dyn DynTrace + 'a)]) {
         // TODO: scopeguard to safely abort-on-panic
         assert!(self.arena.num_chunks() >= 1);
         let used_arena_bytes = self.arena.total_used();
@@ -389,6 +388,7 @@ impl<'a, A: SimpleAlloc> CollectionTask<'a, A> {
     fn run(&mut self) {
         self.gray_stack.extend(self.roots.iter()
             .map(|&ptr| GreyElement::Other(ptr)));
+        let mut updated_size = 0;
         // Mark
         while let Some(target) = self.gray_stack.pop() {
             let target_value = match target {
@@ -404,7 +404,8 @@ impl<'a, A: SimpleAlloc> CollectionTask<'a, A> {
             };
             let mut visitor = MarkVisitor {
                 id: self.id,
-                gray_stack: &mut self.gray_stack
+                gray_stack: &mut self.gray_stack,
+                updated_size: &mut updated_size
             };
             (*target_value).trace(&mut visitor);
             match target {
@@ -413,14 +414,14 @@ impl<'a, A: SimpleAlloc> CollectionTask<'a, A> {
                         // Mark the object black now it's been traced
                         debug_assert_eq!((*obj).state, MarkState::Grey);
                         (*obj).state = MarkState::Black;
+                        updated_size += (*obj).size();
                     }
                 },
                 GreyElement::Other(_) => {},
             }
         }
         // Sweep
-        unsafe { self.heap.allocator.sweep(&self.roots) };
-        let updated_size = self.heap.allocator.allocated_size();
+        unsafe { self.heap.allocator.sweep(updated_size, &self.roots) };
         // Update the threshold to be 150% of currently used size
         self.heap.threshold.set(updated_size + (updated_size / 2));
     }
@@ -461,7 +462,8 @@ unsafe impl GcVisitor for CompactVisitor {
 #[doc(hidden)] // Used by DynTrace
 pub struct MarkVisitor<'a> {
     id: SimpleCollectorId,
-    gray_stack: &'a mut Vec<GreyElement>
+    gray_stack: &'a mut Vec<GreyElement>,
+    updated_size: &'a mut usize
 }
 unsafe impl<'a> GcVisitor for MarkVisitor<'a> {
     type Err = !;
@@ -487,6 +489,7 @@ unsafe impl<'a> GcVisitor for MarkVisitor<'a> {
                      * We can directly move it directly to the black set
                      */
                     obj.state = MarkState::Black;
+                    (*self.updated_size) += obj.size();
                 } else {
                     /*
                      * We need to mark this object grey and push it onto the grey stack.
@@ -565,9 +568,14 @@ unsafe impl<A: SimpleAlloc> GcAllocContext for SimpleCollectorContext<A> {
 }
 
 /// A heap-allocated GC object
-#[repr(align(8))] // Minimum alignment is pointer-sized
 struct GcObject<T: ?Sized + DynTrace> {
     state: MarkState,
+    /// The previous object in the linked list of allocated objects,
+    /// or null if its the end
+    ///
+    /// If this object has been relocated,
+    /// then it points to the updated location
+    prev: *mut GcObject<()>,
     value: T
 }
 impl<T: ?Sized + DynTrace> GcObject<T> {
