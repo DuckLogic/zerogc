@@ -22,6 +22,9 @@ pub type Gc<'gc, T> = zerogc::Gc<'gc, T, SimpleCollectorId>;
 pub type CompactingCollector = SimpleCollector<CompactingAlloc>;
 /// A context for a [CompactingCollector]
 pub type CompactingCollectorContext = SimpleCollectorContext<CompactingAlloc>;
+/// A garbage collector useful for debugging
+pub type DebugCollector = SimpleCollector<DebugAlloc>;
+pub type DebugCollectorContext = SimpleCollectorContext<DebugAlloc>;
 
 static NEXT_COLLECTOR_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -43,6 +46,9 @@ unsafe impl CollectorId for SimpleCollectorId {}
 pub struct SimpleCollector<A: SimpleAlloc = DebugAlloc>(Rc<RawSimpleCollector<A>>);
 impl SimpleCollector {
     pub fn create() -> Self {
+        Self::create_debug()
+    }
+    pub fn create_debug() -> Self {
         SimpleCollector::from_alloc(DebugAlloc::new)
     }
 }
