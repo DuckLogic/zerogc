@@ -146,13 +146,13 @@ pub unsafe trait SimpleAlloc {
 pub struct DebugAlloc {
     id: SimpleCollectorId,
     allocated_size: Cell<usize>,
-    object_link: Cell<*mut GcObject<()>>
+    object_link: Cell<Option<NonNull<GcObject<dyn DynTrace>>>>
 }
 impl DebugAlloc {
     fn new(id: SimpleCollectorId) -> DebugAlloc {
         DebugAlloc {
             id, allocated_size: Cell::new(0),
-            object_link: Cell::new(std::ptr::null_mut())
+            object_link: Cell::new(None)
         }
     }
 }
@@ -164,7 +164,6 @@ unsafe impl SimpleAlloc for DebugAlloc {
     fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
         let mut object = Box::new(GcObject {
             value, state: MarkState::White, prev: self.object_link.get(),
-            size: std::mem::size_of::<GcObject<T>>()
         });
         let gc = unsafe { Gc::from_raw(
             NonNull::new_unchecked(&mut object.value),
@@ -172,7 +171,9 @@ unsafe impl SimpleAlloc for DebugAlloc {
         ) };
         {
             let size = object.size();
-            self.object_link.set(Box::into_raw(object) as *mut GcObject<()>);
+            unsafe { self.object_link.set(Some(NonNull::new_unchecked(
+                Box::into_raw(GcObject::erase_box_lifetime(object))
+            ))); }
             self.allocated_size.set(self.allocated_size() + size);
         }
         gc
@@ -180,22 +181,22 @@ unsafe impl SimpleAlloc for DebugAlloc {
     unsafe fn sweep<'a>(&self, _roots: &[*mut (dyn DynTrace + 'a)]) {
         let mut expected_size = self.allocated_size.get();
         let mut actual_size = 0;
-        let mut last_linked = std::ptr::null_mut();
-        while !self.object_link.get().is_null() {
-            let obj = &mut *self.object_link.get();
+        let mut last_linked = None;
+        while let Some(link) = self.object_link.get() {
+            let obj = &mut *link.as_ptr();
             self.object_link.set(obj.prev);
             match obj.state {
                 MarkState::White => {
                     // Free the object
-                    expected_size -= obj.size;
+                    expected_size -= obj.size();
                     drop(Box::from_raw(obj));
                 },
                 MarkState::Grey => panic!("All gray objects should've been processed"),
                 MarkState::Black => {
                     // Retain the object
-                    actual_size += obj.size;
+                    actual_size += obj.size();
                     obj.prev = last_linked;
-                    last_linked = obj;
+                    last_linked = Some(NonNull::from(&mut *obj));
                     // Reset state to white
                     obj.state = MarkState::White;
                 }
@@ -242,8 +243,7 @@ unsafe impl SimpleAlloc for CompactingAlloc {
         let obj = self.arena.alloc(GcObject {
             value, state: MarkState::White,
             // TODO: Take advantage of linked list.....
-            prev: std::ptr::null_mut(),
-            size: std::mem::size_of::<GcObject<T>>()
+            prev: None,
         });
         self.approx_allocated_bytes.set(self.approx_allocated_bytes.get() + obj.size());
         /*
@@ -572,20 +572,17 @@ unsafe impl<A: SimpleAlloc> GcAllocContext for SimpleCollectorContext<A> {
 /// A heap-allocated GC object
 struct GcObject<T: ?Sized + DynTrace> {
     state: MarkState,
-    /// The total size of this object
-    size: usize,
     /// The previous object in the linked list of allocated objects,
     /// or null if its the end
     ///
     /// If this object has been relocated,
     /// then it points to the updated location
-    prev: *mut GcObject<()>,
+    prev: Option<NonNull<GcObject<dyn DynTrace>>>,
     value: T
 }
 impl<T: ?Sized + DynTrace> GcObject<T> {
     #[inline]
     pub fn size(&self) -> usize {
-        debug_assert_eq!(std::mem::size_of_val(self), self.size);
         std::mem::size_of_val(self)
     }
 }
