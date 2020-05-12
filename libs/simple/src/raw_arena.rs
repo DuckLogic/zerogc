@@ -114,14 +114,17 @@ impl Arena {
         }
     }
     pub fn create_raw_chunk(&self, min_size: usize) {
-        let mut chunks = self.chunks.borrow_mut();
-        self.current_chunk.set(NonNull::dangling()); // sanity
-        let last_chunk_size = chunks.last().unwrap().data.capacity();
-        let result_size = std::cmp::max(
+        let last_chunk_size = self.chunks.borrow().last().unwrap().data.capacity();
+        self.create_raw_chunk_exact(std::cmp::max(
             last_chunk_size * 2, // we want doubling to ensure amortized growth
             min_size
-        );
-        chunks.push(Chunk::alloc(result_size));
+        ));
+    }
+    pub fn create_raw_chunk_exact(&self, min_size: usize) {
+        assert!(min_size > 1);
+        let mut chunks = self.chunks.borrow_mut();
+        self.current_chunk.set(NonNull::dangling()); // sanity
+        chunks.push(Chunk::alloc(min_size));
         self.current_chunk.set(NonNull::from(chunks.last_mut().unwrap()));
     }
     pub unsafe fn free_old_chunks(&self) {

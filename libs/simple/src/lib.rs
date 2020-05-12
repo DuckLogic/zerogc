@@ -13,6 +13,7 @@ use std::alloc::Layout;
 use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::raw::TraitObject;
 
 mod raw_arena;
 
@@ -192,6 +193,7 @@ unsafe impl SimpleAlloc for DebugAlloc {
                     drop(Box::from_raw(obj));
                 },
                 MarkState::Grey => panic!("All gray objects should've been processed"),
+                MarkState::Relocated => unreachable!("relocation"),
                 MarkState::Black => {
                     // Retain the object
                     actual_size += obj.size();
@@ -214,14 +216,14 @@ pub struct CompactingAlloc {
     arena: raw_arena::Arena,
     // NOTE: Doesn't include arena-internal padding
     approx_allocated_bytes: Cell<usize>,
-    objects: RefCell<Vec<*mut GcObject<dyn DynTrace>>>
+    object_link: Cell<Option<NonNull<GcObject<dyn DynTrace>>>>,
 }
 impl CompactingAlloc {
     pub fn new(id: SimpleCollectorId) -> Self {
         CompactingAlloc {
             id, arena: raw_arena::Arena::new(),
             approx_allocated_bytes: Cell::new(0),
-            objects: RefCell::new(Vec::with_capacity(32))
+            object_link: Cell::new(None)
         }
     }
 }
@@ -242,19 +244,11 @@ unsafe impl SimpleAlloc for CompactingAlloc {
          */
         let obj = self.arena.alloc(GcObject {
             value, state: MarkState::White,
-            // TODO: Take advantage of linked list.....
-            prev: None,
+            prev: self.object_link.get(),
         });
         self.approx_allocated_bytes.set(self.approx_allocated_bytes.get() + obj.size());
-        /*
-         * TODO: How does this Vec::push impact efficiency?
-         * It's certinally much simpler (and safer) than iterating
-         * over the arena's raw memory in our reset() method.
-         * We could add a linked list internal to GcObject, but that would
-         * add memory overhead......
-         */
         unsafe {
-            self.objects.borrow_mut().push(GcObject::erase_pointer_lifetime(obj));
+            self.object_link.set(Some(NonNull::new_unchecked(GcObject::erase_pointer_lifetime(obj))));
             Gc::from_raw(NonNull::from(&obj.value), self.id)
         }
     }
@@ -263,7 +257,6 @@ unsafe impl SimpleAlloc for CompactingAlloc {
         // TODO: scopeguard to safely abort-on-panic
         assert!(self.arena.num_chunks() >= 1);
         let used_arena_bytes = self.arena.total_used();
-        let mut objects = self.objects.borrow_mut();
         assert!(self.approx_allocated_bytes.get() <= used_arena_bytes);
         /*
          * Reset all chunks. Marking all their memory as 'unused'
@@ -277,20 +270,29 @@ unsafe impl SimpleAlloc for CompactingAlloc {
             }
         }
         /*
-         * Ensure that the arena's 'current' chunk has enough memory
+         * Create a new 'current' chunk that has enough memory
          * to hold all currently used bytes
          * After compaction, we want all memory confined to a single chunk.
          */
-        if used_arena_bytes > self.arena.current_chunk_capacity() {
+        if used_arena_bytes <= self.arena.current_chunk_capacity() {
+            // Recreate a chunk with the exact same capacity (which is guarenteed to be enough)
+            self.arena.create_raw_chunk_exact(used_arena_bytes);
+        } else {
+            // Create a new chunk using arena-internal strategy for amortized growth
             self.arena.create_raw_chunk(used_arena_bytes);
         }
-        // Clear old chunks
         let expected_num_chunks = self.arena.num_chunks();
-        for &ptr in &**objects {
-            let obj = &*ptr;
-            debug_assert!(std::mem::align_of_val(obj) >= std::mem::align_of::<*mut u8>());
-            let relocated_ptr = match obj.state {
+        let mut updated_link = None;
+        while let Some(link) = self.object_link.get() {
+            let obj = &mut *link.as_ptr();
+            self.object_link.set(obj.prev);
+            match obj.state {
                 MarkState::White => {
+                    if cfg!(debug_assertions) {
+                        // Debug update to point to null
+                        obj.state = MarkState::Relocated;
+                        obj.prev = None;
+                    }
                     /*
                      * This is an object we'll want to clear
                      * In a compacting collector, we can just ignore it :D
@@ -298,47 +300,41 @@ unsafe impl SimpleAlloc for CompactingAlloc {
                      * It implements the unsafe marker GcSafe, so it's destructor promises
                      * not to resurrect objects.
                      */
-                    std::ptr::drop_in_place(ptr);
-                    std::ptr::null_mut()
+                    std::ptr::drop_in_place(obj);
                 },
                 MarkState::Grey => {
                     panic!("All grey objects should've been marked")
                 },
+                MarkState::Relocated => {
+                    panic!("All relocated objects should've been handled last sweep")
+                },
                 MarkState::Black => {
                     let layout = Layout::for_value(obj);
+                    let old_obj = std::mem::transmute::<*mut GcObject<dyn DynTrace>, TraitObject>(obj);
                     let moved = self.arena.alloc_layout(layout);
                     std::ptr::copy_nonoverlapping(
-                        ptr as *const u8,
+                        old_obj.data as *const u8,
                         moved,
                         layout.size()
                     );
-                    moved
+                    let moved = std::mem::transmute::<_, NonNull<GcObject<dyn DynTrace>>>(TraitObject {
+                        data: moved as *mut (),
+                        vtable: old_obj.vtable
+                    });
+                    // Mark old object as relocated, pointing to new object
+                    obj.state = MarkState::Relocated;
+                    obj.prev = Some(moved);
+                    // Add new object into the linked list
+                   (*moved.as_ptr()).prev = updated_link;
+                    // Reset original object to white
+                    (*moved.as_ptr()).state = MarkState::White;
+                    updated_link = Some(moved);
                 }
-            };
-            let old_obj = std::mem::transmute::<
-                *mut GcObject<dyn DynTrace>, std::raw::TraitObject
-            >(ptr);
-            std::ptr::write(old_obj.data as *mut *mut u8, relocated_ptr);
+            }
         }
+        self.object_link.set(updated_link);
         // Verify that moving memory didn't unexpectedly allocate any more chunks
         assert_eq!(expected_num_chunks, self.arena.num_chunks());
-        // Cleanup and relocate our our internal list
-        objects.drain_filter(|obj| {
-            use std::raw::TraitObject;
-            let old_obj = std::mem::transmute::<*mut _, TraitObject>(*obj);
-            let relocated_ptr = std::ptr::read(old_obj.data as *mut *mut u8);
-            if relocated_ptr.is_null() {
-                true // drain
-            } else {
-                *obj = std::mem::transmute::<_, *mut GcObject<dyn DynTrace>>(TraitObject {
-                    data: relocated_ptr as *mut (),
-                    vtable: old_obj.vtable
-                });
-                // Update object to white to prepare for next collection
-                (**obj).state = MarkState::White;
-                false // do not drain
-            }
-        }).for_each(std::mem::drop); // ignore everything we drain
         // Actually perform relocations
         {
             let mut visitor = CompactVisitor {
@@ -350,6 +346,12 @@ unsafe impl SimpleAlloc for CompactingAlloc {
         }
         self.arena.free_old_chunks();
         self.approx_allocated_bytes.set(self.arena.total_used());
+        // Touch all allocated objects (for valgrind)
+        let mut link = self.object_link.get();
+        while let Some(obj) = link {
+            assert_eq!(obj.as_ref().state, MarkState::White);
+            link = obj.as_ref().prev;
+        }
         // We should've compacted down to one
         assert_eq!(self.arena.num_chunks(), 1);
     }
@@ -449,16 +451,19 @@ unsafe impl GcVisitor for CompactVisitor {
                 return Ok(());  // Belongs to another collector
             }
         }
-        debug_assert!(std::mem::align_of::<GcObject<T>>() >= std::mem::align_of::<*mut GcObject<T>>());
         unsafe {
             let old_ptr = GcObject::ptr_from_raw(gc.as_raw_ptr());
-            let updated_location = (old_ptr as *mut *mut GcObject<T>).read();
-            // Check it's state has been updated to white :)
-            debug_assert_eq!((*updated_location).state, MarkState::White);
-            // Actually perform the relocation
-            let updated_gc = Gc::new(self.id, NonNull::new_unchecked(&mut (*updated_location).value));
-            // We know `Id == SimpleCollectorId`
-            *gc = std::mem::transmute_copy::<Gc<T>, zerogc::Gc<T, Id>>(&updated_gc);
+            match (*old_ptr).state {
+                MarkState::White => unreachable!(),
+                MarkState::Grey => unreachable!(),
+                MarkState::Black => {} // Already relocated
+                MarkState::Relocated => {
+                    let updated_location = (*old_ptr).prev.unwrap().as_ptr() as *mut GcObject<T>;
+                    let updated_gc = Gc::new(self.id, NonNull::new_unchecked(&mut (*updated_location).value));
+                    // We know `Id == SimpleCollectorId`
+                    *gc = std::mem::transmute_copy::<Gc<T>, zerogc::Gc<T, Id>>(&updated_gc);
+                }
+            }
         }
         Ok(())
     }
@@ -516,6 +521,7 @@ unsafe impl<'a> GcVisitor for MarkVisitor<'a> {
             MarkState::Black => {
                 // We've already traversed this object. It's already known to be reachable
             },
+            MarkState::Relocated => unreachable!(),
         }
         Ok(())
     }
@@ -634,5 +640,9 @@ enum MarkState {
     /// The object is in the black set and is reachable from the roots.
     ///
     /// This object cannot be freed.
-    Black
+    Black,
+    /// The object has been relocated
+    ///
+    /// Only useful with the compacting collector
+    Relocated
 }
