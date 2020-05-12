@@ -140,7 +140,7 @@ impl<A: SimpleAlloc> GcHeap<A> {
 pub unsafe trait SimpleAlloc {
     fn allocated_size(&self) -> usize;
     fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T>;
-    unsafe fn sweep<'a>(&self, new_size: usize, roots: &[*mut (dyn DynTrace + 'a)]);
+    unsafe fn sweep<'a>(&self, roots: &[*mut (dyn DynTrace + 'a)]);
 }
 #[doc(hidden)]
 pub struct DebugAlloc {
@@ -163,7 +163,8 @@ unsafe impl SimpleAlloc for DebugAlloc {
     }
     fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
         let mut object = Box::new(GcObject {
-            value, state: MarkState::White, prev: self.object_link.get()
+            value, state: MarkState::White, prev: self.object_link.get(),
+            size: std::mem::size_of::<GcObject<T>>()
         });
         let gc = unsafe { Gc::from_raw(
             NonNull::new_unchecked(&mut object.value),
@@ -176,8 +177,9 @@ unsafe impl SimpleAlloc for DebugAlloc {
         }
         gc
     }
-    unsafe fn sweep<'a>(&self, new_size: usize, _roots: &[*mut (dyn DynTrace + 'a)]) {
-        assert!(new_size <= self.allocated_size.get());
+    unsafe fn sweep<'a>(&self, _roots: &[*mut (dyn DynTrace + 'a)]) {
+        let mut expected_size = self.allocated_size.get();
+        let mut actual_size = 0;
         let mut last_linked = std::ptr::null_mut();
         while !self.object_link.get().is_null() {
             let obj = &mut *self.object_link.get();
@@ -185,11 +187,13 @@ unsafe impl SimpleAlloc for DebugAlloc {
             match obj.state {
                 MarkState::White => {
                     // Free the object
+                    expected_size -= obj.size;
                     drop(Box::from_raw(obj));
                 },
                 MarkState::Grey => panic!("All gray objects should've been processed"),
                 MarkState::Black => {
                     // Retain the object
+                    actual_size += obj.size;
                     obj.prev = last_linked;
                     last_linked = obj;
                     // Reset state to white
@@ -198,7 +202,8 @@ unsafe impl SimpleAlloc for DebugAlloc {
             }
         }
         self.object_link.set(last_linked);
-        self.allocated_size.set(new_size);
+        assert_eq!(expected_size, actual_size);
+        self.allocated_size.set(actual_size);
     }
 }
 
@@ -237,7 +242,8 @@ unsafe impl SimpleAlloc for CompactingAlloc {
         let obj = self.arena.alloc(GcObject {
             value, state: MarkState::White,
             // TODO: Take advantage of linked list.....
-            prev: std::ptr::null_mut()
+            prev: std::ptr::null_mut(),
+            size: std::mem::size_of::<GcObject<T>>()
         });
         self.approx_allocated_bytes.set(self.approx_allocated_bytes.get() + obj.size());
         /*
@@ -253,7 +259,7 @@ unsafe impl SimpleAlloc for CompactingAlloc {
         }
     }
 
-    unsafe fn sweep<'a>(&self, _new_size: usize, roots: &[*mut (dyn DynTrace + 'a)]) {
+    unsafe fn sweep<'a>(&self, roots: &[*mut (dyn DynTrace + 'a)]) {
         // TODO: scopeguard to safely abort-on-panic
         assert!(self.arena.num_chunks() >= 1);
         let used_arena_bytes = self.arena.total_used();
@@ -388,7 +394,6 @@ impl<'a, A: SimpleAlloc> CollectionTask<'a, A> {
     fn run(&mut self) {
         self.gray_stack.extend(self.roots.iter()
             .map(|&ptr| GreyElement::Other(ptr)));
-        let mut updated_size = 0;
         // Mark
         while let Some(target) = self.gray_stack.pop() {
             let target_value = match target {
@@ -405,7 +410,6 @@ impl<'a, A: SimpleAlloc> CollectionTask<'a, A> {
             let mut visitor = MarkVisitor {
                 id: self.id,
                 gray_stack: &mut self.gray_stack,
-                updated_size: &mut updated_size
             };
             (*target_value).trace(&mut visitor);
             match target {
@@ -414,14 +418,14 @@ impl<'a, A: SimpleAlloc> CollectionTask<'a, A> {
                         // Mark the object black now it's been traced
                         debug_assert_eq!((*obj).state, MarkState::Grey);
                         (*obj).state = MarkState::Black;
-                        updated_size += (*obj).size();
                     }
                 },
                 GreyElement::Other(_) => {},
             }
         }
         // Sweep
-        unsafe { self.heap.allocator.sweep(updated_size, &self.roots) };
+        unsafe { self.heap.allocator.sweep(&self.roots) };
+        let updated_size = self.heap.allocator.allocated_size();
         // Update the threshold to be 150% of currently used size
         self.heap.threshold.set(updated_size + (updated_size / 2));
     }
@@ -463,7 +467,6 @@ unsafe impl GcVisitor for CompactVisitor {
 pub struct MarkVisitor<'a> {
     id: SimpleCollectorId,
     gray_stack: &'a mut Vec<GreyElement>,
-    updated_size: &'a mut usize
 }
 unsafe impl<'a> GcVisitor for MarkVisitor<'a> {
     type Err = !;
@@ -489,7 +492,6 @@ unsafe impl<'a> GcVisitor for MarkVisitor<'a> {
                      * We can directly move it directly to the black set
                      */
                     obj.state = MarkState::Black;
-                    (*self.updated_size) += obj.size();
                 } else {
                     /*
                      * We need to mark this object grey and push it onto the grey stack.
@@ -570,6 +572,8 @@ unsafe impl<A: SimpleAlloc> GcAllocContext for SimpleCollectorContext<A> {
 /// A heap-allocated GC object
 struct GcObject<T: ?Sized + DynTrace> {
     state: MarkState,
+    /// The total size of this object
+    size: usize,
     /// The previous object in the linked list of allocated objects,
     /// or null if its the end
     ///
@@ -581,6 +585,7 @@ struct GcObject<T: ?Sized + DynTrace> {
 impl<T: ?Sized + DynTrace> GcObject<T> {
     #[inline]
     pub fn size(&self) -> usize {
+        debug_assert_eq!(std::mem::size_of_val(self), self.size);
         std::mem::size_of_val(self)
     }
 }
