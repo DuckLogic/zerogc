@@ -16,7 +16,7 @@
 use std::mem;
 use std::ptr::NonNull;
 use std::ops::{Deref, DerefMut};
-use std::fmt::{Debug};
+use std::fmt::{Debug, Formatter};
 
 #[macro_use]
 mod manually_traced;
@@ -327,6 +327,14 @@ unsafe impl<'gc, 'new_gc, T, Id> GcBrand<'new_gc, Id> for Gc<'gc, T, Id>
           <T as GcBrand<'new_gc, Id>>::Branded: GcSafe,
           Id: CollectorId {
     type Branded = Gc<'new_gc, T::Branded, Id>;
+}
+impl<'a, T: GcSafe + Debug + ?Sized, Id: CollectorId> Debug for Gc<'a, T, Id> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Gc")
+            .field(&self.id)
+            .field(&self.value())
+            .finish()
+    }
 }
 
 /// Indicates that a type can be safely allocated by a garbage collector.

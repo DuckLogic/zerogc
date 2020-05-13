@@ -2,6 +2,7 @@ use zerogc::{safepoint, safepoint_recurse, GcAllocContext, GcCell, Trace, GcVisi
 
 use zerogc_simple::{CompactingCollector, CompactingCollectorContext, Gc};
 
+#[derive(Debug)]
 struct Tree<'gc> {
     children: GcCell<Option<(Gc<'gc, Tree<'gc>>, Gc<'gc, Tree<'gc>>)>>,
 }

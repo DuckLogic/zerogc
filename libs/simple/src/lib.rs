@@ -440,12 +440,15 @@ unsafe impl<'a> GcVisitor for CompactVisitor<'a> {
         }
         unsafe {
             let old_ptr = GcObject::ptr_from_raw(gc.as_raw_ptr());
-            debug_assert!(!self.chunk.contains(old_ptr as *mut u8));
             match (*old_ptr).state {
                 MarkState::White => unreachable!(),
                 MarkState::Grey => unreachable!(),
-                MarkState::Black => {} // Already relocated
+                MarkState::Black => {
+                    // Already relocated
+                    debug_assert!(self.chunk.contains(old_ptr as *mut u8));
+                },
                 MarkState::Relocated => {
+                    debug_assert!(!self.chunk.contains(old_ptr as *mut u8));
                     let updated_location = (*old_ptr).prev.unwrap().as_ptr() as *mut GcObject<T>;
                     debug_assert!(self.chunk.contains(updated_location as *mut u8));
                     let updated_gc = Gc::new(self.id, NonNull::new_unchecked(&mut (*updated_location).value));
