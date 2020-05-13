@@ -44,7 +44,9 @@ unsafe impl<T: GcSafe + Copy> TraceImmutable for GcCell<T> {
     #[inline]
     fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
         let mut value = self.get();
-        visitor.visit(&mut value)
+        visitor.visit(&mut value)?;
+        self.set(value);
+        Ok(())
     }
 }
 unsafe impl<T: GcSafe + Copy + NullTrace> NullTrace for GcCell<T> {}
