@@ -11,7 +11,8 @@ pub struct Chunk {
     current: Cell<NonNull<u8>>,
 }
 impl Chunk {
-    fn alloc(capacity: usize) -> Chunk {
+    pub fn alloc(capacity: usize) -> Chunk {
+        assert!(capacity >= 1);
         let mut data = Vec::<u8>::with_capacity(capacity);
         let ptr = data.as_mut_ptr();
         unsafe {
@@ -25,20 +26,22 @@ impl Chunk {
         self.data.capacity()
     }
     #[inline]
+    fn back(&self) -> *mut u8 {
+        unsafe { self.data.as_ptr().add(self.data.capacity()) as *mut u8 }
+    }
+    #[inline]
     pub fn used_bytes(&self) -> usize {
-        let back = self.data.as_ptr().wrapping_add(self.capacity()) as usize;
+        let back = self.back() as usize;
         let current = self.current.get().as_ptr() as usize;
         back - current
     }
     /// Reset the chunk, without freeing any of the underlying memory
     pub unsafe fn reset(&self) {
-        let capacity = self.capacity();
         debug_assert_eq!(self.data.as_ptr(), self.limit.as_ptr());
-        let back = self.data.as_ptr().add(capacity);
-        self.current.set(NonNull::new_unchecked(back as *mut u8));
+        self.current.set(NonNull::new_unchecked(self.back()));
     }
     #[inline(always)]
-    fn try_alloc_layout(&self, layout: Layout) -> Option<NonNull<u8>> {
+    pub fn try_alloc_layout(&self, layout: Layout) -> Option<NonNull<u8>> {
         unsafe {
             // This chops off lower bits, rounding down
             debug_assert!(layout.align().is_power_of_two());
@@ -55,6 +58,10 @@ impl Chunk {
             }
         }
     }
+    #[inline]
+    pub fn contains(&self, ptr: *mut u8) -> bool {
+        ptr >= self.limit.as_ptr() && ptr < self.back()
+    }
 }
 
 pub struct Arena {
@@ -63,7 +70,11 @@ pub struct Arena {
 }
 impl Arena {
     pub fn new() -> Self {
-        let chunks = vec![Chunk::alloc(2048)];
+        Arena::from_chunk(Chunk::alloc(2048))
+    }
+    pub fn from_chunk(chunk: Chunk) -> Self {
+        assert!(chunk.capacity() >= 1);
+        let chunks = vec![chunk];
         let current_chunk = NonNull::from(chunks.first().unwrap());
         Arena {
             chunks: RefCell::new(chunks),
@@ -120,21 +131,17 @@ impl Arena {
             min_size
         ));
     }
-    pub fn create_raw_chunk_exact(&self, min_size: usize) {
+    fn create_raw_chunk_exact(&self, min_size: usize) {
         assert!(min_size > 1);
         let mut chunks = self.chunks.borrow_mut();
         self.current_chunk.set(NonNull::dangling()); // sanity
         chunks.push(Chunk::alloc(min_size));
         self.current_chunk.set(NonNull::from(chunks.last_mut().unwrap()));
     }
-    pub unsafe fn free_old_chunks(&self) {
-        let mut chunks = self.chunks.borrow_mut();
-        // Always preserve the latest chunk
-        self.current_chunk.set(NonNull::dangling());
-        let last_chunk = chunks.pop().unwrap();
-        chunks.retain(|chunk| chunk.used_bytes() > 0);
-        chunks.push(last_chunk);
-        self.current_chunk.set(NonNull::from(chunks.last_mut().unwrap()));
+    pub fn reset_single_chunk(&self, chunk: Chunk) {
+        let v = vec![chunk];
+        self.current_chunk.set(NonNull::from(v.last().unwrap()));
+        self.chunks.replace(v);
     }
 }
 

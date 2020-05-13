@@ -14,6 +14,7 @@ use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::raw::TraitObject;
+use crate::raw_arena::Chunk;
 
 mod raw_arena;
 
@@ -258,30 +259,16 @@ unsafe impl SimpleAlloc for CompactingAlloc {
         assert!(self.arena.num_chunks() >= 1);
         let used_arena_bytes = self.arena.total_used();
         assert!(self.approx_allocated_bytes.get() <= used_arena_bytes);
-        /*
-         * Reset all chunks. Marking all their memory as 'unused'
-         * This will not perform any writes or drops,
-         * so its safe to use as temporary scratch.
-         */
-        {
-            let chunks = self.arena.raw_chunks();
-            for chunk in &*chunks {
-                chunk.reset();
-            }
-        }
-        /*
-         * Create a new 'current' chunk that has enough memory
-         * to hold all currently used bytes
-         * After compaction, we want all memory confined to a single chunk.
-         */
-        if used_arena_bytes <= self.arena.current_chunk_capacity() {
+        let chunk = Chunk::alloc(if used_arena_bytes <= self.arena.current_chunk_capacity() {
             // Recreate a chunk with the exact same capacity (which is guarenteed to be enough)
-            self.arena.create_raw_chunk_exact(used_arena_bytes);
+            used_arena_bytes
         } else {
             // Create a new chunk using arena-internal strategy for amortized growth
-            self.arena.create_raw_chunk(used_arena_bytes);
-        }
-        let expected_num_chunks = self.arena.num_chunks();
+            std::cmp::max(
+                used_arena_bytes,
+                self.arena.current_chunk_capacity() * 2
+            )
+        });
         let mut updated_link = None;
         while let Some(link) = self.object_link.get() {
             let obj = &mut *link.as_ptr();
@@ -311,7 +298,7 @@ unsafe impl SimpleAlloc for CompactingAlloc {
                 MarkState::Black => {
                     let layout = Layout::for_value(obj);
                     let old_obj = std::mem::transmute::<*mut GcObject<dyn DynTrace>, TraitObject>(obj);
-                    let moved = self.arena.alloc_layout(layout);
+                    let moved = chunk.try_alloc_layout(layout).unwrap().as_ptr();
                     std::ptr::copy_nonoverlapping(
                         old_obj.data as *const u8,
                         moved,
@@ -325,7 +312,7 @@ unsafe impl SimpleAlloc for CompactingAlloc {
                     obj.state = MarkState::Relocated;
                     obj.prev = Some(moved);
                     // Add new object into the linked list
-                   (*moved.as_ptr()).prev = updated_link;
+                    (*moved.as_ptr()).prev = updated_link;
                     // Reset original object to white
                     (*moved.as_ptr()).state = MarkState::White;
                     updated_link = Some(moved);
@@ -333,18 +320,17 @@ unsafe impl SimpleAlloc for CompactingAlloc {
             }
         }
         self.object_link.set(updated_link);
-        // Verify that moving memory didn't unexpectedly allocate any more chunks
-        assert_eq!(expected_num_chunks, self.arena.num_chunks());
         // Actually perform relocations
         {
             let mut visitor = CompactVisitor {
-                id: self.id
+                id: self.id,
+                chunk: &chunk
             };
             for &root in roots {
                 (*root).compact(&mut visitor);
             }
         }
-        self.arena.free_old_chunks();
+        self.arena.reset_single_chunk(chunk);
         self.approx_allocated_bytes.set(self.arena.total_used());
         // Touch all allocated objects (for valgrind)
         let mut link = self.object_link.get();
@@ -434,10 +420,11 @@ impl<'a, A: SimpleAlloc> CollectionTask<'a, A> {
 }
 
 #[doc(hidden)] // Used by DynTrace
-pub struct CompactVisitor {
-    id: SimpleCollectorId
+pub struct CompactVisitor<'a> {
+    id: SimpleCollectorId,
+    chunk: &'a Chunk
 }
-unsafe impl GcVisitor for CompactVisitor {
+unsafe impl<'a> GcVisitor for CompactVisitor<'a> {
     type Err = !;
 
     fn visit_gc<T, Id>(&mut self, gc: &mut zerogc::Gc<'_, T, Id>) -> Result<(), Self::Err>
@@ -453,12 +440,14 @@ unsafe impl GcVisitor for CompactVisitor {
         }
         unsafe {
             let old_ptr = GcObject::ptr_from_raw(gc.as_raw_ptr());
+            debug_assert!(!self.chunk.contains(old_ptr as *mut u8));
             match (*old_ptr).state {
                 MarkState::White => unreachable!(),
                 MarkState::Grey => unreachable!(),
                 MarkState::Black => {} // Already relocated
                 MarkState::Relocated => {
                     let updated_location = (*old_ptr).prev.unwrap().as_ptr() as *mut GcObject<T>;
+                    debug_assert!(self.chunk.contains(updated_location as *mut u8));
                     let updated_gc = Gc::new(self.id, NonNull::new_unchecked(&mut (*updated_location).value));
                     // We know `Id == SimpleCollectorId`
                     *gc = std::mem::transmute_copy::<Gc<T>, zerogc::Gc<T, Id>>(&updated_gc);
