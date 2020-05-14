@@ -4,6 +4,7 @@ description = "An exteremly simple mark/sweep collector for zerogc. Useful for d
 version = "0.1.0"
 authors = ["Techcable <Techcable@techcable.net>"]
 edition = "2018"
+publish = false
 
 [dependencies]
 zerogc = { path = "../.." }
