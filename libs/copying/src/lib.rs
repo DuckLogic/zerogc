@@ -180,6 +180,7 @@ impl RawCopyingCollector {
             // Double capacity to ensure amortized growth
             std::cmp::max(total_used, last_chunk_capacity * 2)
         };
+        self.debug_visit();
         let chunk = Chunk::alloc(new_size);
         let task = CollectionTask {
             id: self.id,
@@ -188,6 +189,39 @@ impl RawCopyingCollector {
             updated_chunk: chunk
         };
         task.run();
+        self.debug_visit();
+    }
+    #[cfg(not(debug_assertions))]
+    fn debug_visit(&self) {}
+    #[cfg(debug_assertions)]
+    fn debug_visit(&self) {
+        let stack = self.shadow_stack.borrow();
+        let mut visitor = DebugVisitor {
+            id: self.id,
+            arena: &self.heap.allocator.arena
+        };
+        for &root in &stack.0 {
+            unsafe { (*root).visit_debug(&mut visitor) };
+        }
+    }
+}
+#[cfg(debug_assertions)]
+pub struct DebugVisitor<'a> {
+    id: CopyingCollectorId,
+    arena: &'a Arena,
+}
+#[cfg(debug_assertions)]
+unsafe impl GcVisitor for DebugVisitor<'_> {
+    type Err = !;
+
+    fn visit_gc<T, Id>(&mut self, gc: &mut zerogc::Gc<T, Id>) -> Result<(), !>
+        where T: GcSafe, Id: CollectorId {
+        assert_eq!(gc.id().try_cast::<CopyingCollectorId>(), Some(&self.id));
+        assert_ne!(
+            self.arena.check_contains_ptr(unsafe { gc.as_raw_ptr() } as *mut u8),
+            None
+        );
+        unsafe { (&mut *gc.as_raw_ptr()).visit(self) }
     }
 }
 struct CollectionTask<'a> {
@@ -428,10 +462,17 @@ impl<T: GcSafe> StaticType for T {
 }
 trait DynVisit {
     fn visit_copying(&mut self, visitor: &mut CopyVisitor);
+    #[cfg(debug_assertions)]
+    fn visit_debug(&mut self, visitor: &mut DebugVisitor);
 }
 impl<T: Trace> DynVisit for T {
     #[inline]
     fn visit_copying(&mut self, visitor: &mut CopyVisitor) {
+        let Ok(()) = self.visit(visitor);
+    }
+
+    #[cfg(debug_assertions)]
+    fn visit_debug(&mut self, visitor: &mut DebugVisitor) {
         let Ok(()) = self.visit(visitor);
     }
 }

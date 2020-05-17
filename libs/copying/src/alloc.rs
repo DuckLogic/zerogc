@@ -78,6 +78,9 @@ impl Arena {
             current_chunk: Cell::new(current_chunk)
         }
     }
+    pub fn check_contains_ptr(&self, ptr: *mut u8) -> Option<usize> {
+        self.chunks.borrow().iter().position(|c| c.is_used(ptr))
+    }
     #[inline]
     pub fn current_chunk_capacity(&self) -> usize {
         unsafe { self.current_chunk.get().as_ref().capacity() }
