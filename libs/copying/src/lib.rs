@@ -149,6 +149,9 @@ impl ArenaAlloc {
             assert!(gc_type.drop.is_some());
             self.finalizer_list.borrow_mut().push(header);
         }
+        self.approx_allocated_size.set(
+            self.approx_allocated_size.get() + gc_type.complete_layout().size()
+        );
         unsafe { Gc::new(self.id, NonNull::new_unchecked(value_ptr)) }
     }
 }
