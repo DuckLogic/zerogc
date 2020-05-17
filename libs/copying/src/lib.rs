@@ -396,7 +396,7 @@ impl GcType {
                 offset, header_layout.align()
             ).padding_needed_for(std::mem::align_of::<GcHeader>());
             Layout::from_size_align_unchecked(
-                offset + trailing_padding,
+                offset + self.value_layout.size() + trailing_padding,
                 header_layout.align()
             )
         }
