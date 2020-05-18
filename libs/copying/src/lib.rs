@@ -378,12 +378,12 @@ unsafe impl GcContext for CopyingCollectorContext {
     }
 
     unsafe fn recurse_context<T, F, R>(&self, value: &mut T, func: F) -> R
-        where T: Trace, F: FnOnce(&mut Self, &Self, &mut T) -> R {
+        where T: Trace, F: for <'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R {
         let dyn_ptr = self.collector.shadow_stack.borrow_mut().push(value);
         let mut sub_context = CopyingCollectorContext {
             collector: self.collector.clone()
         };
-        let result = func(&mut sub_context, &*self, value);
+        let result = func(&mut sub_context, value);
         drop(sub_context);
         assert_eq!(
             self.collector.shadow_stack.borrow_mut().pop(),

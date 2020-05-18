@@ -99,13 +99,12 @@ macro_rules! __recurse_context {
     ($context:ident, $root:expr, |$sub_context:ident, $new_root:ident| $closure:expr) => {{
         use $crate::{GcContext};
         // TODO: Panic safety
-        $context.recurse_context(&mut $root, |mut $sub_context, root_context, erased_root| {
+        $context.recurse_context(&mut $root, |mut $sub_context, erased_root| {
             /*
              * NOTE: Guarenteed to live for the lifetime of the entire closure.
-             * It's been appended to the shadow stack so its considered a root.
-             * We're passed a dummy `$root_context` corresponding to this lifetime
+             * However, it could be relocated if 'sub_collector' is collected
              */
-            let $new_root = $context.rebrand_self(erased_root);
+            let $new_root = $sub_context.rebrand_self(erased_root);
             $closure
         })
     }};
@@ -216,7 +215,8 @@ pub unsafe trait GcContext {
     ///
     /// The specified value is
     /// guarenteed to live throughout the created context for the closure.
-    ///
+    /// However, because it could possibly be relocated by a collection,
+    /// it's bound to the lifetime of the sub-collector.
     ///
     /// ## Safety
     /// This macro doesn't imply garbage collection,
@@ -229,7 +229,7 @@ pub unsafe trait GcContext {
     ///
     /// See the [safepoint_recurse!] macro for a safe wrapper
     unsafe fn recurse_context<T, F, R>(&self, value: &mut T, func: F) -> R
-        where T: Trace, F: FnOnce(&mut Self, &Self, &mut T) -> R;
+        where T: Trace, F: for <'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R;
 }
 pub unsafe trait GcAllocContext: GcContext {
     type MemoryErr: Debug;
