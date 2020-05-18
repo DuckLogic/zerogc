@@ -217,11 +217,12 @@ unsafe impl GcVisitor for DebugVisitor<'_> {
     fn visit_gc<T, Id>(&mut self, gc: &mut zerogc::Gc<T, Id>) -> Result<(), !>
         where T: GcSafe, Id: CollectorId {
         assert_eq!(gc.id().try_cast::<CopyingCollectorId>(), Some(&self.id));
+        let raw_ptr = unsafe { gc.as_raw_ptr() };
         assert_ne!(
-            self.arena.check_contains_ptr(unsafe { gc.as_raw_ptr() } as *mut u8),
-            None
+            self.arena.check_contains_ptr(raw_ptr as *mut u8),
+            None, "Invalid ptr {:?}", raw_ptr
         );
-        unsafe { (&mut *gc.as_raw_ptr()).visit(self) }
+        unsafe { (&mut *raw_ptr).visit(self) }
     }
 }
 struct CollectionTask<'a> {
@@ -354,6 +355,11 @@ unsafe impl<'a> GcVisitor for CopyVisitor<'a> {
             },
             ObjState::Relocated => unsafe { header.info.relocated } // Already copied
         };
+        debug_assert!(gc.id().matches(&self.id));
+        *gc = unsafe { zerogc::Gc::new(
+            gc.id(),
+            NonNull::new_unchecked((*relocated_ptr).value() as *mut T)
+        ) };
         debug_assert!(self.updated_chunk.is_used(relocated_ptr as *mut u8));
         Ok(())
     }
