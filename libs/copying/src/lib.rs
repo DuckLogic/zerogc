@@ -9,6 +9,7 @@
     const_alloc_layout, // We want to ensure layout logic can be const-folded
     const_transmute, // We need to transmute function pointers in GcType
     drain_filter, // Used for finalizers
+    backtrace, // DEBUG: Whenever a new type is used at safepoint
 )]
 use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcVisitor, GcAllocContext};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -74,6 +75,17 @@ struct ShadowStack(Vec<*mut dyn DynVisit>);
 impl ShadowStack {
     #[inline]
     pub unsafe fn push<'a, T: Trace + 'a>(&mut self, value: &'a mut T) -> *mut dyn DynVisit {
+        thread_local! {
+            static TYPE_NAMES: RefCell<std::collections::HashSet<&'static str>> = Default::default();
+        }
+        TYPE_NAMES.with(|s| {
+            let name = std::any::type_name::<T>();
+            let mut set = s.borrow_mut();
+            if !set.contains(&name) {
+                set.insert(name);
+                print!("type_name: {}:\n{}", name, std::backtrace::Backtrace::force_capture());
+            }
+        });
         let short_ptr = value as &mut (dyn DynVisit + 'a)
             as *mut (dyn DynVisit + 'a);
         let long_ptr = std::mem::transmute::<
@@ -374,7 +386,7 @@ pub struct CopyingCollectorContext {
 unsafe impl GcContext for CopyingCollectorContext {
     type Id = CopyingCollectorId;
 
-    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut T) {
+    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T) {
         let dyn_ptr = self.collector.shadow_stack.borrow_mut().push(value);
         self.collector.maybe_collect();
         assert_eq!(
@@ -383,7 +395,7 @@ unsafe impl GcContext for CopyingCollectorContext {
         );
     }
 
-    unsafe fn recurse_context<T, F, R>(&self, value: &mut T, func: F) -> R
+    unsafe fn recurse_context<T, F, R>(&self, value: &mut &mut T, func: F) -> R
         where T: Trace, F: for <'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R {
         let dyn_ptr = self.collector.shadow_stack.borrow_mut().push(value);
         let mut sub_context = CopyingCollectorContext {

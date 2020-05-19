@@ -132,7 +132,7 @@ macro_rules! safepoint {
         use $crate::{GcContext};
         // TODO: What happens if we panic during a collection
         let mut erased = $collector.rebrand_static($value);
-        $collector.basic_safepoint(&mut erased);
+        $collector.basic_safepoint(&mut &mut erased);
         $collector.rebrand_self(erased)
     }};
 }
@@ -194,7 +194,7 @@ pub unsafe trait GcContext {
     /// This method is unsafe and should never be invoked by user code.
     ///
     /// See the [safepoint!] macro for a safe wrapper.
-    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut T);
+    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T);
 
     #[inline(always)]
     #[doc(hidden)]
@@ -228,7 +228,7 @@ pub unsafe trait GcContext {
     /// For this reason, this function should never be invoked by user code.
     ///
     /// See the [safepoint_recurse!] macro for a safe wrapper
-    unsafe fn recurse_context<T, F, R>(&self, value: &mut T, func: F) -> R
+    unsafe fn recurse_context<T, F, R>(&self, value: &mut &mut T, func: F) -> R
         where T: Trace, F: for <'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R;
 }
 pub unsafe trait GcAllocContext: GcContext {

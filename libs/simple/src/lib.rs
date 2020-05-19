@@ -311,7 +311,7 @@ pub struct SimpleCollectorContext {
 unsafe impl GcContext for SimpleCollectorContext {
     type Id = SimpleCollectorId;
 
-    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut T) {
+    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T) {
         let dyn_ptr = self.collector.shadow_stack.borrow_mut().push(value);
         self.collector.maybe_collect();
         assert_eq!(
@@ -320,7 +320,7 @@ unsafe impl GcContext for SimpleCollectorContext {
         );
     }
 
-    unsafe fn recurse_context<T, F, R>(&self, value: &mut T, func: F) -> R
+    unsafe fn recurse_context<T, F, R>(&self, value: &mut &mut T, func: F) -> R
         where T: Trace, F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R {
         let dyn_ptr = self.collector.shadow_stack.borrow_mut().push(value);
         let mut sub_context = SimpleCollectorContext {
