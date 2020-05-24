@@ -48,7 +48,8 @@ impl CopyingCollector {
             id, shadow_stack: RefCell::new(ShadowStack(Vec::new())),
             heap: GcHeap {
                 threshold: Cell::new(INITIAL_COLLECTION_THRESHOLD),
-                allocator: ArenaAlloc::new(id)
+                allocator: ArenaAlloc::new(id),
+                cached_chunk: Cell::new(None)
             }
         }))
     }
@@ -109,7 +110,8 @@ mod alloc;
 
 struct GcHeap {
     threshold: Cell<usize>,
-    allocator: ArenaAlloc
+    allocator: ArenaAlloc,
+    cached_chunk: Cell<Option<Chunk>>
 }
 impl GcHeap {
     #[inline]
@@ -185,15 +187,31 @@ impl RawCopyingCollector {
     #[inline(never)]
     unsafe fn perform_collection(&self) {
         let total_used = self.heap.allocator.arena.total_used();
-        let last_chunk_capacity = self.heap.allocator.arena.current_chunk_capacity();
-        let new_size = if total_used < last_chunk_capacity {
-            last_chunk_capacity // Last chunk was enough
-        } else {
-            // Double capacity to ensure amortized growth
-            std::cmp::max(total_used, last_chunk_capacity * 2)
+        let last_alloc_chunk_capacity = self.heap.allocator.arena.current_chunk_capacity();
+        let chunk = {
+            let cached_chunk = self.heap.cached_chunk
+                .replace(None);
+            match cached_chunk {
+                Some(cached) if cached.capacity() >= total_used => {
+                    /*
+                     * The cached chunk is suffient
+                     * Reuse it to avoid thrashing
+                     */
+                    cached
+                },
+                _ => {
+                    // Allocate a new chunk
+                    let new_size = if total_used < last_alloc_chunk_capacity {
+                        last_alloc_chunk_capacity // Use last allocated chunk size
+                    } else {
+                        // Double capacity to ensure amortized growth
+                        std::cmp::max(total_used, last_alloc_chunk_capacity * 2)
+                    };
+                    Chunk::alloc(new_size)
+                }
+            }
         };
         self.debug_visit();
-        let chunk = Chunk::alloc(new_size);
         let task = CollectionTask {
             id: self.id,
             roots: self.shadow_stack.borrow().0.clone(),
@@ -311,7 +329,17 @@ impl<'a> CollectionTask<'a> {
         self.heap.allocator.approx_allocated_size.set(self.updated_chunk.used_bytes());
         // Reset arena to use only the updated chunkk
         unsafe {
-            self.heap.allocator.arena.reset_single_chunk(self.updated_chunk);
+            let old_chunk = self.heap.allocator.arena
+                .replace_single_chunk(self.updated_chunk);
+            if cfg!(debug_assertions) {
+                // Override old data with garbage (in debug mode)
+                old_chunk.start().write_bytes(
+                    0b10101010,
+                    old_chunk.capacity()
+                );
+            }
+            // Cache the old chunk
+            self.heap.cached_chunk.set(Some(old_chunk));
         }
         let updated_size = self.heap.allocator.allocated_size();
         // Update the threshold to be 150% of currently used size

@@ -122,9 +122,10 @@ impl Arena {
         chunks.push(Chunk::alloc(min_size));
         self.current_chunk.set(NonNull::from(chunks.last_mut().unwrap()));
     }
-    pub unsafe fn reset_single_chunk(&self, chunk: Chunk) {
+    pub unsafe fn replace_single_chunk(&self, chunk: Chunk) -> Chunk {
         let v = vec![chunk];
         self.current_chunk.set(NonNull::from(v.last().unwrap()));
-        self.chunks.replace(v);
+        let mut old_chunks = self.chunks.replace(v);
+        old_chunks.pop().unwrap()
     }
 }
