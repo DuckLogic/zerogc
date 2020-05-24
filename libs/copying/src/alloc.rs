@@ -23,6 +23,16 @@ impl Chunk {
             Chunk { data, limit, current: Cell::new(current) }
         }
     }
+    pub fn clear(&mut self) {
+        unsafe {
+            let ptr = self.data.as_mut_ptr();
+            debug_assert_eq!(
+                self.limit.as_ptr(),
+                ptr.wrapping_add(self.data.capacity())
+            );
+            self.current.set(NonNull::new_unchecked(ptr));
+        }
+    }
     #[inline]
     pub fn start(&self) -> *mut u8 {
         self.data.as_ptr() as *mut u8
@@ -78,6 +88,7 @@ impl Arena {
             current_chunk: Cell::new(current_chunk)
         }
     }
+    #[cfg(debug_assertions)]
     pub fn check_contains_ptr(&self, ptr: *mut u8) -> Option<usize> {
         self.chunks.borrow().iter().position(|c| c.is_used(ptr))
     }
@@ -126,6 +137,8 @@ impl Arena {
         let v = vec![chunk];
         self.current_chunk.set(NonNull::from(v.last().unwrap()));
         let mut old_chunks = self.chunks.replace(v);
-        old_chunks.pop().unwrap()
+        let mut chunk = old_chunks.pop().unwrap();
+        chunk.clear();
+        chunk
     }
 }
