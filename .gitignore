@@ -6,3 +6,6 @@ Cargo.lock
 # IntelliJ
 .idea
 *.iml
+
+# Bench
+bench/*.class
