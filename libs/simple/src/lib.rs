@@ -4,6 +4,9 @@
     never_type, // Used for errors (which are currently impossible)
     negative_impls, // impl !Send is much cleaner than PhantomData<Rc<()>>
     exhaustive_patterns, // Allow exhaustive matching against never
+    const_alloc_layout, // Used for StaticType
+    const_if_match, // Used for StaticType
+    const_transmute, // This can already be acheived with unions...
 )]
 use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcVisitor, GcAllocContext};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,6 +14,9 @@ use std::alloc::Layout;
 use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::os::raw::c_void;
+use std::mem::transmute;
+use std::mem;
 
 /// An alias to `zerogc::Gc<T, SimpleCollectorId>` to simplify use with zerogc-simple
 pub type Gc<'gc, T> = zerogc::Gc<'gc, T, SimpleCollectorId>;
@@ -108,7 +114,7 @@ impl GcHeap {
 pub struct SimpleAlloc {
     id: SimpleCollectorId,
     allocated_size: Cell<usize>,
-    object_link: Cell<Option<NonNull<GcObject<dyn DynTrace>>>>
+    object_link: Cell<Option<NonNull<GcObject>>>
 }
 impl SimpleAlloc {
     fn new(id: SimpleCollectorId) -> SimpleAlloc {
@@ -124,14 +130,15 @@ impl SimpleAlloc {
     }
     fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
         let mut object = Box::new(GcObject {
-            value, state: MarkState::White, prev: self.object_link.get(),
+            static_value: value, type_info: T::STATIC_TYPE,
+            state: MarkState::White, prev: self.object_link.get(),
         });
         let gc = unsafe { Gc::from_raw(
-            NonNull::new_unchecked(&mut object.value),
+            NonNull::new_unchecked(&mut object.static_value),
             self.id
         ) };
         {
-            let size = object.size();
+            let size = std::mem::size_of::<GcObject<T>>();
             unsafe { self.object_link.set(Some(NonNull::new_unchecked(
                 Box::into_raw(GcObject::erase_box_lifetime(object))
             ))); }
@@ -149,13 +156,13 @@ impl SimpleAlloc {
             match obj.state {
                 MarkState::White => {
                     // Free the object
-                    expected_size -= obj.size();
+                    expected_size -= obj.dyn_total_size();
                     drop(Box::from_raw(obj));
                 },
                 MarkState::Grey => panic!("All gray objects should've been processed"),
                 MarkState::Black => {
                     // Retain the object
-                    actual_size += obj.size();
+                    actual_size += obj.dyn_total_size();
                     obj.prev = last_linked;
                     last_linked = Some(NonNull::from(&mut *obj));
                     // Reset state to white
@@ -195,7 +202,7 @@ impl RawSimpleCollector {
     }
 }
 enum GreyElement {
-    Object(*mut GcObject<dyn DynTrace>),
+    Object(*mut GcObject),
     Other(*mut dyn DynTrace)
 }
 struct CollectionTask<'a> {
@@ -210,32 +217,27 @@ impl<'a> CollectionTask<'a> {
             .map(|&ptr| GreyElement::Other(ptr)));
         // Mark
         while let Some(target) = self.gray_stack.pop() {
-            let target_value = match target {
-                GreyElement::Object(obj) => {
-                    unsafe {
-                        debug_assert_eq!((*obj).state, MarkState::Grey);
-                        &mut (*obj).value as &mut dyn DynTrace
-                    }
-                },
-                GreyElement::Other(target) => {
-                    unsafe { &mut *target }
-                }
-            };
             let mut visitor = MarkVisitor {
                 id: self.id,
                 gray_stack: &mut self.gray_stack,
             };
-            (*target_value).trace(&mut visitor);
             match target {
                 GreyElement::Object(obj) => {
                     unsafe {
-                        // Mark the object black now it's been traced
                         debug_assert_eq!((*obj).state, MarkState::Grey);
+                        ((*obj).type_info.trace_func)(
+                            &mut *(*obj).dyn_value(),
+                            &mut visitor
+                        );
+                        // Mark the object black now it's innards have been traced
                         (*obj).state = MarkState::Black;
                     }
                 },
-                GreyElement::Other(_) => {},
-            }
+                GreyElement::Other(target) => {
+                    // Dynamically dispatched
+                    unsafe { (*target).trace(&mut visitor); }
+                }
+            };
         }
         // Sweep
         unsafe { self.heap.allocator.sweep(&self.roots) };
@@ -279,13 +281,7 @@ unsafe impl<'a> GcVisitor for MarkVisitor<'a> {
                      * It will be processed later
                      */
                     obj.state = MarkState::Grey;
-                    self.gray_stack.push(GreyElement::Object(
-                        unsafe {
-                            std::mem::transmute::<_, *mut GcObject<(dyn DynTrace + 'static)>>(
-                                &mut *obj as *mut _ as *mut GcObject<dyn DynTrace>
-                            )
-                        }
-                    ));
+                    self.gray_stack.push(GreyElement::Object(obj.as_dynamic()));
                 }
             },
             MarkState::Grey => {
@@ -350,35 +346,77 @@ unsafe impl GcAllocContext for SimpleCollectorContext {
     }
 }
 
+struct GcType {
+    value_size: usize,
+    value_offset: usize,
+    trace_func: unsafe fn(*mut c_void, &mut MarkVisitor),
+    drop_func: Option<unsafe fn(*mut c_void)>,
+}
+trait StaticGcType {
+    const VALUE_OFFSET: usize;
+    const STATIC_TYPE: &'static GcType;
+}
+impl<T: GcSafe> StaticGcType for T {
+    const VALUE_OFFSET: usize = {
+        let layout = Layout::new::<GcObject<()>>();
+        layout.size() + layout.padding_needed_for(std::mem::align_of::<T>())
+    };
+    const STATIC_TYPE: &'static GcType = &GcType {
+        value_size: std::mem::size_of::<T>(),
+        value_offset: Self::VALUE_OFFSET,
+        trace_func: unsafe { transmute::<_, unsafe fn(*mut c_void, &mut MarkVisitor)>(
+            <T as DynTrace>::trace as fn(&mut T, &mut MarkVisitor),
+        ) },
+        drop_func: if std::mem::needs_drop::<T>() {
+            unsafe { Some(transmute::<_, unsafe fn(*mut c_void)>(
+                std::ptr::drop_in_place::<T> as unsafe fn(*mut T)
+            )) }
+        } else { None }
+    };
+}
+
+/// Marker for an unknown GC object
+struct DynamicObj;
+
 /// A heap-allocated GC object
-struct GcObject<T: ?Sized + DynTrace> {
+#[repr(C)]
+struct GcObject<T = DynamicObj> {
     state: MarkState,
+    type_info: &'static GcType,
     /// The previous object in the linked list of allocated objects,
     /// or null if its the end
     ///
     /// If this object has been relocated,
     /// then it points to the updated location
-    prev: Option<NonNull<GcObject<dyn DynTrace>>>,
-    value: T
+    prev: Option<NonNull<GcObject>>,
+    static_value: T
 }
-impl<T: ?Sized + DynTrace> GcObject<T> {
+impl GcObject<DynamicObj> {
     #[inline]
-    pub fn size(&self) -> usize {
-        std::mem::size_of_val(self)
+    pub const fn dyn_total_size(&self) -> usize {
+        mem::size_of::<GcObject<()>>() + self.type_info.value_size
+    }
+}
+impl<T> GcObject<T> {
+    // NOTE: Drop impl needs this generic for all T
+    #[inline]
+    pub fn dyn_value(&self) -> *mut c_void {
+        unsafe {
+            (self as *const GcObject<T> as *mut GcObject<T> as *mut u8)
+                .add(self.type_info.value_offset)
+                .cast::<c_void>()
+        }
     }
 }
 impl<T: DynTrace> GcObject<T> {
     #[inline]
-    unsafe fn erase_box_lifetime(val: Box<Self>) -> Box<GcObject<(dyn DynTrace + 'static)>> {
-        std::mem::transmute::<_, Box<GcObject<(dyn DynTrace + 'static)>>>(
-            val as Box<GcObject<(dyn DynTrace + '_)>>
-        )
+    fn as_dynamic(&self) -> *mut GcObject<DynamicObj> {
+        // Just cast....
+        self as *const Self as *mut GcObject<T> as *mut GcObject<DynamicObj>
     }
     #[inline]
-    unsafe fn erase_pointer_lifetime(ptr: *mut Self) -> *mut GcObject<(dyn DynTrace + 'static)> {
-        std::mem::transmute::<_, *mut GcObject<(dyn DynTrace + 'static)>>(
-            ptr as *mut GcObject<(dyn DynTrace + '_)>
-        )
+    unsafe fn erase_box_lifetime(val: Box<Self>) -> Box<GcObject<DynamicObj>> {
+        std::mem::transmute::<Box<GcObject<T>>, Box<GcObject<DynamicObj>>>(val)
     }
     #[inline]
     pub unsafe fn ptr_from_raw(raw: *mut T) -> *mut GcObject<T> {
@@ -386,8 +424,18 @@ impl<T: DynTrace> GcObject<T> {
             .sub(object_value_offset(&*raw))
             .cast::<GcObject<T>>();
         // Debug verify object_value_offset is working
-        debug_assert_eq!(&mut (*result).value as *mut T, raw);
+        debug_assert_eq!(&mut (*result).static_value as *mut T, raw);
         result
+    }
+}
+impl<T> Drop for GcObject<T> {
+    fn drop(&mut self) {
+        // NOTE: We have to dynamic drop in every case....
+        unsafe {
+            if let Some(drop_func) = self.type_info.drop_func {
+                drop_func(self.dyn_value())
+            }
+        }
     }
 }
 #[inline]
