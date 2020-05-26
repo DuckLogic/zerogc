@@ -23,7 +23,7 @@ mod manually_traced;
 pub mod cell;
 
 
-pub use self::cell::{GcCell, GcRefCell};
+pub use self::cell::{GcCell};
 
 use std::any::TypeId;
 use std::marker::PhantomData;
