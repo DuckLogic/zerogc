@@ -7,6 +7,8 @@
     const_alloc_layout, // Used for StaticType
     const_if_match, // Used for StaticType
     const_transmute, // This can already be acheived with unions...
+    untagged_unions, // Why isn't this stable?
+    new_uninit, // Until Rust has const generics, this is how we init arrays..
 )]
 use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcVisitor, GcAllocContext};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,8 +17,10 @@ use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::os::raw::c_void;
-use std::mem::transmute;
-use std::mem;
+use std::mem::{transmute, ManuallyDrop};
+use crate::alloc::{SmallArenaList, small_object_size};
+
+mod alloc;
 
 /// An alias to `zerogc::Gc<T, SimpleCollectorId>` to simplify use with zerogc-simple
 pub type Gc<'gc, T> = zerogc::Gc<'gc, T, SimpleCollectorId>;
@@ -111,36 +115,62 @@ impl GcHeap {
     }
 }
 
+/// A link in the chain of `BigGcObject`s
+type BigObjectLink = Option<NonNull<BigGcObject<DynamicObj>>>;
 pub struct SimpleAlloc {
     id: SimpleCollectorId,
     allocated_size: Cell<usize>,
-    object_link: Cell<Option<NonNull<GcObject>>>
+    small_arenas: SmallArenaList,
+    big_object_link: Cell<BigObjectLink>
 }
 impl SimpleAlloc {
     fn new(id: SimpleCollectorId) -> SimpleAlloc {
         SimpleAlloc {
             id,
             allocated_size: Cell::new(0),
-            object_link: Cell::new(None)
+            small_arenas: SmallArenaList::new(),
+            big_object_link: Cell::new(None)
         }
     }
     #[inline]
     fn allocated_size(&self) -> usize {
         self.allocated_size.get()
     }
+    #[inline]
     fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
-        let mut object = Box::new(GcObject {
-            static_value: value, type_info: T::STATIC_TYPE,
-            state: MarkState::White, prev: self.object_link.get(),
+        if let Some(arena) = self.small_arenas.find::<T>() {
+            let header = arena.alloc();
+            unsafe {
+                header.as_ptr().write(GcHeader {
+                    type_info: T::STATIC_TYPE,
+                    state: MarkState::White
+                });
+                let value_ptr = header.as_ref().value().cast::<T>();
+                value_ptr.write(value);
+                self.allocated_size.set(
+                    self.allocated_size.get()
+                        + small_object_size::<T>()
+                );
+                Gc::from_raw(NonNull::new_unchecked(value_ptr), self.id)
+            }
+        } else {
+            self.alloc_big(value)
+        }
+    }
+    fn alloc_big<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
+        let mut object = Box::new(BigGcObject {
+            header: GcHeader { type_info: T::STATIC_TYPE, state: MarkState::White },
+            static_value: ManuallyDrop::new(value),
+            prev: self.big_object_link.get(),
         });
         let gc = unsafe { Gc::from_raw(
-            NonNull::new_unchecked(&mut object.static_value),
+            NonNull::new_unchecked(&mut *object.static_value),
             self.id
         ) };
         {
-            let size = std::mem::size_of::<GcObject<T>>();
-            unsafe { self.object_link.set(Some(NonNull::new_unchecked(
-                Box::into_raw(GcObject::erase_box_lifetime(object))
+            let size = std::mem::size_of::<BigGcObject<T>>();
+            unsafe { self.big_object_link.set(Some(NonNull::new_unchecked(
+                Box::into_raw(BigGcObject::into_dynamic_box(object))
             ))); }
             self.allocated_size.set(self.allocated_size() + size);
         }
@@ -149,28 +179,63 @@ impl SimpleAlloc {
     unsafe fn sweep<'a>(&self, _roots: &[*mut (dyn DynTrace + 'a)]) {
         let mut expected_size = self.allocated_size.get();
         let mut actual_size = 0;
+        // Clear small arenas
+        for arena in self.small_arenas.iter() {
+            let mut last_free = arena.free.get();
+            arena.for_each(|slot| {
+                if (*slot).is_free() {
+                    /*
+                     * Just ignore this. It's already part of our linked list
+                     * of allocated objects.
+                     */
+                } else {
+                    match (*slot).header.state {
+                        MarkState::White => {
+                            // Free the object, dropping if necessary
+                            expected_size -= (*slot).header.total_size();
+                            if let Some(drop) = (*slot).header
+                                .type_info.drop_func {
+                                drop((*slot).header.value());
+                            }
+                            // Add to free list
+                            (*slot).mark_free(last_free);
+                            last_free = Some(NonNull::new_unchecked(slot));
+                        },
+                        MarkState::Grey => panic!("All grey objects should've been processed"),
+                        MarkState::Black => {
+                            // Retain the object
+                            actual_size += (*slot).header.total_size();
+                            // Reset state to white
+                            (*slot).header.state = MarkState::White;
+                        },
+                    }
+                }
+            });
+            arena.free.set(last_free);
+        }
+        // Clear large objects
         let mut last_linked = None;
-        while let Some(link) = self.object_link.get() {
-            let obj = &mut *link.as_ptr();
-            self.object_link.set(obj.prev);
-            match obj.state {
+        while let Some(big_link) = self.big_object_link.get() {
+            let obj = &mut *big_link.as_ptr();
+            self.big_object_link.set(obj.prev);
+            match obj.header.state {
                 MarkState::White => {
                     // Free the object
-                    expected_size -= obj.dyn_total_size();
+                    expected_size -= obj.dyn_size();
                     drop(Box::from_raw(obj));
                 },
                 MarkState::Grey => panic!("All gray objects should've been processed"),
                 MarkState::Black => {
                     // Retain the object
-                    actual_size += obj.dyn_total_size();
+                    actual_size += obj.dyn_size();
                     obj.prev = last_linked;
                     last_linked = Some(NonNull::from(&mut *obj));
                     // Reset state to white
-                    obj.state = MarkState::White;
+                    obj.header.state = MarkState::White;
                 }
             }
         }
-        self.object_link.set(last_linked);
+        self.big_object_link.set(last_linked);
         assert_eq!(expected_size, actual_size);
         self.allocated_size.set(actual_size);
     }
@@ -202,7 +267,7 @@ impl RawSimpleCollector {
     }
 }
 enum GreyElement {
-    Object(*mut GcObject),
+    Object(*mut GcHeader),
     Other(*mut dyn DynTrace)
 }
 struct CollectionTask<'a> {
@@ -226,7 +291,7 @@ impl<'a> CollectionTask<'a> {
                     unsafe {
                         debug_assert_eq!((*obj).state, MarkState::Grey);
                         ((*obj).type_info.trace_func)(
-                            &mut *(*obj).dyn_value(),
+                            &mut *(*obj).value(),
                             &mut visitor
                         );
                         // Mark the object black now it's innards have been traced
@@ -265,7 +330,7 @@ unsafe impl<'a> GcVisitor for MarkVisitor<'a> {
                 return Ok(());  // Belongs to another collector
             }
         }
-        let obj = unsafe { &mut *GcObject::ptr_from_raw(gc.as_raw_ptr()) };
+        let obj = unsafe { &mut *GcHeader::from_value_ptr(gc.as_raw_ptr()) };
         match obj.state {
             MarkState::White => {
                 if !T::NEEDS_TRACE {
@@ -280,8 +345,8 @@ unsafe impl<'a> GcVisitor for MarkVisitor<'a> {
                      * We need to mark this object grey and push it onto the grey stack.
                      * It will be processed later
                      */
-                    obj.state = MarkState::Grey;
-                    self.gray_stack.push(GreyElement::Object(obj.as_dynamic()));
+                    (*obj).state = MarkState::Grey;
+                    self.gray_stack.push(GreyElement::Object(obj));
                 }
             },
             MarkState::Grey => {
@@ -358,8 +423,15 @@ trait StaticGcType {
 }
 impl<T: GcSafe> StaticGcType for T {
     const VALUE_OFFSET: usize = {
-        let layout = Layout::new::<GcObject<()>>();
-        layout.size() + layout.padding_needed_for(std::mem::align_of::<T>())
+        if alloc::is_small_object::<T>() {
+            // Small object
+            let layout = Layout::new::<GcHeader>();
+            layout.size() + layout.padding_needed_for(std::mem::align_of::<T>())
+        } else {
+            // Big object
+            let layout = Layout::new::<BigGcObject<()>>();
+            layout.size() + layout.padding_needed_for(std::mem::align_of::<T>())
+        }
     };
     const STATIC_TYPE: &'static GcType = &GcType {
         value_size: std::mem::size_of::<T>(),
@@ -375,81 +447,78 @@ impl<T: GcSafe> StaticGcType for T {
     };
 }
 
-/// Marker for an unknown GC object
-struct DynamicObj;
-
-/// A heap-allocated GC object
+/// A header for a GC object
+///
+/// This is shared between both small arenas
+/// and fallback alloc vis `BigGcObject`
 #[repr(C)]
-struct GcObject<T = DynamicObj> {
-    state: MarkState,
+struct GcHeader {
     type_info: &'static GcType,
-    /// The previous object in the linked list of allocated objects,
-    /// or null if its the end
-    ///
-    /// If this object has been relocated,
-    /// then it points to the updated location
-    prev: Option<NonNull<GcObject>>,
-    static_value: T
+    /*
+     * NOTE: State byte should come last
+     * If the value is small `(u32)`, we could reduce
+     * the padding to a 3 bytes and fit everything in a word.
+     */
+    state: MarkState
 }
-impl GcObject<DynamicObj> {
+impl GcHeader {
     #[inline]
-    pub const fn dyn_total_size(&self) -> usize {
-        mem::size_of::<GcObject<()>>() + self.type_info.value_size
-    }
-}
-impl<T> GcObject<T> {
-    // NOTE: Drop impl needs this generic for all T
-    #[inline]
-    pub fn dyn_value(&self) -> *mut c_void {
+    pub fn value(&self) -> *mut c_void {
         unsafe {
-            (self as *const GcObject<T> as *mut GcObject<T> as *mut u8)
+            (self as *const GcHeader as *mut GcHeader as *mut u8)
+                // NOTE: This takes into account the possibility of `BigGcObject`
                 .add(self.type_info.value_offset)
                 .cast::<c_void>()
         }
     }
-}
-impl<T: DynTrace> GcObject<T> {
     #[inline]
-    fn as_dynamic(&self) -> *mut GcObject<DynamicObj> {
-        // Just cast....
-        self as *const Self as *mut GcObject<T> as *mut GcObject<DynamicObj>
+    pub fn total_size(&self) -> usize {
+        self.type_info.value_offset + self.type_info.value_size
     }
     #[inline]
-    unsafe fn erase_box_lifetime(val: Box<Self>) -> Box<GcObject<DynamicObj>> {
-        std::mem::transmute::<Box<GcObject<T>>, Box<GcObject<DynamicObj>>>(val)
-    }
-    #[inline]
-    pub unsafe fn ptr_from_raw(raw: *mut T) -> *mut GcObject<T> {
-        let result = raw.cast::<u8>()
-            .sub(object_value_offset(&*raw))
-            .cast::<GcObject<T>>();
-        // Debug verify object_value_offset is working
-        debug_assert_eq!(&mut (*result).static_value as *mut T, raw);
-        result
+    pub unsafe fn from_value_ptr<T: GcSafe>(ptr: *mut T) -> *mut GcHeader {
+        (ptr as *mut u8).sub(T::STATIC_TYPE.value_offset) as *mut GcHeader
     }
 }
-impl<T> Drop for GcObject<T> {
+
+/// Marker for an unknown GC object
+struct DynamicObj;
+
+#[repr(C)]
+struct BigGcObject<T = DynamicObj> {
+    header: GcHeader,
+    /// The previous object in the linked list of allocated objects,
+    /// or null if its the end
+    prev: BigObjectLink,
+    /// This is dropped using dynamic type info
+    static_value: ManuallyDrop<T>
+}
+impl<T> BigGcObject<T> {
+    #[inline]
+    fn dyn_size(&self) -> usize {
+        self.header.type_info.value_offset
+            + self.header.type_info.value_size
+    }
+    #[inline]
+    unsafe fn into_dynamic_box(val: Box<Self>) -> Box<BigGcObject<DynamicObj>> {
+        std::mem::transmute::<Box<BigGcObject<T>>, Box<BigGcObject<DynamicObj>>>(val)
+    }
+}
+impl<T> Drop for BigGcObject<T> {
     fn drop(&mut self) {
-        // NOTE: We have to dynamic drop in every case....
         unsafe {
-            if let Some(drop_func) = self.type_info.drop_func {
-                drop_func(self.dyn_value())
+            if let Some(drop) = self.header.type_info.drop_func {
+                drop(&mut *self.static_value as *mut T as *mut c_void);
             }
         }
     }
-}
-#[inline]
-fn object_value_offset<T: ?Sized>(val: &T) -> usize {
-    // Based on Arc::from_raw
-    let type_alignment = std::mem::align_of_val(val);
-    let layout = Layout::new::<GcObject<()>>();
-    layout.size() + layout.padding_needed_for(type_alignment)
 }
 
 /// The current mark state of the object
 ///
 /// See [Tri Color Marking](https://en.wikipedia.org/wiki/Tracing_garbage_collection#Tri-color_marking)
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
 enum MarkState {
     /// The object is in the "white set" and is a candidate for having its memory freed.
     ///

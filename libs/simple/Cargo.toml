@@ -8,3 +8,6 @@ publish = false
 
 [dependencies]
 zerogc = { path = "../.." }
+once_cell = "1.4.0"
+# Underlying allocator
+bumpalo = "^3.3"
