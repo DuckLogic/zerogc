@@ -70,19 +70,16 @@ fn main() {
 
     let long_lived_tree = bottom_up_tree(&gc, max_depth);
 
-    let (long_lived_tree, messages) = safepoint_recurse!(gc, long_lived_tree, |gc, long_lived_tree| {
-        (min_depth / 2..max_depth / 2 + 1).into_iter().map(|half_depth| {
+    let (long_lived_tree, ()) = safepoint_recurse!(gc, long_lived_tree, |gc, long_lived_tree| {
+        (min_depth / 2..max_depth / 2 + 1).into_iter().for_each(|half_depth| {
             let depth = half_depth * 2;
             let iterations = 1 << ((max_depth - depth + min_depth) as u32);
-            safepoint_recurse!(gc, |new_gc, new_root| {
+            let message = safepoint_recurse!(gc, |new_gc, new_root| {
                 inner(&mut new_gc, depth, iterations)
-            })
-        }).collect::<Vec<String>>()
+            });
+            println!("{}", message);
+        })
     });
-
-    for message in messages {
-        println!("{}", message);
-    }
 
     println!("long lived tree of depth {}\t check: {}", max_depth, item_check(&long_lived_tree));
 }
