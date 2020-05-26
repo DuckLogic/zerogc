@@ -73,10 +73,10 @@ unsafe impl GarbageCollectionSystem for SimpleCollector {
 }
 
 trait DynTrace {
-    fn trace<'a>(&mut self, visitor: &mut MarkVisitor<'a>);
+    fn trace(&mut self, visitor: &mut MarkVisitor);
 }
 impl<T: Trace + ?Sized> DynTrace for T {
-    fn trace<'a>(&mut self, visitor: &mut MarkVisitor<'a>) {
+    fn trace(&mut self, visitor: &mut MarkVisitor) {
         let Ok(()) = self.visit(visitor);
     }
 }
@@ -260,7 +260,6 @@ impl RawSimpleCollector {
         let mut task = CollectionTask {
             id: self.id,
             roots: self.shadow_stack.borrow().0.clone(),
-            gray_stack: Vec::with_capacity(64),
             heap: &self.heap
         };
         task.run();
@@ -273,36 +272,17 @@ enum GreyElement {
 struct CollectionTask<'a> {
     id: SimpleCollectorId,
     roots: Vec<*mut dyn DynTrace>,
-    gray_stack: Vec<GreyElement>,
     heap: &'a GcHeap
 }
 impl<'a> CollectionTask<'a> {
     fn run(&mut self) {
-        self.gray_stack.extend(self.roots.iter()
-            .map(|&ptr| GreyElement::Other(ptr)));
         // Mark
-        while let Some(target) = self.gray_stack.pop() {
+        for &root in &self.roots {
             let mut visitor = MarkVisitor {
                 id: self.id,
-                gray_stack: &mut self.gray_stack,
             };
-            match target {
-                GreyElement::Object(obj) => {
-                    unsafe {
-                        debug_assert_eq!((*obj).state, MarkState::Grey);
-                        ((*obj).type_info.trace_func)(
-                            &mut *(*obj).value(),
-                            &mut visitor
-                        );
-                        // Mark the object black now it's innards have been traced
-                        (*obj).state = MarkState::Black;
-                    }
-                },
-                GreyElement::Other(target) => {
-                    // Dynamically dispatched
-                    unsafe { (*target).trace(&mut visitor); }
-                }
-            };
+            // Dynamically dispatched
+            unsafe { (*root).trace(&mut visitor); }
         }
         // Sweep
         unsafe { self.heap.allocator.sweep(&self.roots) };
@@ -312,11 +292,10 @@ impl<'a> CollectionTask<'a> {
     }
 }
 
-struct MarkVisitor<'a> {
+struct MarkVisitor {
     id: SimpleCollectorId,
-    gray_stack: &'a mut Vec<GreyElement>,
 }
-unsafe impl<'a> GcVisitor for MarkVisitor<'a> {
+unsafe impl GcVisitor for MarkVisitor {
     type Err = !;
 
     fn visit_gc<T, Id>(&mut self, gc: &mut zerogc::Gc<'_, T, Id>) -> Result<(), Self::Err>
@@ -346,7 +325,14 @@ unsafe impl<'a> GcVisitor for MarkVisitor<'a> {
                      * It will be processed later
                      */
                     (*obj).state = MarkState::Grey;
-                    self.gray_stack.push(GreyElement::Object(obj));
+                    unsafe {
+                        T::trace(
+                            &mut *((*obj).value() as *mut T),
+                            &mut *self
+                        );
+                    }
+                    // Mark the object black now it's innards have been traced
+                    (*obj).state = MarkState::Black;
                 }
             },
             MarkState::Grey => {
