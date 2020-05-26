@@ -11,3 +11,9 @@ zerogc = { path = "../.." }
 once_cell = "1.4.0"
 # Underlying allocator
 bumpalo = "^3.3"
+
+[features]
+# Use recursion to implicitly track the grey stack
+# This risks stack overflow at a possible performance gain
+# See commit 9a9634d68a4933d
+implicit-grey-stack = []

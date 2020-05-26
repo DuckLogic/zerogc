@@ -260,19 +260,22 @@ impl RawSimpleCollector {
         let mut task = CollectionTask {
             id: self.id,
             roots: self.shadow_stack.borrow().0.clone(),
-            heap: &self.heap
+            heap: &self.heap,
+            grey_stack: if cfg!(feature = "implicit-grey-stack") {
+                Vec::new()
+            } else {
+                Vec::with_capacity(64)
+            }
         };
         task.run();
     }
 }
-enum GreyElement {
-    Object(*mut GcHeader),
-    Other(*mut dyn DynTrace)
-}
 struct CollectionTask<'a> {
     id: SimpleCollectorId,
     roots: Vec<*mut dyn DynTrace>,
-    heap: &'a GcHeap
+    heap: &'a GcHeap,
+    #[cfg_attr(feature = "implicit-grey-stack", allow(dead_code))]
+    grey_stack: Vec<*mut GcHeader>
 }
 impl<'a> CollectionTask<'a> {
     fn run(&mut self) {
@@ -280,9 +283,25 @@ impl<'a> CollectionTask<'a> {
         for &root in &self.roots {
             let mut visitor = MarkVisitor {
                 id: self.id,
+                grey_stack: &mut self.grey_stack,
             };
             // Dynamically dispatched
             unsafe { (*root).trace(&mut visitor); }
+        }
+        #[cfg(not(feature = "implicit-grey-stack"))] unsafe {
+            while let Some(obj) = self.grey_stack.pop() {
+                debug_assert_eq!((*obj).state, MarkState::Grey);
+                let mut visitor = MarkVisitor {
+                    id: self.id,
+                    grey_stack: &mut self.grey_stack
+                };
+                ((*obj).type_info.trace_func)(
+                    &mut *(*obj).value(),
+                    &mut visitor
+                );
+                // Mark the object black now it's innards have been traced
+                (*obj).state = MarkState::Black;
+            }
         }
         // Sweep
         unsafe { self.heap.allocator.sweep(&self.roots) };
@@ -292,10 +311,12 @@ impl<'a> CollectionTask<'a> {
     }
 }
 
-struct MarkVisitor {
+struct MarkVisitor<'a> {
     id: SimpleCollectorId,
+    #[cfg_attr(feature = "implicit-grey-stack", allow(dead_code))]
+    grey_stack: &'a mut Vec<*mut GcHeader>,
 }
-unsafe impl GcVisitor for MarkVisitor {
+unsafe impl GcVisitor for MarkVisitor<'_> {
     type Err = !;
 
     fn visit_gc<T, Id>(&mut self, gc: &mut zerogc::Gc<'_, T, Id>) -> Result<(), Self::Err>
@@ -325,14 +346,26 @@ unsafe impl GcVisitor for MarkVisitor {
                      * It will be processed later
                      */
                     (*obj).state = MarkState::Grey;
-                    unsafe {
+                    #[cfg(not(feature = "implicit-grey-stack"))] {
+                        self.grey_stack.push(obj as *mut GcHeader);
+                    }
+                    #[cfg(feature = "implicit-grey-stack")] unsafe {
+                        /*
+                         * The user wants an implicit grey stack using
+                         * recursion. This risks stack overflow but can
+                         * boost performance (See 9a9634d68a4933d).
+                         * On some workloads this is fine.
+                         */
                         T::trace(
                             &mut *((*obj).value() as *mut T),
                             &mut *self
                         );
+                        /*
+                         * Mark the object black now it's innards have been traced
+                         * NOTE: We do **not** do this with an implicit stack.
+                         */
+                        (*obj).state = MarkState::Black;
                     }
-                    // Mark the object black now it's innards have been traced
-                    (*obj).state = MarkState::Black;
                 }
             },
             MarkState::Grey => {
@@ -400,6 +433,7 @@ unsafe impl GcAllocContext for SimpleCollectorContext {
 struct GcType {
     value_size: usize,
     value_offset: usize,
+    #[cfg_attr(feature = "implicit-grey-stack", allow(unused))]
     trace_func: unsafe fn(*mut c_void, &mut MarkVisitor),
     drop_func: Option<unsafe fn(*mut c_void)>,
 }
