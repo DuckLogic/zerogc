@@ -5,7 +5,9 @@
     negative_impls, // impl !Send is much cleaner than PhantomData<Rc<()>>
     exhaustive_patterns, // Allow exhaustive matching against never
     const_alloc_layout, // Used for StaticType
+    const_fn, // We statically create type info
     const_if_match, // Used for StaticType
+    const_panic, // Const panic should be stable
     const_transmute, // This can already be acheived with unions...
     untagged_unions, // Why isn't this stable?
     new_uninit, // Until Rust has const generics, this is how we init arrays..
@@ -20,7 +22,29 @@ use std::os::raw::c_void;
 use std::mem::{transmute, ManuallyDrop};
 use crate::alloc::{SmallArenaList, small_object_size};
 
+#[cfg(feature = "small-object-arenas")]
 mod alloc;
+#[cfg(not(feature = "small-object-arenas"))]
+mod alloc {
+    pub const fn is_small_object<T>() -> bool {
+        false
+    }
+    pub const fn small_object_size<T>() -> usize {
+        unimplemented!()
+    }
+    pub struct FakeArena;
+    impl FakeArena {
+        pub(crate) fn alloc(&self) -> std::ptr::NonNull<super::GcHeader> {
+            unimplemented!()
+        }
+    }
+    pub struct SmallArenaList;
+    impl SmallArenaList {
+        // Create dummy
+        pub fn new() -> Self { SmallArenaList }
+        pub fn find<T>(&self) -> Option<FakeArena> { None }
+    }
+}
 
 /// An alias to `zerogc::Gc<T, SimpleCollectorId>` to simplify use with zerogc-simple
 pub type Gc<'gc, T> = zerogc::Gc<'gc, T, SimpleCollectorId>;
@@ -180,6 +204,7 @@ impl SimpleAlloc {
         let mut expected_size = self.allocated_size.get();
         let mut actual_size = 0;
         // Clear small arenas
+        #[cfg(feature = "small-object-arenas")]
         for arena in self.small_arenas.iter() {
             let mut last_free = arena.free.get();
             arena.for_each(|slot| {
@@ -192,7 +217,7 @@ impl SimpleAlloc {
                     match (*slot).header.state {
                         MarkState::White => {
                             // Free the object, dropping if necessary
-                            expected_size -= (*slot).header.total_size();
+                            expected_size -= (*slot).header.type_info.total_size();
                             if let Some(drop) = (*slot).header
                                 .type_info.drop_func {
                                 drop((*slot).header.value());
@@ -204,7 +229,7 @@ impl SimpleAlloc {
                         MarkState::Grey => panic!("All grey objects should've been processed"),
                         MarkState::Black => {
                             // Retain the object
-                            actual_size += (*slot).header.total_size();
+                            actual_size += (*slot).header.type_info.total_size();
                             // Reset state to white
                             (*slot).header.state = MarkState::White;
                         },
@@ -221,13 +246,13 @@ impl SimpleAlloc {
             match obj.header.state {
                 MarkState::White => {
                     // Free the object
-                    expected_size -= obj.dyn_size();
+                    expected_size -= obj.header.type_info.total_size();
                     drop(Box::from_raw(obj));
                 },
                 MarkState::Grey => panic!("All gray objects should've been processed"),
                 MarkState::Black => {
                     // Retain the object
-                    actual_size += obj.dyn_size();
+                    actual_size += obj.header.type_info.total_size();
                     obj.prev = last_linked;
                     last_linked = Some(NonNull::from(&mut *obj));
                     // Reset state to white
@@ -437,6 +462,12 @@ struct GcType {
     trace_func: unsafe fn(*mut c_void, &mut MarkVisitor),
     drop_func: Option<unsafe fn(*mut c_void)>,
 }
+impl GcType {
+    #[inline]
+    const fn total_size(&self) -> usize {
+        self.value_offset + self.value_size
+    }
+}
 trait StaticGcType {
     const VALUE_OFFSET: usize;
     const STATIC_TYPE: &'static GcType;
@@ -492,10 +523,6 @@ impl GcHeader {
         }
     }
     #[inline]
-    pub fn total_size(&self) -> usize {
-        self.type_info.value_offset + self.type_info.value_size
-    }
-    #[inline]
     pub unsafe fn from_value_ptr<T: GcSafe>(ptr: *mut T) -> *mut GcHeader {
         (ptr as *mut u8).sub(T::STATIC_TYPE.value_offset) as *mut GcHeader
     }
@@ -514,11 +541,6 @@ struct BigGcObject<T = DynamicObj> {
     static_value: ManuallyDrop<T>
 }
 impl<T> BigGcObject<T> {
-    #[inline]
-    fn dyn_size(&self) -> usize {
-        self.header.type_info.value_offset
-            + self.header.type_info.value_size
-    }
     #[inline]
     unsafe fn into_dynamic_box(val: Box<Self>) -> Box<BigGcObject<DynamicObj>> {
         std::mem::transmute::<Box<BigGcObject<T>>, Box<BigGcObject<DynamicObj>>>(val)
