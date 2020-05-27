@@ -20,4 +20,4 @@ arrayvec = { version = "^0.4.6", optional = true }
 ndarray = { version = "^0.10.12", optional = true }
 
 [workspace]
-members = ["libs/simple"]
+members = ["libs/simple", "libs/derive"]

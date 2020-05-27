@@ -1,6 +1,6 @@
 [package]
 name = "zerogc-simple"
-description = "An exteremly simple mark/sweep collector for zerogc. Useful for debugging"
+description = "Lightweight mark/sweep collector for zerogc."
 version = "0.1.0"
 authors = ["Techcable <Techcable@techcable.net>"]
 edition = "2018"
@@ -29,3 +29,7 @@ small-object-arenas = ["bumpalo", "once_cell"]
 # This risks stack overflow at a possible performance gain
 # See commit 9a9634d68a4933d
 implicit-grey-stack = []
+
+[dev-dependencies]
+# Used for examples :)
+zerogc-derive = { path = "../derive" }

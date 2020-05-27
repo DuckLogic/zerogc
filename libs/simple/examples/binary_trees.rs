@@ -1,22 +1,13 @@
-use zerogc::{safepoint, safepoint_recurse, GcSimpleAlloc, GcCell, Trace, GcVisitor, GcBrand, GcSafe, GcSystem};
+use zerogc::{safepoint, safepoint_recurse, GcSimpleAlloc, GcCell, GcSafe};
 
 use zerogc_simple::{SimpleCollector, SimpleCollectorContext, Gc};
+use zerogc_derive::Trace;
 
+#[derive(Trace)]
 struct Tree<'gc> {
     children: GcCell<Option<(Gc<'gc, Tree<'gc>>, Gc<'gc, Tree<'gc>>)>>,
 }
 // TODO: Auto-derive
-unsafe impl<'gc> Trace for Tree<'gc> {
-    const NEEDS_TRACE: bool = true;
-
-    #[inline]
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
-        visitor.visit(&mut self.children)
-    }
-}
-unsafe impl<'gc, 'new_gc, S: GcSystem> GcBrand<'new_gc, S> for Tree<'gc> {
-    type Branded = Tree<'new_gc>;
-}
 unsafe impl<'gc> GcSafe for Tree<'gc> {}
 
 fn item_check(tree: &Tree) -> i32 {
