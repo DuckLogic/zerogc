@@ -6,6 +6,7 @@ description = "Zero overhead tracing garbage collection for rust"
 repository = "https://github.com/DuckLogic/zerogc"
 license = "MIT"
 edition = "2018"
+readme = "README.md"
 
 [dependencies]
 # Manually included tracing support for third party libraries
