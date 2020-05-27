@@ -4,7 +4,7 @@
 //! but anything that requires the rest of the stdlib (including collections and allocations),
 //! should go in this module.
 
-use crate::{Trace, GcSafe, GcVisitor, TraceImmutable, NullTrace, GcBrand, CollectorId};
+use crate::{Trace, GcSafe, GcVisitor, TraceImmutable, NullTrace, GcBrand, GcSystem};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -38,14 +38,14 @@ unsafe impl<K: TraceImmutable, V: Trace> Trace for HashMap<K, V> {
     }
 }
 unsafe impl<K: GcSafe + TraceImmutable, V: GcSafe> GcSafe for HashMap<K, V> {}
-unsafe impl<'new_gc, Id, K, V> GcBrand<'new_gc, Id> for HashMap<K, V>
-    where Id: CollectorId, K: TraceImmutable + GcBrand<'new_gc, Id>,
-        V: GcBrand<'new_gc, Id>,
-        <K as GcBrand<'new_gc, Id>>::Branded: TraceImmutable + Sized,
-        <V as GcBrand<'new_gc, Id>>::Branded: Sized {
+unsafe impl<'new_gc, S, K, V> GcBrand<'new_gc, S> for HashMap<K, V>
+    where S: GcSystem, K: TraceImmutable + GcBrand<'new_gc, S>,
+        V: GcBrand<'new_gc, S>,
+        <K as GcBrand<'new_gc, S>>::Branded: TraceImmutable + Sized,
+        <V as GcBrand<'new_gc, S>>::Branded: Sized {
     type Branded = HashMap<
-        <K as GcBrand<'new_gc, Id>>::Branded,
-        <V as GcBrand<'new_gc, Id>>::Branded
+        <K as GcBrand<'new_gc, S>>::Branded,
+        <V as GcBrand<'new_gc, S>>::Branded
     >;
 }
 unsafe_immutable_trace_iterable!(HashSet<V>; element = { &V });

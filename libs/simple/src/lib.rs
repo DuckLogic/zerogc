@@ -11,9 +11,9 @@
     const_transmute, // This can already be acheived with unions...
     untagged_unions, // Why isn't this stable?
     new_uninit, // Until Rust has const generics, this is how we init arrays..
+    specialization, // Used for specialization (effectively required by GcRef)
 )]
-use zerogc::{GarbageCollectionSystem, CollectorId, GcSafe, Trace, GcContext, GcVisitor, GcAllocContext};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use zerogc::{GcSystem, GcSafe, Trace, GcContext, GcVisitor, GcSimpleAlloc, GcRef, GcBrand};
 use std::alloc::Layout;
 use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
@@ -21,6 +21,11 @@ use std::rc::Rc;
 use std::os::raw::c_void;
 use std::mem::{transmute, ManuallyDrop};
 use crate::alloc::{SmallArenaList, small_object_size};
+use std::ops::Deref;
+use std::hash::{Hash, Hasher};
+use std::fmt::{Debug, Formatter};
+use std::fmt;
+use std::marker::PhantomData;
 
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
@@ -46,37 +51,129 @@ mod alloc {
     }
 }
 
-/// An alias to `zerogc::Gc<T, SimpleCollectorId>` to simplify use with zerogc-simple
-pub type Gc<'gc, T> = zerogc::Gc<'gc, T, SimpleCollectorId>;
+/// A garbage collected pointer
+///
+/// See docs for [zerogc::GcRef]
+pub struct Gc<'gc, T: GcSafe + 'gc> {
+    /// Used to uniquely identify the collector,
+    /// to ensure we aren't modifying another collector's pointers
+    ///
+    /// As long as our memory is valid,
+    /// it implies this pointer is too..
+    collector_ptr: NonNull<RawSimpleCollector>,
+    value: NonNull<T>,
+    marker: PhantomData<&'gc T>
+}
+impl<'gc, T: GcSafe + 'gc> Gc<'gc, T> {
+    #[inline]
+    pub(crate) unsafe fn from_raw(
+        collector_ptr: NonNull<RawSimpleCollector>,
+        value: NonNull<T>
+    ) -> Self {
+        Gc { collector_ptr, value, marker: PhantomData }
+    }
+}
+impl<'gc, T: GcSafe + 'gc> GcRef<'gc, T> for Gc<'gc, T> {
+    type System = SimpleCollector;
 
-/// A garbage collector that internally compacts memory
-static NEXT_COLLECTOR_ID: AtomicUsize = AtomicUsize::new(0);
+    #[inline]
+    fn value(&self) -> &'gc T {
+        unsafe { &mut *self.value.as_ptr() }
+    }
+}
+/// Double-indirection is completely safe
+unsafe impl<'gc, T: GcSafe + 'gc> GcSafe for Gc<'gc, T> {}
+/// Rebrand
+unsafe impl<'gc, 'new_gc, T> GcBrand<'new_gc, SimpleCollector> for Gc<'gc, T>
+    where T: GcSafe + GcBrand<'new_gc, SimpleCollector>,
+          T::Branded: GcSafe {
+    type Branded = Gc<'new_gc, <T as GcBrand<'new_gc, SimpleCollector>>::Branded>;
+}
+unsafe impl<'gc, T: GcSafe + 'gc> Trace for Gc<'gc, T> {
+    // We always need tracing....
+    const NEEDS_TRACE: bool = true;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct SimpleCollectorId(usize);
-impl SimpleCollectorId {
-    fn acquire() -> SimpleCollectorId {
-        loop {
-            let prev = NEXT_COLLECTOR_ID.load(Ordering::SeqCst);
-            let updated = prev.checked_add(1).expect("Overflow collector ids");
-            if NEXT_COLLECTOR_ID.compare_and_swap(prev, updated, Ordering::SeqCst) == prev {
-                break SimpleCollectorId(prev)
-            }
+    #[inline]
+    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+        <V as GcVisit>::visit_gc(visitor, self);
+        Ok(())
+    }
+}
+impl<'gc, T: GcSafe + 'gc> Deref for Gc<'gc, T> {
+    type Target = &'gc T;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*(&self.value as *const NonNull<T> as *const &'gc T) }
+    }
+}
+// We can be copied freely :)
+impl<'gc, T: GcSafe + 'gc> Copy for Gc<'gc, T> {}
+impl<'gc, T: GcSafe + 'gc> Clone for Gc<'gc, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+// Delegating impls
+impl<'gc, T: GcSafe + Hash + 'gc> Hash for Gc<'gc, T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.value().hash(state)
+    }
+}
+impl<'gc, T: GcSafe + PartialEq + 'gc> PartialEq for Gc<'gc, T> {
+    fn eq(&self, other: &Self) -> bool {
+        // NOTE: We compare by value, not identity
+        self.value() == other.value()
+    }
+}
+impl<'gc, T: GcSafe + Eq + 'gc> Eq for Gc<'gc, T> {}
+impl<'gc, T: GcSafe + PartialEq + 'gc> PartialEq<T> for Gc<'gc, T> {
+    fn eq(&self, other: &T) -> bool {
+        self.value() == other
+    }
+}
+impl<'gc, T: GcSafe + Debug + 'gc> Debug for Gc<'gc, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if !f.alternate() {
+            // Pretend we're a newtype by default
+            f.debug_tuple("Gc").field(self.value()).finish()
+        } else {
+            // Alternate spec reveals `collector_ptr`
+            f.debug_struct("Gc")
+                .field("collector_ptr", &self.collector_ptr)
+                .field("value", self.value())
+                .finish()
         }
     }
 }
-unsafe impl CollectorId for SimpleCollectorId {}
+// Visitor (specialized trait)
+trait GcVisit: GcVisitor {
+    fn visit_gc<'gc, T: GcSafe + 'gc>(&mut self, gc: &mut Gc<'gc, T>);
+}
+impl<V: GcVisitor> GcVisit for V {
+    #[inline]
+    default fn visit_gc<'gc, T: GcSafe + 'gc>(&mut self, _gc: &mut Gc<'gc, T>) {}
+}
+
+
 pub struct SimpleCollector(Rc<RawSimpleCollector>);
 impl SimpleCollector {
     pub fn create() -> Self {
-        let id = SimpleCollectorId::acquire();
-        SimpleCollector(Rc::new(RawSimpleCollector {
-            id, shadow_stack: RefCell::new(ShadowStack(Vec::new())),
+        let collector = Rc::new(RawSimpleCollector {
+            shadow_stack: RefCell::new(ShadowStack(Vec::new())),
             heap: GcHeap {
                 threshold: Cell::new(INITIAL_COLLECTION_THRESHOLD),
-                allocator: SimpleAlloc::new(id)
+                allocator: SimpleAlloc::new(
+                    std::ptr::null_mut() // This is initialized later
+                )
             }
-        }))
+        });
+        collector.heap.allocator.collector_ptr.set(
+            &*collector as *const RawSimpleCollector
+                as *mut RawSimpleCollector
+        );
+        SimpleCollector(collector)
     }
     /// Make this collector into a context
     #[inline]
@@ -87,14 +184,7 @@ impl SimpleCollector {
     }
 }
 
-unsafe impl GarbageCollectionSystem for SimpleCollector {
-    type Id = SimpleCollectorId;
-
-    #[inline]
-    fn id(&self) -> Self::Id {
-        self.0.id
-    }
-}
+unsafe impl GcSystem for SimpleCollector {}
 
 trait DynTrace {
     fn trace(&mut self, visitor: &mut MarkVisitor);
@@ -142,15 +232,16 @@ impl GcHeap {
 /// A link in the chain of `BigGcObject`s
 type BigObjectLink = Option<NonNull<BigGcObject<DynamicObj>>>;
 pub struct SimpleAlloc {
-    id: SimpleCollectorId,
+    // NOTE: We lazy init this...
+    collector_ptr: Cell<*mut RawSimpleCollector>,
     allocated_size: Cell<usize>,
     small_arenas: SmallArenaList,
     big_object_link: Cell<BigObjectLink>
 }
 impl SimpleAlloc {
-    fn new(id: SimpleCollectorId) -> SimpleAlloc {
+    fn new(collector_ptr: *mut RawSimpleCollector) -> SimpleAlloc {
         SimpleAlloc {
-            id,
+            collector_ptr: Cell::new(collector_ptr),
             allocated_size: Cell::new(0),
             small_arenas: SmallArenaList::new(),
             big_object_link: Cell::new(None)
@@ -175,7 +266,10 @@ impl SimpleAlloc {
                     self.allocated_size.get()
                         + small_object_size::<T>()
                 );
-                Gc::from_raw(NonNull::new_unchecked(value_ptr), self.id)
+                Gc::from_raw(
+                    NonNull::new_unchecked(self.collector_ptr.get()),
+                    NonNull::new_unchecked(value_ptr),
+                )
             }
         } else {
             self.alloc_big(value)
@@ -188,8 +282,8 @@ impl SimpleAlloc {
             prev: self.big_object_link.get(),
         });
         let gc = unsafe { Gc::from_raw(
+            NonNull::new_unchecked(self.collector_ptr.get()),
             NonNull::new_unchecked(&mut *object.static_value),
-            self.id
         ) };
         {
             let size = std::mem::size_of::<BigGcObject<T>>();
@@ -268,7 +362,6 @@ impl SimpleAlloc {
 
 /// The internal data for a simple collector
 struct RawSimpleCollector {
-    id: SimpleCollectorId,
     shadow_stack: RefCell<ShadowStack>,
     heap: GcHeap
 }
@@ -283,7 +376,7 @@ impl RawSimpleCollector {
     #[inline(never)]
     unsafe fn perform_collection(&self) {
         let mut task = CollectionTask {
-            id: self.id,
+            expected_collector: self as *const Self as *mut Self,
             roots: self.shadow_stack.borrow().0.clone(),
             heap: &self.heap,
             grey_stack: if cfg!(feature = "implicit-grey-stack") {
@@ -296,7 +389,7 @@ impl RawSimpleCollector {
     }
 }
 struct CollectionTask<'a> {
-    id: SimpleCollectorId,
+    expected_collector: *mut RawSimpleCollector,
     roots: Vec<*mut dyn DynTrace>,
     heap: &'a GcHeap,
     #[cfg_attr(feature = "implicit-grey-stack", allow(dead_code))]
@@ -307,7 +400,7 @@ impl<'a> CollectionTask<'a> {
         // Mark
         for &root in &self.roots {
             let mut visitor = MarkVisitor {
-                id: self.id,
+                expected_collector: self.expected_collector,
                 grey_stack: &mut self.grey_stack,
             };
             // Dynamically dispatched
@@ -317,7 +410,7 @@ impl<'a> CollectionTask<'a> {
             while let Some(obj) = self.grey_stack.pop() {
                 debug_assert_eq!((*obj).state, MarkState::Grey);
                 let mut visitor = MarkVisitor {
-                    id: self.id,
+                    expected_collector: self.expected_collector,
                     grey_stack: &mut self.grey_stack
                 };
                 ((*obj).type_info.trace_func)(
@@ -337,24 +430,20 @@ impl<'a> CollectionTask<'a> {
 }
 
 struct MarkVisitor<'a> {
-    id: SimpleCollectorId,
+    expected_collector: *mut RawSimpleCollector,
     #[cfg_attr(feature = "implicit-grey-stack", allow(dead_code))]
     grey_stack: &'a mut Vec<*mut GcHeader>,
 }
 unsafe impl GcVisitor for MarkVisitor<'_> {
     type Err = !;
-
-    fn visit_gc<T, Id>(&mut self, gc: &mut zerogc::Gc<'_, T, Id>) -> Result<(), Self::Err>
-        where T: GcSafe, Id: CollectorId {
-        match gc.id().try_cast::<SimpleCollectorId>() {
-            Some(&other_id) => {
-                // If other instanceof SimpleCollectorId, assert runtime match
-                assert_eq!(other_id, self.id);
-            }
-            None => {
-                return Ok(());  // Belongs to another collector
-            }
-        }
+}
+impl GcVisit for MarkVisitor<'_> {
+    fn visit_gc<'gc, T: GcSafe + 'gc>(&mut self, gc: &mut Gc<'gc, T>) {
+        /*
+         * Check the collectors match. Otherwise we're mutating
+         * other people's data.
+         */
+        assert_eq!(gc.collector_ptr.as_ptr(), self.expected_collector);
         let obj = unsafe { &mut *GcHeader::from_value_ptr(gc.as_raw_ptr()) };
         match obj.state {
             MarkState::White => {
@@ -403,7 +492,6 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
                 // We've already traversed this object. It's already known to be reachable
             },
         }
-        Ok(())
     }
 }
 
@@ -414,7 +502,7 @@ pub struct SimpleCollectorContext {
     collector: Rc<RawSimpleCollector>
 }
 unsafe impl GcContext for SimpleCollectorContext {
-    type Id = SimpleCollectorId;
+    type System = SimpleCollector;
 
     unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T) {
         let dyn_ptr = self.collector.shadow_stack.borrow_mut().push(value);
@@ -440,18 +528,12 @@ unsafe impl GcContext for SimpleCollectorContext {
         result
     }
 }
-unsafe impl GcAllocContext for SimpleCollectorContext {
-    // Right now we don't support failable alloc
-    type MemoryErr = !;
+unsafe impl<'gc, T: GcSafe + 'gc> GcSimpleAlloc<'gc, T> for &'gc SimpleCollectorContext {
+    type Ref = Gc<'gc, T>;
 
     #[inline]
-    fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
+    fn alloc(&self, value: T) -> Gc<'gc, T> {
         self.collector.heap.allocator.alloc(value)
-    }
-
-    #[inline]
-    fn try_alloc<T: GcSafe>(&self, value: T) -> Result<Gc<'_, T>, Self::MemoryErr> {
-        Ok(self.alloc(value))
     }
 }
 

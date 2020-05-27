@@ -1,4 +1,4 @@
-use zerogc::{safepoint, safepoint_recurse, GcAllocContext, GcCell, Trace, GcVisitor, GcBrand, GcSafe, CollectorId};
+use zerogc::{safepoint, safepoint_recurse, GcSimpleAlloc, GcCell, Trace, GcVisitor, GcBrand, GcSafe, GcSystem};
 
 use zerogc_simple::{SimpleCollector, SimpleCollectorContext, Gc};
 
@@ -14,7 +14,7 @@ unsafe impl<'gc> Trace for Tree<'gc> {
         visitor.visit(&mut self.children)
     }
 }
-unsafe impl<'gc, 'new_gc, Id: CollectorId> GcBrand<'new_gc, Id> for Tree<'gc> {
+unsafe impl<'gc, 'new_gc, S: GcSystem> GcBrand<'new_gc, S> for Tree<'gc> {
     type Branded = Tree<'new_gc>;
 }
 unsafe impl<'gc> GcSafe for Tree<'gc> {}

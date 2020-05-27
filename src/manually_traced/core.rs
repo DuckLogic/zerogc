@@ -2,10 +2,10 @@
 //!
 //! This includes references, tuples, primitives, arrays, and everything else in `libcore`.
 //!
-//! `RefCell` and `Cell` are intentionally ignored and do not have implementations,
-//! since you need to use their `GcRefCell` and `GcCell` counterparts.
+//! `RefCell` and `Cell` are intentionally ignored and do not have implementations.
+//! Some collectors may need write barriers to protect their internals.
 
-use crate::{Trace, GcSafe, GcVisitor, NullTrace, GcBrand, CollectorId, TraceImmutable};
+use crate::{Trace, GcSafe, GcVisitor, NullTrace, GcBrand, GcSystem, TraceImmutable};
 
 macro_rules! trace_tuple {
     { $($param:ident)* } => {
@@ -39,7 +39,7 @@ macro_rules! trace_tuple {
         }
         unsafe impl<$($param: NullTrace),*> NullTrace for ($($param,)*) {}
         unsafe impl<'new_gc, Id, $($param),*> $crate::GcBrand<'new_gc, Id> for ($($param,)*)
-            where Id: $crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id>,)*
+            where Id: $crate::GcSystem, $($param: $crate::GcBrand<'new_gc, Id>,)*
                  $(<$param as $crate::GcBrand<'new_gc, Id>>::Branded: Sized,)* {
             type Branded = ($(<$param as $crate::GcBrand<'new_gc, Id>>::Branded,)*);
         }
@@ -88,10 +88,10 @@ macro_rules! trace_array {
         }
         unsafe impl<T: $crate::NullTrace> $crate::NullTrace for [T; $size] {}
         unsafe impl<T: GcSafe> GcSafe for [T; $size] {}
-        unsafe impl<'new_gc, Id: CollectorId, T> $crate::GcBrand<'new_gc, Id> for [T; $size]
-            where T: CollectorId, T: GcBrand<'new_gc, Id>,
-                  <T as GcBrand<'new_gc, Id>>::Branded: Sized {
-            type Branded = [<T as GcBrand<'new_gc, Id>>::Branded; $size];
+        unsafe impl<'new_gc, S: GcSystem, T> $crate::GcBrand<'new_gc, S> for [T; $size]
+            where S: GcSystem, T: GcBrand<'new_gc, S>,
+                  <T as GcBrand<'new_gc, S>>::Branded: Sized {
+            type Branded = [<T as GcBrand<'new_gc, S>>::Branded; $size];
         }
     };
     { $($size:tt),* } => ($(trace_array!($size);)*)
@@ -121,7 +121,7 @@ unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a T {
 unsafe impl<'a, T: NullTrace> NullTrace for &'a T {}
 unsafe impl<'a, T: GcSafe + TraceImmutable> GcSafe for &'a T {}
 /// TODO: Right now we can only rebrand unmanaged types (NullTrace)
-unsafe impl<'a: 'new_gc, 'new_gc, Id: CollectorId, T: NullTrace> GcBrand<'new_gc, Id> for &'a T {
+unsafe impl<'a: 'new_gc, 'new_gc, S: GcSystem, T: NullTrace> GcBrand<'new_gc, S> for &'a T {
     type Branded = Self;
 }
 
@@ -142,9 +142,9 @@ unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a mut T {
 unsafe impl<'a, T: NullTrace> NullTrace for &'a mut T {}
 unsafe impl<'a, T: GcSafe> GcSafe for &'a mut T {}
 /// TODO: Right now we can only rebrand unmanaged types (NullTrace)
-unsafe impl<'a, 'new_gc, Id, T> GcBrand<'new_gc, Id> for &'a mut T
-    where 'a: 'new_gc, Id: CollectorId, T: GcBrand<'new_gc, Id> {
-    type Branded = &'new_gc mut <T as GcBrand<'new_gc, Id>>::Branded;
+unsafe impl<'a, 'new_gc, S, T> GcBrand<'new_gc, S> for &'a mut T
+    where 'a: 'new_gc, S: GcSystem, T: GcBrand<'new_gc, S> {
+    type Branded = &'new_gc mut <T as GcBrand<'new_gc, S>>::Branded;
 }
 
 /// Implements tracing for slices, by tracing all the objects they refer to.

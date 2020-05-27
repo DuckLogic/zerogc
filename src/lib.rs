@@ -14,9 +14,8 @@
  * unless there's good justification to use an unstable feature.
  */
 use std::mem;
-use std::ptr::NonNull;
 use std::ops::{Deref, DerefMut};
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug};
 
 #[macro_use]
 mod manually_traced;
@@ -24,9 +23,6 @@ pub mod cell;
 
 
 pub use self::cell::{GcCell};
-
-use std::any::TypeId;
-use std::marker::PhantomData;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.
@@ -137,46 +133,10 @@ macro_rules! safepoint {
     }};
 }
 
-/// The globally unique id of this garbage collector,
-/// which is used to brand all garbage collected objects.
-///
-/// Some collectors may have multiple instances at runtime
-/// and this ensures that their objects don't get mixed up.
-/// Other collectors have a single global instance so they can just use a zero-sized type.
-///
-/// This also allows garbage collectors to perform call
-pub unsafe trait CollectorId: Copy + Eq + Debug + 'static {
-    #[inline]
-    fn try_cast<T: CollectorId>(&self) -> Option<&T> {
-        // NOTE: Type comparison will be constant after monomorphization
-        if TypeId::of::<Self>() == TypeId::of::<T>() {
-            Some(unsafe { &*(self as *const Self as *const T) })
-        } else {
-            None
-        }
-    }
-    #[inline]
-    fn matches<T: CollectorId>(&self, other: &T) -> bool {
-        if let Some(other) = other.try_cast::<Self>() {
-            self == other
-        } else {
-            false
-        }
-    }
-}
-
 /// A garbage collector implementation.
 ///
-/// This is completely safe and zero-overhead.
-pub unsafe trait GarbageCollectionSystem {
-    type Id: CollectorId;
-
-    /// Give the globally unique id of the collector.
-    ///
-    /// This must be unique for two different collectors in the same process,
-    /// but not necessarily unique between different processes.
-    fn id(&self) -> Self::Id;
-}
+/// These implementations should be completely safe and zero-overhead.
+pub unsafe trait GcSystem {}
 
 /// The context of garbage collection,
 /// which can be frozen at a safepoint.
@@ -186,7 +146,7 @@ pub unsafe trait GarbageCollectionSystem {
 ///
 /// This context doesn't necessarily support allocation (see [GcAllocContext] for that).
 pub unsafe trait GcContext {
-    type Id: CollectorId;
+    type System: GcSystem;
     /// Inform the garbage collection system we are at a safepoint
     /// and are ready for a potential garbage collection.
     ///
@@ -198,14 +158,14 @@ pub unsafe trait GcContext {
 
     #[inline(always)]
     #[doc(hidden)]
-    unsafe fn rebrand_static<T: GcBrand<'static, Self::Id>>(&self, value: T) -> T::Branded {
+    unsafe fn rebrand_static<T: GcBrand<'static, Self::System>>(&self, value: T) -> T::Branded {
         let  branded = mem::transmute_copy(&value);
         mem::forget(value);
         branded
     }
     #[inline(always)]
     #[doc(hidden)]
-    unsafe fn rebrand_self<'a, T: GcBrand<'a, Self::Id>>(&'a self, value: T) -> T::Branded {
+    unsafe fn rebrand_self<'a, T: GcBrand<'a, Self::System>>(&'a self, value: T) -> T::Branded {
         let branded = mem::transmute_copy(&value);
         mem::forget(value);
         branded
@@ -231,8 +191,12 @@ pub unsafe trait GcContext {
     unsafe fn recurse_context<T, F, R>(&self, value: &mut &mut T, func: F) -> R
         where T: Trace, F: for <'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R;
 }
-pub unsafe trait GcAllocContext: GcContext {
-    type MemoryErr: Debug;
+/// A simple interface to allocating
+///
+/// Some garbage collectors implement more complex interfaces,
+/// so implementing this is optional
+pub unsafe trait GcSimpleAlloc<'gc, T: GcSafe + 'gc>: 'gc {
+    type Ref: GcRef<'gc, T>;
     /// Allocate the specified object in this garbage collector,
     /// binding it to the lifetime of this collector.
     ///
@@ -245,16 +209,7 @@ pub unsafe trait GcAllocContext: GcContext {
     ///
     /// This gives a immutable reference to the resulting object.
     /// Once allocated, the object can only be correctly modified with a `GcCell`
-    #[inline]
-    fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T, Self::Id> {
-        self.try_alloc(value)
-            .unwrap_or_else(|cause| {
-                panic!("Failed to allocate: {:?}", cause)
-            })
-    }
-
-    /// Same as `alloc`, but returns an error instead of panicing on failure
-    fn try_alloc<T: GcSafe>(&self, value: T) -> Result<Gc<'_, T, Self::Id>, Self::MemoryErr>;
+    fn alloc(&self, value: T) -> Self::Ref;
 }
 
 /// A garbage collected pointer to a value.
@@ -268,72 +223,16 @@ pub unsafe trait GcAllocContext: GcContext {
 /// The smart pointer is simply a guarantee to the garbage collector
 /// that this points to a garbage collected object with the correct header,
 /// and not some arbitrary bits that you've decided to heap allocate.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-pub struct Gc<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> {
-    id: Id,
-    ptr: NonNull<T>,
-    marker: PhantomData<&'gc T>
-}
-impl<'gc, T: ?Sized + GcSafe, Id: CollectorId> Gc<'gc, T, Id> {
+pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
+    + Deref<Target=&'gc T> {
+    /// The type of the garbage collection
+    /// system that created this pointer
+    type System: GcSystem;
+    /// The value of the underlying pointer
+    fn value(&self) -> &'gc T;
     #[inline]
-    #[doc(hidden)]
-    pub unsafe fn from_raw(ptr: NonNull<T>, id: Id) -> Self {
-        Gc { ptr, id, marker: PhantomData }
-    }
-    /// Create a new garbage collected pointer to the specified value.
-    ///
-    /// ## Safety
-    /// Not only are you assuming the specified pointer is valid for the `'gc` liftime,
-    /// you're also assuming that it points to a garbage collected object.
-    ///
-    /// Specifically, since you're assuming the value was allocated from part of a valid `GcObject`,
-    /// and included .
-    /// Dark magic and evil pointer casts are performed to turn the pointer back into a `GcObject`,
-    /// so you're assuming that this is valid to perform.
-    #[inline(always)]
-    pub unsafe fn new(id: Id, ptr: NonNull<T>) -> Self {
-        Gc { id, ptr, marker: PhantomData }
-    }
-    #[inline(always)]
-    pub fn value(self) -> &'gc T {
-        unsafe { &*self.ptr.as_ptr() }
-    }
-    #[inline]
-    pub unsafe fn as_raw_ptr(self) -> *mut T {
-        self.ptr.as_ptr()
-    }
-    #[inline]
-    pub fn id(self) -> Id {
-        self.id
-    }
-}
-impl<'gc, T: ?Sized + GcSafe, Id: CollectorId> Deref for Gc<'gc, T, Id> {
-    type Target = &'gc T;
-
-    #[inline(always)]
-    fn deref(&self) -> &&'gc T {
-        unsafe { &*(&self.ptr as *const NonNull<T> as *const &'gc T) }
-    }
-}
-impl<'gc, T: GcSafe + ?Sized, Id: CollectorId> Clone for Gc<'gc, T, Id> {
-    #[inline(always)]
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<'gc, T: GcSafe + ?Sized, Id: CollectorId> Copy for Gc<'gc, T, Id> {}
-unsafe impl<'gc, 'new_gc, T, Id> GcBrand<'new_gc, Id> for Gc<'gc, T, Id>
-    where T: GcSafe + GcBrand<'new_gc, Id>,
-          <T as GcBrand<'new_gc, Id>>::Branded: GcSafe,
-          Id: CollectorId {
-    type Branded = Gc<'new_gc, T::Branded, Id>;
-}
-impl<'a, T: GcSafe + Debug + ?Sized, Id: CollectorId> Debug for Gc<'a, T, Id> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Gc")
-            .field(&self.id)
-            .field(&self.value())
-            .finish()
+    unsafe fn as_raw_ptr(&self) -> *mut T {
+        self.value() as *const T as *mut T
     }
 }
 
@@ -406,9 +305,7 @@ unsafe_gc_brand!(AssumeNotTraced, T);
 ///
 /// This indicates that its safe to transmute to the new `Branded` type
 /// and all that will change is the lifetimes.
-///
-/// Only pointers with the collector id type `Id` will have their lifetime changed.
-pub unsafe trait GcBrand<'new_gc, Id: CollectorId>: Trace {
+pub unsafe trait GcBrand<'new_gc, S: GcSystem>: Trace {
     type Branded: Trace + 'new_gc;
 }
 
@@ -515,23 +412,5 @@ pub unsafe trait GcVisitor: Sized {
     #[inline(always)]
     fn visit_immutable<T: TraceImmutable + ?Sized>(&mut self, value: &T) -> Result<(), Self::Err> {
         value.visit_immutable(self)
-    }
-    /// Visit a garbage collected pointer
-    fn visit_gc<T, Id>(&mut self, gc: &mut Gc<'_, T, Id>) -> Result<(), Self::Err>
-        where T: GcSafe, Id: CollectorId;
-}
-
-//
-// Fundamental implementations
-//
-
-/// Double indirection is safe (but usually stupid)
-unsafe impl<'gc, T: GcSafe, Id: CollectorId> GcSafe for Gc<'gc, T, Id> {}
-unsafe impl<'gc, T: GcSafe, Id: CollectorId> Trace for Gc<'gc, T, Id> {
-    const NEEDS_TRACE: bool = true;
-
-    #[inline(always)]
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
-        visitor.visit_gc(self)
     }
 }

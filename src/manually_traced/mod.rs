@@ -328,22 +328,22 @@ macro_rules! unsafe_trace_primitive {
 #[macro_export]
 macro_rules! unsafe_gc_brand {
     ($target:tt) => {
-        unsafe impl<'new_gc, Id: $crate::CollectorId> $crate::GcBrand<'new_gc, Id> for $target {
+        unsafe impl<'new_gc, S: $crate::GcSystem> $crate::GcBrand<'new_gc, S> for $target {
             type Branded = Self;
         }
     };
     ($target:ident, $($param:ident),+) => {
-        unsafe impl<'new_gc, Id, $($param),*> $crate::GcBrand<'new_gc, Id> for $target<$($param),*>
-            where Id: crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id>,)*
-                  $(<$param as $crate::GcBrand<'new_gc, Id>>::Branded: Trace,)* {
-            type Branded = $target<$(<$param as $crate::GcBrand<'new_gc, Id>>::Branded),*>;
+        unsafe impl<'new_gc, S, $($param),*> $crate::GcBrand<'new_gc, S> for $target<$($param),*>
+            where S: crate::GcSystem, $($param: $crate::GcBrand<'new_gc, S>,)*
+                  $(<$param as $crate::GcBrand<'new_gc, S>>::Branded: Trace,)* {
+            type Branded = $target<$(<$param as $crate::GcBrand<'new_gc, S>>::Branded),*>;
         }
     };
     ($target:tt, immut = required; $($param:ident),+) => {
-        unsafe impl<'new_gc, Id, $($param),*> $crate::GcBrand<'new_gc, Id> for $target<$($param),*>
-            where Id: crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id> + TraceImmutable,)*
-                  $(<$param as $crate::GcBrand<'new_gc, Id>>::Branded: TraceImmutable,)* {
-            type Branded = $target<$(<$param as $crate::GcBrand<'new_gc, Id>>::Branded),*>;
+        unsafe impl<'new_gc, S, $($param),*> $crate::GcBrand<'new_gc, S> for $target<$($param),*>
+            where S: crate::GcSystem, $($param: $crate::GcBrand<'new_gc, S> + TraceImmutable,)*
+                  $(<$param as $crate::GcBrand<'new_gc, S>>::Branded: TraceImmutable,)* {
+            type Branded = $target<$(<$param as $crate::GcBrand<'new_gc, S>>::Branded),*>;
         }
     }
 }
