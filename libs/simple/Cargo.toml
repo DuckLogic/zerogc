@@ -8,8 +8,6 @@ edition = "2018"
 [dependencies]
 zerogc = { path = "../.." }
 once_cell = { version = "1.4.0", optional = true }
-# Underlying allocator for small object arenas
-bumpalo = { version = "^3.3", optional = true}
 
 [features]
 default = [
@@ -23,7 +21,7 @@ default = [
 # However, it increases code complexity and is more
 # agressive (memory wise) then delegating all work to std::alloc
 # TODO: Return unused memory to the operating systems
-small-object-arenas = ["bumpalo", "once_cell"]
+small-object-arenas = ["once_cell"]
 # Use recursion to implicitly track the grey stack
 # This risks stack overflow at a possible performance gain
 # See commit 9a9634d68a4933d

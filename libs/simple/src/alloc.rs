@@ -1,10 +1,9 @@
 use once_cell::unsync::OnceCell;
 use std::alloc::Layout;
-use bumpalo::Bump;
 use crate::{GcHeader};
 use std::mem;
 use std::ptr::NonNull;
-use std::cell::{Cell, UnsafeCell};
+use std::cell::{Cell, RefCell};
 use std::mem::MaybeUninit;
 
 /// The minimum size of supported memory (in words)
@@ -30,6 +29,50 @@ pub const fn small_object_size<T>() -> usize {
 pub const fn is_small_object<T>() -> bool {
     small_object_size::<T>() <= MAXIMUM_SMALL_WORDS * 8
         && mem::align_of::<T>() <= ARENA_ELEMENT_ALIGN
+}
+
+pub(crate) struct Chunk {
+    pub start: *mut u8,
+    pub current: Cell<*mut u8>,
+    pub end: *mut u8
+}
+impl Chunk {
+    fn alloc(capacity: usize) -> Self {
+        assert!(capacity >= 1);
+        let mut result = Vec::<u8>::with_capacity(capacity);
+        let start = result.as_mut_ptr();
+        std::mem::forget(result);
+        Chunk {
+            start, current: Cell::new(start),
+            end: unsafe { start.add(capacity) }
+        }
+    }
+    #[inline]
+    fn try_alloc(&self, amount: usize) -> Option<NonNull<u8>> {
+        let old_current = self.current.get();
+        let remaining = self.end as usize - old_current as usize;
+        if remaining >= amount {
+            unsafe {
+                self.current.set(old_current.add(amount));
+                Some(NonNull::new_unchecked(old_current))
+            }
+        } else {
+            None
+        }
+    }
+    fn capacity(&self) -> usize {
+        self.end as usize - self.start as usize
+    }
+}
+impl Drop for Chunk {
+    fn drop(&mut self) {
+        unsafe {
+            drop(Vec::from_raw_parts(
+                self.start, 0,
+                self.capacity()
+            ))
+        }
+    }
 }
 
 /// We use zero as our marker value.
@@ -66,10 +109,12 @@ impl MaybeFreeSlot {
     }
 }
 pub const NUM_SMALL_ARENAS: usize = 15;
+const INITIAL_SIZE: usize = 512;
 
 pub struct SmallArena {
     pub(crate) element_size: usize,
-    memory: UnsafeCell<Bump>,
+    chunks: RefCell<Vec<Chunk>>,
+    current_chunk: Cell<NonNull<Chunk>>,
     /// The next free slot
     pub(crate) free: Cell<Option<NonNull<MaybeFreeSlot>>>
 }
@@ -78,9 +123,13 @@ impl SmallArena {
     fn with_words(num_words: usize) -> SmallArena {
         assert!(num_words >= MINIMUM_WORDS);
         let element_size = num_words * mem::size_of::<usize>();
+        assert!(INITIAL_SIZE >= element_size * 2);
+        let chunks = vec![Chunk::alloc(INITIAL_SIZE)];
+        let current_chunk = NonNull::from(chunks.last().unwrap());
         SmallArena {
+            chunks: RefCell::new(chunks),
+            current_chunk: Cell::new(current_chunk),
             element_size, free: Cell::new(None),
-            memory: UnsafeCell::new(Bump::new())
         }
     }
     #[inline]
@@ -96,18 +145,33 @@ impl SmallArena {
         } else {
             // Fallback to allocating new memory...
             unsafe {
-                let ptr = (*self.memory.get()).alloc_layout(Layout::from_size_align_unchecked(
-                    self.element_size, ARENA_ELEMENT_ALIGN
-                ));
-                ptr.cast::<GcHeader>()
+                match self.current_chunk.get().as_ref()
+                    .try_alloc(self.element_size) {
+                    Some(bytes) => bytes.cast::<GcHeader>(),
+                    None => self.alloc_fallback()
+                }
             }
         }
     }
+    #[cold]
+    #[inline(never)]
+    fn alloc_fallback(&self) -> NonNull<GcHeader> {
+        let mut chunks = self.chunks.borrow_mut();
+        // Double capacity to amortize growth
+        let last_capacity = chunks.last().unwrap().capacity();
+        chunks.push(Chunk::alloc(last_capacity * 2));
+        self.current_chunk.set(NonNull::from(chunks.last().unwrap()));
+        unsafe {
+            self.current_chunk.get().as_ref()
+                .try_alloc(self.element_size).unwrap()
+                .cast::<GcHeader>()
+        }
+    }
     pub(crate) unsafe fn for_each<F: FnMut(*mut MaybeFreeSlot)>(&self, mut func: F) {
-        let iter = (*self.memory.get()).iter_allocated_chunks();
-        for chunk in iter {
-            let mut ptr = chunk.as_ptr() as *const u8 as *mut u8;
-            let end = ptr.add(chunk.len());
+        let chunks = self.chunks.borrow();
+        for chunk in &*chunks {
+            let mut ptr = chunk.start;
+            let end = chunk.current.get();
             while ptr < end {
                 func(ptr as *mut MaybeFreeSlot);
                 ptr = ptr.add(self.element_size);
