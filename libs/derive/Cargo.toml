@@ -1,10 +1,9 @@
 [package]
 name = "zerogc-derive"
 description = "Procedural derive for zerogc's garbage collection"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 authors = ["Techcable <Techcable@techcable.net>"]
 edition = "2018"
-publish = false
 
 [lib]
 proc-macro = true

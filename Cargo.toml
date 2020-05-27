@@ -1,11 +1,10 @@
 [package]
 name = "zerogc"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 authors = ["Techcable <Techcable@techcable.net>"]
 description = "Zero overhead tracing garbage collection for rust"
 repository = "https://github.com/DuckLogic/zerogc"
-# We're very experimental
-publish = false
+license = "MIT"
 edition = "2018"
 
 [dependencies]
