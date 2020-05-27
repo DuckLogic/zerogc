@@ -57,18 +57,47 @@ There was previously a copying collector (which worked) 511be539228e7142,
 but I removed it due to high memory usage.
 
 ## Motivation
-The idea behind this collector that by making all potential for collections explicit,
-we can take advantage of the borrow checker to statically guarantee everything's valid.
-I was originally inspired to create a safe abstraction for garbage collection by [rust gc](https://github.com/Manishearth/rust-gc) by @Manishearth,
-but wanted it to have zero runtime overhead while remaining very simple.\
-The problem that the original collector by @Manishearth solves is finding the 'roots' of garbage collection.
+I was originally inspired to create a safe abstraction for garbage collection by [rust gc](https://github.com/Manishearth/rust-gc)
+but I wanted it to have zero runtime overhead and pointers that are `Copy`.
+
+The main problem that the rust-gc solves is finding the 'roots' of garbage collection.
 His collector uses runtime tracking to maintain a reference to every GC object.
+
+I'm familiar with some JIT implementations, and I know they tend to use safepoints
+to explicitly control where garbage collections can happen.
+Normally this is an unsafe operation. All live references on the stack must
+be given on the stack or use after.
+It would be unsafe to trust the user to .
+Eventually I realized I could use the borrow checker to restrict
+the usage of roots around safepoints. I was inspired in part by the way
+[indexing](https://github.com/bluss/indexing) uses lifetimes to enforce
+the validity of indexes.
 
 Our collector only has runtime overhead at specific safepoints,
 when the shadow-stack is being updated.
 
 Not only is this faster than runtime tracking of every single pointer or conservative collection, but it is more flexible. 
 It paves the way for any combination of generational, incremental, and copying garbage collection.
+
+### Prior Art
+Since the original [rust gc](https://github.com/Manishearth/rust-gc) others
+have attempted to make zero-overhead collectors.
+I was not aware of this when I started this project.
+1. [shifgrethor](https://github.com/withoutboats/shifgrethor)
+  - This is **extremely** impressive. It appears to be the only other collector
+    where `Gc: Copy` and coerces to a reference.
+  - However, the collectors have to support pinning of roots (which we do not)
+  - See this [blog post series for more](https://boats.gitlab.io/blog/post/shifgrethor-i/)
+2. [cell-gc](https://github.com/jorendorff/cell-gc)
+  - Unfortunately this has a rather clunky interface to Rust code,
+    so it wouldn't be suitable .
+  - They implement a basic List VM as a proof of concept.
+3. [gc-arena](https://github.com/kyren/gc-arena)
+  - Ironically the original use case for this 
+    collector was a replacement for arena allocation
+  - Like our collector, safepoints are explicitly requested by the user
+  - However instead of attempting to rebind lifetimes,
+    they attempt to use futures to build state machines
 
 ## Disadvantages
 1. The garbage collector can only run in response to an explicit `safepoint!`, not memory pressure,
