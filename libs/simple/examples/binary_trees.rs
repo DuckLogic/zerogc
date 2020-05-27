@@ -7,8 +7,6 @@ use zerogc_derive::Trace;
 struct Tree<'gc> {
     children: GcCell<Option<(Gc<'gc, Tree<'gc>>, Gc<'gc, Tree<'gc>>)>>,
 }
-// TODO: Auto-derive
-unsafe impl<'gc> GcSafe for Tree<'gc> {}
 
 fn item_check(tree: &Tree) -> i32 {
     if let Some((left, right)) = tree.children.get() {

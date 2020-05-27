@@ -246,7 +246,26 @@ pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
 /// Unlike java finalizers, this allows us to deallocate objects normally
 /// and avoids a second pass over the objects
 /// to check for resurrected objects.
-pub unsafe trait GcSafe: Trace {}
+pub unsafe trait GcSafe: Trace {
+    /// If this type needs a destructor run
+    ///
+    /// This is usually equivalent to `std::mem::needs_drop`.
+    /// However procedurally derived code can sometimes provide
+    /// a no-op drop implementation (for safety),
+    /// which would lead to a false positive with `std::mem::needs_drop()`
+    const NEEDS_DROP: bool;
+
+    /// Assert this type is GC safe
+    ///
+    /// Only used by procedural derive
+    #[doc(hidden)]
+    fn assert_gc_safe() {}
+}
+/// Assert that a type implements Copy
+///
+/// Used by the derive code
+#[doc(hidden)]
+pub fn assert_copy<T: Copy>() {}
 
 /// A wrapper type that assumes its contents don't need to be traced
 #[repr(transparent)]
@@ -297,7 +316,9 @@ unsafe impl<T> TraceImmutable for AssumeNotTraced<T> {
 }
 unsafe impl<T> NullTrace for AssumeNotTraced<T> {}
 /// No tracing implies GcSafe
-unsafe impl<T> GcSafe for AssumeNotTraced<T> {}
+unsafe impl<T> GcSafe for AssumeNotTraced<T> {
+    const NEEDS_DROP: bool = std::mem::needs_drop::<T>();
+}
 unsafe_gc_brand!(AssumeNotTraced, T);
 
 /// Changes all references to garbage

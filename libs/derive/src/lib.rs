@@ -1,20 +1,53 @@
 extern crate proc_macro;
 
 use quote::quote;
-use syn::{parse_macro_input, parse_quote, DeriveInput, Data, Error, Generics, GenericParam, TypeParamBound, Fields, Member, Index, Type, GenericArgument};
+use syn::{parse_macro_input, parenthesized, parse_quote, DeriveInput, Data, Error, Generics, GenericParam, TypeParamBound, Fields, Member, Index, Type, GenericArgument};
 use proc_macro2::{Ident, TokenStream, Span};
 use syn::spanned::Spanned;
+use syn::parse::{ParseStream, Parse};
 
-#[proc_macro_derive(Trace)]
+struct GcTypeAttrs {
+    is_copy: bool,
+}
+impl Default for GcTypeAttrs {
+    fn default() -> Self {
+        GcTypeAttrs {
+            is_copy: false,
+        }
+    }
+}
+impl Parse for GcTypeAttrs {
+    fn parse(raw_input: ParseStream) -> Result<Self, Error> {
+        let input;
+        parenthesized!(input in raw_input);
+        let mut result = GcTypeAttrs::default();
+        while !input.is_empty() {
+            let flag_name = input.parse::<Ident>()?;
+            if flag_name == "copy" {
+                result.is_copy = true;
+            } else {
+                return Err(Error::new(
+                    input.span(), "Unknown flag"
+                ))
+            }
+        }
+        Ok(result)
+    }
+}
+
+#[proc_macro_derive(Trace, attributes(zerogc))]
 pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let trace_impl = impl_trace(&input)
         .unwrap_or_else(|e| e.to_compile_error());
     let brand_impl = impl_brand(&input)
         .unwrap_or_else(|e| e.to_compile_error());
+    let gc_safe_impl = impl_gc_safe(&input)
+        .unwrap_or_else(|e| e.to_compile_error());
     From::from(quote! {
         #trace_impl
         #brand_impl
+        #gc_safe_impl
     })
 }
 
@@ -157,6 +190,80 @@ fn impl_trace(target: &DeriveInput) -> Result<TokenStream, Error> {
                 Ok(())
             }
         }
+    })
+}
+fn impl_gc_safe(target: &DeriveInput) -> Result<TokenStream, Error> {
+    let name = &target.ident;
+    let generics = add_trait_bounds(
+        &target.generics, parse_quote!(zerogc::GcSafe)
+    );
+    let attrs = target.attrs.iter().find_map(|attr| {
+        if attr.path.is_ident("zerogc") {
+            Some(syn::parse2::<GcTypeAttrs>(attr.tokens.clone()))
+        } else {
+            None
+        }
+    }).unwrap_or_else(|| Ok(GcTypeAttrs::default()))?;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let field_types: Vec<&Type> = match target.data {
+        Data::Struct(ref data) => {
+            data.fields.iter()
+                .map(|f| &f.ty)
+                .collect()
+        },
+        Data::Enum(ref data) => {
+            data.variants.iter()
+                .flat_map(|v| v.fields.iter().map(|f| &f.ty))
+                .collect()
+        },
+        Data::Union(_) => {
+            return Err(Error::new(
+                name.span(), "Unions are unsupported for GcSafe"
+            ))
+        },
+    };
+    let does_need_drop = if attrs.is_copy {
+        // If we're proven to be a copy type we don't need to be dropped
+        quote!(false)
+    } else {
+        // We need to be dropped if any of our fields need to be dropped
+        quote!(false #(|| <#field_types as ::zerogc::GcSafe>::NEEDS_DROP)*)
+    };
+    let fake_drop_impl = if attrs.is_copy {
+        /*
+         * If this type can be proven to implement Copy,
+         * it is known to have no destructor.
+         * We don't need a fake drop to prevent misbehavior.
+         * In fact, adding one would prevent it from being Copy
+         * in the first place.
+         */
+        quote!()
+    } else {
+        quote!(impl #impl_generics Drop for #name #ty_generics #where_clause {
+            #[inline]
+            fn drop(&mut self) {
+                /*
+                 * This is only here to prevent the user
+                 * from implementing their own Drop functionality.
+                 */
+            }
+        })
+    };
+    let verify_gc_safe = if attrs.is_copy {
+        quote!(::zerogc::assert_copy::<Self>())
+    } else {
+        quote!(#(<#field_types as GcSafe>::assert_gc_safe();)*)
+    };
+    Ok(quote! {
+        unsafe impl #impl_generics ::zerogc::GcSafe
+            for #name #ty_generics #where_clause {
+            const NEEDS_DROP: bool = #does_need_drop;
+
+            fn assert_gc_safe() {
+                #verify_gc_safe
+            }
+        }
+        #fake_drop_impl
     })
 }
 

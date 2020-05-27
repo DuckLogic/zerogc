@@ -179,7 +179,9 @@ macro_rules! unsafe_trace_deref {
         unsafe impl<$($param: NullTrace),*> NullTrace for $target<$($param),*> {}
         /// We trust ourselves to not do anything bad as long as our paramaters don't
         unsafe impl<$($param),*> GcSafe for $target<$($param),*>
-            where $($param: GcSafe + TraceImmutable),*  {}
+            where $($param: GcSafe + TraceImmutable),*  {
+            const NEEDS_DROP: bool = std::mem::needs_drop::<Self>();
+        }
     };
     ($target:ident, $($param:ident),*; immut = false; |$value:ident| $extract:expr) => {
         unsafe_gc_brand!($target, $($param),*);
@@ -199,7 +201,9 @@ macro_rules! unsafe_trace_deref {
         unsafe impl<$($param: NullTrace),*> NullTrace for $target<$($param),*> {}
         /// We trust ourselves to not do anything bad as long as our paramaters don't
         unsafe impl<$($param),*> GcSafe for $target<$($param),*>
-            where $($param: GcSafe),*  {}
+            where $($param: GcSafe),*  {
+            const NEEDS_DROP: bool = std::mem::needs_drop::<Self>();
+        }
     };
 }
 
@@ -299,7 +303,9 @@ macro_rules! unsafe_trace_primitive {
         }
         unsafe impl $crate::NullTrace for $target {}
         /// No drop/custom behavior -> GcSafe
-        unsafe impl GcSafe for $target {}
+        unsafe impl GcSafe for $target {
+            const NEEDS_DROP: bool = std::mem::needs_drop::<$target>();
+        }
     };
 }
 

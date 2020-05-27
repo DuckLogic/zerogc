@@ -37,7 +37,9 @@ unsafe impl<K: TraceImmutable, V: Trace> Trace for HashMap<K, V> {
         Ok(())
     }
 }
-unsafe impl<K: GcSafe + TraceImmutable, V: GcSafe> GcSafe for HashMap<K, V> {}
+unsafe impl<K: GcSafe + TraceImmutable, V: GcSafe> GcSafe for HashMap<K, V> {
+    const NEEDS_DROP: bool = true; // HashMap has internal memory
+}
 unsafe impl<'new_gc, S, K, V> GcBrand<'new_gc, S> for HashMap<K, V>
     where S: GcSystem, K: TraceImmutable + GcBrand<'new_gc, S>,
         V: GcBrand<'new_gc, S>,
@@ -82,4 +84,7 @@ unsafe impl<T: TraceImmutable> TraceImmutable for Option<T> {
     }
 }
 unsafe impl<T: NullTrace> NullTrace for Option<T> {}
+unsafe impl<T: GcSafe> GcSafe for Option<T> {
+    const NEEDS_DROP: bool = T::NEEDS_DROP;
+}
 unsafe_gc_brand!(Option, T);

@@ -43,6 +43,9 @@ macro_rules! trace_tuple {
                  $(<$param as $crate::GcBrand<'new_gc, Id>>::Branded: Sized,)* {
             type Branded = ($(<$param as $crate::GcBrand<'new_gc, Id>>::Branded,)*);
         }
+        unsafe impl<$($param: GcSafe),*> GcSafe for ($($param,)*) {
+            const NEEDS_DROP: bool = false $(|| <$param as GcSafe>::NEEDS_DROP)*;
+        }
     };
 }
 
@@ -87,7 +90,9 @@ macro_rules! trace_array {
             }
         }
         unsafe impl<T: $crate::NullTrace> $crate::NullTrace for [T; $size] {}
-        unsafe impl<T: GcSafe> GcSafe for [T; $size] {}
+        unsafe impl<T: GcSafe> GcSafe for [T; $size] {
+            const NEEDS_DROP: bool = std::mem::needs_drop::<T>();
+        }
         unsafe impl<'new_gc, S: GcSystem, T> $crate::GcBrand<'new_gc, S> for [T; $size]
             where S: GcSystem, T: GcBrand<'new_gc, S>,
                   <T as GcBrand<'new_gc, S>>::Branded: Sized {
@@ -119,7 +124,9 @@ unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a T {
     }
 }
 unsafe impl<'a, T: NullTrace> NullTrace for &'a T {}
-unsafe impl<'a, T: GcSafe + TraceImmutable> GcSafe for &'a T {}
+unsafe impl<'a, T: GcSafe + TraceImmutable> GcSafe for &'a T {
+    const NEEDS_DROP: bool = false; // References are safe :)
+}
 /// TODO: Right now we can only rebrand unmanaged types (NullTrace)
 unsafe impl<'a: 'new_gc, 'new_gc, S: GcSystem, T: NullTrace> GcBrand<'new_gc, S> for &'a T {
     type Branded = Self;
@@ -140,7 +147,9 @@ unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a mut T {
     }
 }
 unsafe impl<'a, T: NullTrace> NullTrace for &'a mut T {}
-unsafe impl<'a, T: GcSafe> GcSafe for &'a mut T {}
+unsafe impl<'a, T: GcSafe> GcSafe for &'a mut T {
+    const NEEDS_DROP: bool = false; // Referenes are Copy
+}
 /// TODO: Right now we can only rebrand unmanaged types (NullTrace)
 unsafe impl<'a, 'new_gc, S, T> GcBrand<'new_gc, S> for &'a mut T
     where 'a: 'new_gc, S: GcSystem, T: GcBrand<'new_gc, S> {
@@ -171,4 +180,6 @@ unsafe impl<T: TraceImmutable> TraceImmutable for [T] {
     }
 }
 unsafe impl<T: NullTrace> NullTrace for [T] {}
-unsafe impl<T: GcSafe> GcSafe for [T] {}
+unsafe impl<T: GcSafe> GcSafe for [T] {
+    const NEEDS_DROP: bool = std::mem::needs_drop::<T>();
+}

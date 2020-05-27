@@ -82,7 +82,9 @@ impl<'gc, T: GcSafe + 'gc> GcRef<'gc, T> for Gc<'gc, T> {
     }
 }
 /// Double-indirection is completely safe
-unsafe impl<'gc, T: GcSafe + 'gc> GcSafe for Gc<'gc, T> {}
+unsafe impl<'gc, T: GcSafe + 'gc> GcSafe for Gc<'gc, T> {
+    const NEEDS_DROP: bool = true; // We are Copy
+}
 /// Rebrand
 unsafe impl<'gc, 'new_gc, T> GcBrand<'new_gc, SimpleCollector> for Gc<'gc, T>
     where T: GcSafe + GcBrand<'new_gc, SimpleCollector>,
@@ -572,7 +574,7 @@ impl<T: GcSafe> StaticGcType for T {
         trace_func: unsafe { transmute::<_, unsafe fn(*mut c_void, &mut MarkVisitor)>(
             <T as DynTrace>::trace as fn(&mut T, &mut MarkVisitor),
         ) },
-        drop_func: if std::mem::needs_drop::<T>() {
+        drop_func: if <T as GcSafe>::NEEDS_DROP {
             unsafe { Some(transmute::<_, unsafe fn(*mut c_void)>(
                 std::ptr::drop_in_place::<T> as unsafe fn(*mut T)
             )) }

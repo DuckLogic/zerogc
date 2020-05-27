@@ -49,4 +49,9 @@ unsafe impl<T: GcSafe + Copy> TraceImmutable for GcCell<T> {
     }
 }
 unsafe impl<T: GcSafe + Copy + NullTrace> NullTrace for GcCell<T> {}
-unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {}
+unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {
+    /// Since T is Copy, we shouldn't need to be dropped
+    ///
+    /// Still delegating just in case
+    const NEEDS_DROP: bool = std::mem::needs_drop::<Self>();
+}
