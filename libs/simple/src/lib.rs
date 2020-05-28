@@ -238,7 +238,11 @@ pub struct SimpleAlloc {
     collector_ptr: Cell<*mut RawSimpleCollector>,
     allocated_size: Cell<usize>,
     small_arenas: SmallArenaList,
-    big_object_link: Cell<BigObjectLink>
+    big_object_link: Cell<BigObjectLink>,
+    /// Whether the meaning of the mark bit is currently inverted.
+    ///
+    /// This flips every collection
+    mark_inverted: Cell<bool>,
 }
 impl SimpleAlloc {
     fn new(collector_ptr: *mut RawSimpleCollector) -> SimpleAlloc {
@@ -246,7 +250,8 @@ impl SimpleAlloc {
             collector_ptr: Cell::new(collector_ptr),
             allocated_size: Cell::new(0),
             small_arenas: SmallArenaList::new(),
-            big_object_link: Cell::new(None)
+            big_object_link: Cell::new(None),
+            mark_inverted: Cell::new(false)
         }
     }
     #[inline]
@@ -260,7 +265,8 @@ impl SimpleAlloc {
             unsafe {
                 header.as_ptr().write(GcHeader {
                     type_info: T::STATIC_TYPE,
-                    state: MarkState::White
+                    raw_state: MarkState::White
+                        .to_raw(self.mark_inverted.get())
                 });
                 let value_ptr = header.as_ref().value().cast::<T>();
                 value_ptr.write(value);
@@ -279,7 +285,11 @@ impl SimpleAlloc {
     }
     fn alloc_big<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
         let mut object = Box::new(BigGcObject {
-            header: GcHeader { type_info: T::STATIC_TYPE, state: MarkState::White },
+            header: GcHeader {
+                type_info: T::STATIC_TYPE,
+                raw_state: MarkState::White
+                    .to_raw(self.mark_inverted.get())
+            },
             static_value: ManuallyDrop::new(value),
             prev: self.big_object_link.get(),
         });
@@ -310,7 +320,7 @@ impl SimpleAlloc {
                      * of allocated objects.
                      */
                 } else {
-                    match (*slot).header.state {
+                    match (*slot).header.raw_state.resolve(self.mark_inverted.get()) {
                         MarkState::White => {
                             // Free the object, dropping if necessary
                             expected_size -= (*slot).header.type_info.total_size();
@@ -324,10 +334,12 @@ impl SimpleAlloc {
                         },
                         MarkState::Grey => panic!("All grey objects should've been processed"),
                         MarkState::Black => {
-                            // Retain the object
+                            /*
+                             * Retain the object
+                             * State will be implicitly set to white
+                             * by inverting mark the meaning of the mark bits.
+                             */
                             actual_size += (*slot).header.type_info.total_size();
-                            // Reset state to white
-                            (*slot).header.state = MarkState::White;
                         },
                     }
                 }
@@ -339,7 +351,7 @@ impl SimpleAlloc {
         while let Some(big_link) = self.big_object_link.get() {
             let obj = &mut *big_link.as_ptr();
             self.big_object_link.set(obj.prev);
-            match obj.header.state {
+            match obj.header.raw_state.resolve(self.mark_inverted.get()) {
                 MarkState::White => {
                     // Free the object
                     expected_size -= obj.header.type_info.total_size();
@@ -347,15 +359,23 @@ impl SimpleAlloc {
                 },
                 MarkState::Grey => panic!("All gray objects should've been processed"),
                 MarkState::Black => {
-                    // Retain the object
+                    /*
+                     * Retain the object
+                     * State will be implicitly set to white
+                     * by inverting mark the meaning of the mark bits.
+                     */
                     actual_size += obj.header.type_info.total_size();
                     obj.prev = last_linked;
                     last_linked = Some(NonNull::from(&mut *obj));
-                    // Reset state to white
-                    obj.header.state = MarkState::White;
                 }
             }
         }
+        /*
+         * Flip the meaning of the mark bit,
+         * implicitly resetting all Black (reachable) objects
+         * to White.
+         */
+        self.mark_inverted.set(!self.mark_inverted.get());
         self.big_object_link.set(last_linked);
         assert_eq!(expected_size, actual_size);
         self.allocated_size.set(actual_size);
@@ -404,23 +424,29 @@ impl<'a> CollectionTask<'a> {
             let mut visitor = MarkVisitor {
                 expected_collector: self.expected_collector,
                 grey_stack: &mut self.grey_stack,
+                inverted_mark: self.heap.allocator
+                    .mark_inverted.get()
             };
             // Dynamically dispatched
             unsafe { (*root).trace(&mut visitor); }
         }
         #[cfg(not(feature = "implicit-grey-stack"))] unsafe {
             while let Some(obj) = self.grey_stack.pop() {
-                debug_assert_eq!((*obj).state, MarkState::Grey);
+                let inverted_mark = self.heap.allocator.mark_inverted.get();
+                debug_assert_eq!((*obj).raw_state.resolve(inverted_mark), MarkState::Grey);
                 let mut visitor = MarkVisitor {
                     expected_collector: self.expected_collector,
-                    grey_stack: &mut self.grey_stack
+                    grey_stack: &mut self.grey_stack,
+                    inverted_mark
                 };
                 ((*obj).type_info.trace_func)(
                     &mut *(*obj).value(),
                     &mut visitor
                 );
                 // Mark the object black now it's innards have been traced
-                (*obj).state = MarkState::Black;
+                (*obj).raw_state = MarkState::Black.to_raw(
+                    self.heap.allocator.mark_inverted.get()
+                );
             }
         }
         // Sweep
@@ -435,6 +461,10 @@ struct MarkVisitor<'a> {
     expected_collector: *mut RawSimpleCollector,
     #[cfg_attr(feature = "implicit-grey-stack", allow(dead_code))]
     grey_stack: &'a mut Vec<*mut GcHeader>,
+    /// If this meaning of the mark bit is currently inverted
+    ///
+    /// This flips every collection
+    inverted_mark: bool
 }
 unsafe impl GcVisitor for MarkVisitor<'_> {
     type Err = !;
@@ -447,7 +477,7 @@ impl GcVisit for MarkVisitor<'_> {
          */
         assert_eq!(gc.collector_ptr.as_ptr(), self.expected_collector);
         let obj = unsafe { &mut *GcHeader::from_value_ptr(gc.as_raw_ptr()) };
-        match obj.state {
+        match obj.raw_state.resolve(self.inverted_mark) {
             MarkState::White => {
                 if !T::NEEDS_TRACE {
                     /*
@@ -455,13 +485,13 @@ impl GcVisit for MarkVisitor<'_> {
                      * It has no internals that need to be traced.
                      * We can directly move it directly to the black set
                      */
-                    obj.state = MarkState::Black;
+                    obj.raw_state = MarkState::Black.to_raw(self.inverted_mark);
                 } else {
                     /*
                      * We need to mark this object grey and push it onto the grey stack.
                      * It will be processed later
                      */
-                    (*obj).state = MarkState::Grey;
+                    (*obj).raw_state = MarkState::Grey.to_raw(self.inverted_mark);
                     #[cfg(not(feature = "implicit-grey-stack"))] {
                         self.grey_stack.push(obj as *mut GcHeader);
                     }
@@ -594,7 +624,7 @@ struct GcHeader {
      * If the value is small `(u32)`, we could reduce
      * the padding to a 3 bytes and fit everything in a word.
      */
-    state: MarkState
+    raw_state: RawMarkState
 }
 impl GcHeader {
     #[inline]
@@ -640,6 +670,40 @@ impl<T> Drop for BigGcObject<T> {
     }
 }
 
+/// The raw mark state of an object
+///
+/// Every cycle the meaning of the white/black states
+/// flips. This allows us to implicitly mark objects
+/// without actually touching their bits :)
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum RawMarkState {
+    /// Normally this marks the white state
+    ///
+    /// If we're inverted, this marks black
+    Red,
+    /// This always marks the grey state
+    ///
+    /// Inverting the mark bit doesn't affect the
+    /// grey state
+    Grey,
+    /// Normally this marks the blue state
+    ///
+    /// If we're inverted, this marks white
+    Blue
+}
+impl RawMarkState {
+    #[inline]
+    fn resolve(self, inverted_mark: bool) -> MarkState {
+        match (self, inverted_mark) {
+            (RawMarkState::Red, false) => MarkState::White,
+            (RawMarkState::Red, true) => MarkState::Black,
+            (RawMarkState::Grey, _) => MarkState::Grey,
+            (RawMarkState::Blue, false) => MarkState::Black,
+            (RawMarkState::Blue, true) => MarkState::White
+        }
+    }
+}
+
 /// The current mark state of the object
 ///
 /// See [Tri Color Marking](https://en.wikipedia.org/wiki/Tracing_garbage_collection#Tri-color_marking)
@@ -659,4 +723,16 @@ enum MarkState {
     ///
     /// This object cannot be freed.
     Black
+}
+impl MarkState {
+    #[inline]
+    fn to_raw(self, inverted_mark: bool) -> RawMarkState {
+        match (self, inverted_mark) {
+            (MarkState::White, false) => RawMarkState::Red,
+            (MarkState::White, true) => RawMarkState::Blue,
+            (MarkState::Grey, _) => RawMarkState::Grey,
+            (MarkState::Black, false) => RawMarkState::Blue,
+            (MarkState::Black, true) => RawMarkState::Red,
+        }
+    }
 }
