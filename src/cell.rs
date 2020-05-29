@@ -4,11 +4,10 @@ use crate::{GcSafe, Trace, GcVisitor, NullTrace, TraceImmutable};
 
 /// A `Cell` pointing to a garbage collected object.
 ///
-/// Either this or a `GcRefCell` is needed in order to mutate a garbage collected object,
-/// since garbage collected pointers are otherwise immutable after allocation.
-/// Unlike a regular `Cell` this type implements `GarbageCollected`,
-/// and may eventually have read/write barriers.
+/// This only supports `NullTrace` types,
+/// becuase garbage collected pointers need write barriers.
 #[derive(Default, Clone, Debug)]
+#[repr(transparent)]
 pub struct GcCell<T: Trace + Copy>(Cell<T>);
 impl<T: Trace + Copy> GcCell<T> {
     #[inline]
@@ -20,15 +19,31 @@ impl<T: Trace + Copy> GcCell<T> {
         self.0.get_mut()
     }
     #[inline]
+    pub fn as_ptr(&self) -> *mut T {
+        self.0.as_ptr()
+    }
+    #[inline]
     pub fn get(&self) -> T {
         self.0.get()
     }
+}
+impl<T: NullTrace + Copy> GcCell<T> {
+    /// Change the interior of this type to the specified type
+    ///
+    /// The type must be `NullTrace` because garbage collected
+    /// typese need write barriers
     #[inline]
     pub fn set(&self, value: T) {
         self.0.set(value)
     }
 }
-
+/// GcCell can only support mutating types that are `NullTrace`,
+/// because garbage collected types need write barriers.
+///
+/// However, this is already enforced by the bounds of `GcCell::set`,
+/// so we don't need to verify here.
+/// In other words is possible to safely trace a `GcCell`
+/// with a garbage collected type, as long as it is never mutated.
 unsafe impl<T: Trace + Copy> Trace for GcCell<T> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
 
@@ -37,9 +52,10 @@ unsafe impl<T: Trace + Copy> Trace for GcCell<T> {
         visitor.visit(self.get_mut())
     }
 }
-/// Since a cell has interior mutablity, it can implement `TraceImmutable`
-/// even if the interior type is only `Trace`
-unsafe impl<T: GcSafe + Copy> TraceImmutable for GcCell<T> {
+/// See Trace documentation on the safety of mutation
+///
+/// We require `NullTrace` in order to `set` our internals
+unsafe impl<T: GcSafe + NullTrace + Copy> TraceImmutable for GcCell<T> {
     #[inline]
     fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
         let mut value = self.get();
@@ -51,7 +67,8 @@ unsafe impl<T: GcSafe + Copy> TraceImmutable for GcCell<T> {
 unsafe impl<T: GcSafe + Copy + NullTrace> NullTrace for GcCell<T> {}
 unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {
     /// Since T is Copy, we shouldn't need to be dropped
-    ///
-    /// Still delegating just in case
-    const NEEDS_DROP: bool = std::mem::needs_drop::<Self>();
+    const NEEDS_DROP: bool = {
+        assert!(!T::NEEDS_DROP); // Should be Copy
+        false
+    };
 }

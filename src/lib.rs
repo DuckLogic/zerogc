@@ -1,3 +1,7 @@
+#![feature(
+    const_if_match, // Used for const asserts
+    const_panic, // Const asserts
+)]
 //! Zero overhead tracing garbage collection for rust, by abusing the borrow checker.
 //!
 //! ## Planned Features
@@ -230,9 +234,23 @@ pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
     type System: GcSystem;
     /// The value of the underlying pointer
     fn value(&self) -> &'gc T;
+
     #[inline]
     unsafe fn as_raw_ptr(&self) -> *mut T {
         self.value() as *const T as *mut T
+    }
+
+    /// A write barrier, before writing to one of this object's managed fields
+    ///
+    /// It is undefined behavior to mutate a garbage collected field
+    /// without inserting a write barrier before it.
+    ///
+    /// Generational, concurrent and incremental GCs need this to maintain
+    /// the tricolor invariant.
+    #[inline(always)] // Default is nop, should be removed
+    unsafe fn write_barrier<V, VR>(self, _field_offset: usize, _updated_value: VR)
+        where V: GcSafe + 'gc, VR: GcRef<'gc, V> {
+        debug_assert!(_field_offset < self::mem::size_of_val(self.value()));
     }
 }
 

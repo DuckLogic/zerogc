@@ -1,13 +1,107 @@
 extern crate proc_macro;
 
-use quote::quote;
-use syn::{parse_macro_input, parenthesized, parse_quote, DeriveInput, Data, Error, Generics, GenericParam, TypeParamBound, Fields, Member, Index, Type, GenericArgument};
+use quote::{quote, quote_spanned, ToTokens};
+use syn::{
+    parse_macro_input, parenthesized, parse_quote, DeriveInput, Data,
+    Error, Generics, GenericParam, TypeParamBound, Fields, Member,
+    Index, Type, GenericArgument, Attribute, PathArguments, Lifetime
+};
 use proc_macro2::{Ident, TokenStream, Span};
 use syn::spanned::Spanned;
 use syn::parse::{ParseStream, Parse};
 
+struct MutableFieldOpts {
+    public: bool
+}
+impl Default for MutableFieldOpts {
+    fn default() -> MutableFieldOpts {
+        MutableFieldOpts {
+            public: false, // Privacy by default
+        }
+    }
+}
+impl Parse for MutableFieldOpts {
+    fn parse(input: ParseStream) -> Result<Self, Error> {
+        let mut result = MutableFieldOpts::default();
+        while !input.is_empty() {
+            let flag_name = input.parse::<Ident>()?;
+            if flag_name == "public" {
+                result.public = true;
+            } else {
+                return Err(Error::new(
+                    input.span(),
+                    "Unknown modifier for mutable field"
+                ))
+            }
+        }
+        Ok(result)
+    }
+}
+
+struct GcFieldAttrs {
+    mutable: Option<MutableFieldOpts>
+}
+impl GcFieldAttrs {
+    pub fn find(attrs: &[Attribute]) -> Result<Self, Error> {
+        attrs.iter().find_map(|attr| {
+            if attr.path.is_ident("zerogc") {
+                Some(syn::parse2::<GcFieldAttrs>(attr.tokens.clone()))
+            } else {
+                None
+            }
+        }).unwrap_or_else(|| Ok(GcFieldAttrs::default()))
+    }
+}
+impl Default for GcFieldAttrs {
+    fn default() -> Self {
+        GcFieldAttrs {
+            mutable: None
+        }
+    }
+}
+impl Parse for GcFieldAttrs {
+    fn parse(raw_input: ParseStream) -> Result<Self, Error> {
+        let input;
+        parenthesized!(input in raw_input);
+        let mut result = GcFieldAttrs::default();
+        while !input.is_empty() {
+            let flag_name = input.parse::<Ident>()?;
+            if flag_name == "mutable" {
+                if input.peek(syn::token::Paren) {
+                    let mut_opts;
+                    parenthesized!(mut_opts in input);
+                    result.mutable = Some(mut_opts.parse::<MutableFieldOpts>()?);
+                    if !input.is_empty() {
+                        return Err(Error::new(
+                            input.span(), "Unexpected input"
+                        ));
+                    }
+                } else {
+                    result.mutable = Some(MutableFieldOpts::default());
+                }
+            } else {
+                return Err(Error::new(
+                    input.span(), "Unknown field flag"
+                ))
+            }
+        }
+        Ok(result)
+    }
+}
+
 struct GcTypeAttrs {
     is_copy: bool,
+}
+impl GcTypeAttrs {
+    pub fn find(attrs: &[Attribute]) -> Result<Self, Error> {
+        attrs.iter().find_map(|attr| {
+            if attr.path.is_ident("zerogc") {
+                Some(syn::parse2::<GcTypeAttrs>(attr.tokens.clone()))
+            } else {
+                None
+            }
+        }).unwrap_or_else(|| Ok(GcTypeAttrs::default()))
+    }
 }
 impl Default for GcTypeAttrs {
     fn default() -> Self {
@@ -27,7 +121,7 @@ impl Parse for GcTypeAttrs {
                 result.is_copy = true;
             } else {
                 return Err(Error::new(
-                    input.span(), "Unknown flag"
+                    input.span(), "Unknown type flag"
                 ))
             }
         }
@@ -44,10 +138,13 @@ pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         .unwrap_or_else(|e| e.to_compile_error());
     let gc_safe_impl = impl_gc_safe(&input)
         .unwrap_or_else(|e| e.to_compile_error());
+    let extra_impls = impl_extras(&input)
+        .unwrap_or_else(|e| e.to_compile_error());
     From::from(quote! {
         #trace_impl
         #brand_impl
         #gc_safe_impl
+        #extra_impls
     })
 }
 
@@ -62,6 +159,214 @@ fn trace_fields(fields: &Fields, access_ref: &mut dyn FnMut(Member) -> TokenStre
         result.push(quote!(::zerogc::Trace::visit(#val, &mut *visitor)?));
     }
     quote!(#(#result;)*)
+}
+
+struct GcRefType {
+    ref_type: Type,
+    #[allow(dead_code)]
+    value_type: Type,
+    lifetime: Lifetime
+}
+impl GcRefType {
+    pub fn with_value_type(&self, updated_value_type: Type) -> GcRefType {
+        let updated_ref_type = match self.ref_type {
+            Type::Path(ref ty) => {
+                let mut path = ty.path.clone();
+                let lt = &self.lifetime;
+                let last_name = &path.segments.last().unwrap()
+                    .ident;
+                *path.segments.last_mut().unwrap()
+                    = parse_quote!(#last_name<#lt, #updated_value_type>);
+                let mut result = ty.clone();
+                result.path = path;
+                Type::Path(result)
+            },
+            _ => unreachable!("GcRefType should be a Path")
+        };
+        GcRefType {
+            ref_type: updated_ref_type,
+            value_type: updated_value_type,
+            lifetime: self.lifetime.clone()
+        }
+    }
+}
+impl ToTokens for GcRefType {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        self.ref_type.to_tokens(tokens)
+    }
+}
+/// Parse the type as if it was a GcRef
+fn parse_gc_ref_type(target: &Type) -> Result<GcRefType, Error> {
+    let path = match target {
+        Type::Path(ref ty) => &ty.path,
+        _ => return Err(Error::new(
+            target.span(), "Expected a GcRef type"
+        ))
+    };
+    let last = path.segments.last()
+        .ok_or_else(|| Error::new( // Is this an internal error?
+            target.span(),
+            "GcRef type should have a trailing segment")
+        )?;
+    let mut lifetime = None;
+    let mut value_type = None;
+    if let PathArguments::AngleBracketed(ref bracketed) = last.arguments {
+        for arg in &bracketed.args {
+            match arg {
+                GenericArgument::Lifetime(ref lt) => {
+                    if lt.ident == "gc" {
+                        assert!(!lifetime.is_some(), "Duplicate");
+                        lifetime = Some(lt.clone());
+                    } else {
+                        return Err(Error::new(
+                            lt.span(),
+                            "Lifetime to a GcRef must be named `'gc`"
+                        ))
+                    }
+                },
+                GenericArgument::Type(ref type_arg) => {
+                    if value_type.is_some() {
+                        return Err(Error::new(
+                            type_arg.span(),
+                            "A GcRef can only have one type argument"
+                        ))
+                    } else {
+                        value_type = Some(type_arg.clone());
+                    }
+                },
+                _ => return Err(Error::new(
+                    arg.span(), "Invalid generic arg to GcRef"
+                ))
+            }
+        }
+    } else {
+        return Err(Error::new(
+            last.arguments.span(),
+            "Expected brackated generic arguments for GcRef"
+        ))
+    }
+    let lifetime = lifetime.ok_or_else(|| Error::new(
+        target.span(), "A GcRef must have a lifetime ('gc)"
+    ))?;
+    let value_type = value_type.ok_or_else(|| Error::new(
+        target.span(), "A GcRef must have a type paramater (for its value)"
+    ))?;
+    Ok(GcRefType {
+        ref_type: target.clone(),
+        lifetime, value_type
+    })
+}
+
+/// Implement extra methods
+///
+/// 1. Implement setters for `GcCell` fields using a write barrier
+fn impl_extras(target: &DeriveInput) -> Result<TokenStream, Error> {
+    let name = &target.ident;
+    let mut extra_items = Vec::new();
+    match target.data {
+        Data::Struct(ref data) => {
+            for field in &data.fields {
+                let attrs = GcFieldAttrs::find(&field.attrs)?;
+                match attrs.mutable {
+                    Some(mutable_opts) => {
+                        let original_name = match field.ident {
+                            Some(ref name) => name,
+                            None => {
+                                return Err(Error::new(
+                                    field.span(),
+                                    "zerogc can only mutate named fields"
+                                ))
+                            }
+                        };
+                        // Generate a mutator
+                        let mutator_name = Ident::new(
+                            &format!("set_{}", original_name),
+                            field.ident.span(),
+                        );
+                        let mutator_vis = if mutable_opts.public {
+                            quote!(pub)
+                        } else {
+                            quote!()
+                        };
+                        let value_ref_type = match field.ty {
+                            Type::Path(ref cell_path) if cell_path.path.segments.last()
+                                .map_or(false, |seg| seg.ident == "GcCell") => {
+                                let last_segment = cell_path.path.segments.last().unwrap();
+                                let mut inner_type = None;
+                                if let PathArguments::AngleBracketed(ref bracketed) = last_segment.arguments {
+                                    for arg in &bracketed.args {
+                                        match arg {
+                                            GenericArgument::Type(t) if inner_type.is_none() => {
+                                                inner_type = Some(t.clone()); // Initialize
+                                            },
+                                            _ => {
+                                                inner_type = None; // Unexpected arg
+                                                break
+                                            }
+                                        }
+                                    }
+                                }
+                                let inner_type = inner_type.ok_or_else(|| Error::new(
+                                    field.ty.span(),
+                                    "GcCell should have one (and only one) type param"
+                                ))?;
+                                parse_gc_ref_type(&inner_type)?
+                            },
+                            _ => return Err(Error::new(
+                                field.ty.span(),
+                                "A mutable field must be wrapped in a `GcCell`"
+                            ))
+                        };
+                        let own_type = value_ref_type
+                            .with_value_type(parse_quote!(Self));
+                        // NOTE: Specially quoted since we want to blame the field for errors
+                        let field_as_ptr = quote_spanned!(field.span() => GcCell::as_ptr(&self.value().#original_name));
+                        extra_items.push(quote! {
+                            #mutator_vis fn #mutator_name(self: #own_type, value: #value_ref_type) {
+                                unsafe {
+                                    let target_ptr = #field_as_ptr;
+                                    let offset = target_ptr as usize - self.as_ptr() as usize;
+                                    GcRef::write_barrier(self, offset, value);
+                                    target_ptr.write(value);
+                                }
+                            }
+                        })
+                    }
+                    None => {}
+                }
+            }
+        },
+        Data::Enum(ref data) => {
+            for variant in &data.variants {
+                for field in &variant.fields {
+                    let attrs = GcFieldAttrs::find(&field.attrs)?;
+                    if attrs.mutable.is_some() {
+                        return Err(Error::new(
+                            field.ident.span(),
+                            "Can't mark enum field as mutable"
+                        ))
+                    }
+                }
+            }
+        },
+        Data::Union(ref data) => {
+            for field in &data.fields.named {
+                let attrs = GcFieldAttrs::find(&field.attrs)?;
+                if attrs.mutable.is_some() {
+                    return Err(Error::new(
+                        field.ident.span(),
+                        "Can't mark union field as mutable"
+                    ))
+                }
+            }
+        },
+    }
+    let (impl_generics, ty_generics, where_clause) = target.generics.split_for_impl();
+    Ok(quote! {
+        impl #impl_generics #name #ty_generics #where_clause {
+            #(#extra_items)*
+        }
+    })
 }
 
 fn impl_brand(target: &DeriveInput) -> Result<TokenStream, Error> {
@@ -197,13 +502,7 @@ fn impl_gc_safe(target: &DeriveInput) -> Result<TokenStream, Error> {
     let generics = add_trait_bounds(
         &target.generics, parse_quote!(zerogc::GcSafe)
     );
-    let attrs = target.attrs.iter().find_map(|attr| {
-        if attr.path.is_ident("zerogc") {
-            Some(syn::parse2::<GcTypeAttrs>(attr.tokens.clone()))
-        } else {
-            None
-        }
-    }).unwrap_or_else(|| Ok(GcTypeAttrs::default()))?;
+    let attrs = GcTypeAttrs::find(&*target.attrs)?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let field_types: Vec<&Type> = match target.data {
         Data::Struct(ref data) => {
