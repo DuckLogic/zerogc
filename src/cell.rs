@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use crate::{GcSafe, Trace, GcVisitor, NullTrace, TraceImmutable, GcDirectWrite,};
+use crate::{GcSafe, Trace, GcVisitor, NullTrace, TraceImmutable, GcDirectBarrier,};
 
 /// A `Cell` pointing to a garbage collected object.
 ///
@@ -37,8 +37,8 @@ impl<T: NullTrace + Copy> GcCell<T> {
         self.0.set(value)
     }
 }
-unsafe impl<'gc, OwningRef, Value> GcDirectWrite<'gc, OwningRef> for GcCell<Value>
-    where Value: GcDirectWrite<'gc, OwningRef> + Copy {
+unsafe impl<'gc, OwningRef, Value> GcDirectBarrier<'gc, OwningRef> for GcCell<Value>
+    where Value: GcDirectBarrier<'gc, OwningRef> + Copy {
     #[inline]
     unsafe fn write_barrier(
         &self, owner: &OwningRef,

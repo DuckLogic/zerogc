@@ -46,8 +46,8 @@ macro_rules! trace_tuple {
         unsafe impl<$($param: GcSafe),*> GcSafe for ($($param,)*) {
             const NEEDS_DROP: bool = false $(|| <$param as GcSafe>::NEEDS_DROP)*;
         }
-        unsafe impl<'gc, OwningRef, $($param),*> $crate::GcDirectWrite<'gc, OwningRef> for ($($param,)*)
-            where $($param: $crate::GcDirectWrite<'gc, OwningRef>),* {
+        unsafe impl<'gc, OwningRef, $($param),*> $crate::GcDirectBarrier<'gc, OwningRef> for ($($param,)*)
+            where $($param: $crate::GcDirectBarrier<'gc, OwningRef>),* {
             #[inline]
             unsafe fn write_barrier(
                 &self, #[allow(unused)] owner: &OwningRef,

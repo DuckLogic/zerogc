@@ -4,7 +4,7 @@
 //! but anything that requires the rest of the stdlib (including collections and allocations),
 //! should go in this module.
 
-use crate::{Trace, GcSafe, GcVisitor, TraceImmutable, NullTrace, GcBrand, GcSystem, GcDirectWrite};
+use crate::{Trace, GcSafe, GcVisitor, TraceImmutable, NullTrace, GcBrand, GcSystem, GcDirectBarrier};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -87,8 +87,8 @@ unsafe impl<T: NullTrace> NullTrace for Option<T> {}
 unsafe impl<T: GcSafe> GcSafe for Option<T> {
     const NEEDS_DROP: bool = T::NEEDS_DROP;
 }
-unsafe impl<'gc, OwningRef, V> GcDirectWrite<'gc, OwningRef> for Option<V>
-    where V: GcDirectWrite<'gc, OwningRef> {
+unsafe impl<'gc, OwningRef, V> GcDirectBarrier<'gc, OwningRef> for Option<V>
+    where V: GcDirectBarrier<'gc, OwningRef> {
     #[inline]
     unsafe fn write_barrier(&self, owner: &OwningRef, start_offset: usize) {
         // Implementing direct write is safe because we store our value inline

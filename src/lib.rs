@@ -240,8 +240,8 @@ pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
         self.value() as *const T as *mut T
     }
 }
-/// Safely write this value to a garbage collected value,
-/// triggering the appropriate write barriers
+/// Safely trigger a write barrier before
+/// writing to a garbage collected value.
 ///
 /// The value must be in managed memory,
 /// a *direct* part of a garbage collected object.
@@ -270,7 +270,7 @@ pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
 /// even though it's just a pointer.
 /// It's the final destination of all write barriers and is expected
 /// to internally handle the indirection.
-pub unsafe trait GcDirectWrite<'gc, OwningRef>: Trace {
+pub unsafe trait GcDirectBarrier<'gc, OwningRef>: Trace {
     /// Trigger a write barrier,
     /// before writing to one of the owning object's managed fields
     ///
