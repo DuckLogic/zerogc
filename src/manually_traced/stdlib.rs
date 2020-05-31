@@ -4,7 +4,7 @@
 //! but anything that requires the rest of the stdlib (including collections and allocations),
 //! should go in this module.
 
-use crate::{Trace, GcSafe, GcVisitor, TraceImmutable, NullTrace, GcBrand, GcSystem};
+use crate::{Trace, GcSafe, GcVisitor, TraceImmutable, NullTrace, GcBrand, GcSystem, GcDirectWrite};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -86,5 +86,25 @@ unsafe impl<T: TraceImmutable> TraceImmutable for Option<T> {
 unsafe impl<T: NullTrace> NullTrace for Option<T> {}
 unsafe impl<T: GcSafe> GcSafe for Option<T> {
     const NEEDS_DROP: bool = T::NEEDS_DROP;
+}
+unsafe impl<'gc, OwningRef, V> GcDirectWrite<'gc, OwningRef> for Option<V>
+    where V: GcDirectWrite<'gc, OwningRef> {
+    #[inline]
+    unsafe fn write_barrier(&self, owner: &OwningRef, start_offset: usize) {
+        // Implementing direct write is safe because we store our value inline
+        match *self {
+            None => { /* Nothing to trigger the barrier for :) */ },
+            Some(ref value) => {
+                /*
+                 * We must manually compute the offset
+                 * Null pointer-optimized types will have offset of zero,
+                 * while other types may not
+                 */
+                let value_offset = (value as *const V as usize) -
+                    (self as *const Self as usize);
+                value.write_barrier(owner, start_offset + value_offset)
+            },
+        }
+    }
 }
 unsafe_gc_brand!(Option, T);

@@ -46,6 +46,28 @@ macro_rules! trace_tuple {
         unsafe impl<$($param: GcSafe),*> GcSafe for ($($param,)*) {
             const NEEDS_DROP: bool = false $(|| <$param as GcSafe>::NEEDS_DROP)*;
         }
+        unsafe impl<'gc, OwningRef, $($param),*> $crate::GcDirectWrite<'gc, OwningRef> for ($($param,)*)
+            where $($param: $crate::GcDirectWrite<'gc, OwningRef>),* {
+            #[inline]
+            unsafe fn write_barrier(
+                &self, #[allow(unused)] owner: &OwningRef,
+                #[allow(unused)] start_offset: usize
+            ) {
+                /*
+                 * We are implementing gc **direct** write.
+                 * This is safe because all the tuple's values
+                 * are stored inline. We calculate the pointer offset
+                 * using arithmetic.
+                 */
+                #[allow(non_snake_case)]
+                let ($(ref $param,)*) = *self;
+                $({
+                    let field_offset = ($param as *const $param as usize)
+                        - (self as *const Self as usize);
+                    $param.write_barrier(owner, field_offset + start_offset);
+                };)*
+            }
+        }
     };
 }
 

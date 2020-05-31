@@ -4,7 +4,7 @@ use crate::{GcSafe, Trace, GcVisitor, NullTrace, TraceImmutable, GcDirectWrite,}
 
 /// A `Cell` pointing to a garbage collected object.
 ///
-/// This only supports `NullTrace` types,
+/// This only supports mutating `NullTrace` types,
 /// becuase garbage collected pointers need write barriers.
 #[derive(Default, Clone, Debug)]
 #[repr(transparent)]
@@ -31,20 +31,21 @@ impl<T: NullTrace + Copy> GcCell<T> {
     /// Change the interior of this type to the specified type
     ///
     /// The type must be `NullTrace` because garbage collected
-    /// typese need write barriers
+    /// types need write barriers
     #[inline]
     pub fn set(&self, value: T) {
         self.0.set(value)
     }
 }
 unsafe impl<'gc, OwningRef, Value> GcDirectWrite<'gc, OwningRef> for GcCell<Value>
-    where Value: GcDirectWrite<'gc, OwningRef> {
+    where Value: GcDirectWrite<'gc, OwningRef> + Copy {
     #[inline]
-    unsafe fn write_barrier<InnerValue: Trace>(
+    unsafe fn write_barrier(
         &self, owner: &OwningRef,
-        field_offset: usize, updated_value: &InnerValue
-    ) where {
-        self.get().write_barrier(owner, field_offset, updated_value)
+        field_offset: usize
+    ) {
+        // NOTE: We are direct write because `Value` is stored inline
+        self.get().write_barrier(owner, field_offset)
     }
 }
 /// GcCell can only support mutating types that are `NullTrace`,

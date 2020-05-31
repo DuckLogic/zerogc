@@ -270,7 +270,7 @@ pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
 /// even though it's just a pointer.
 /// It's the final destination of all write barriers and is expected
 /// to internally handle the indirection.
-pub unsafe trait GcDirectWrite<'gc, OwningRef> {
+pub unsafe trait GcDirectWrite<'gc, OwningRef>: Trace {
     /// Trigger a write barrier,
     /// before writing to one of the owning object's managed fields
     ///
@@ -284,52 +284,8 @@ pub unsafe trait GcDirectWrite<'gc, OwningRef> {
     /// The specified field offset must point to a valid field
     /// in the source object.
     ///
-    /// The type of the value must match the appropriate field
-    unsafe fn write_barrier<V: Trace>(
-        &self, owner: OwningRef, field_offset: usize,
-        updated_value: &V
-    );
-
-    /* TODO: Decide on this
-    /// Write the specified value to this object,
-    /// assuming the appropriate write barriers have been triggered
-    ///
-    /// ## Safety
-    /// It is undefined behavior to write to this object's field
-    /// without first triggering its write barrier.
-    ///
-    /// It's undefined behavior to write to an invalid field offset,
-    /// or use a mismatched type.
-    unsafe fn write_unchecked(
-        &mut self,
-        field_offset: usize,
-        updated_value: V
-    ) {
-        // TODO: Default impl??
-        (self as *mut Self as *mut u8)
-            .add(field_offset)
-            .cast::<V>()
-            .write(updated_value)
-    }
-     */
-}
-/// Write barriers aren't needed for (primitives)
-unsafe impl<'gc, OwnerRef, V: NullTrace> GcDirectWrite<'gc, OwnerRef> for V {
-    #[inline]
-    unsafe fn write_barrier<InnerV>(
-        &self, _owner_ref: &OwnerRef,
-        _field_offset: usize,
-        _updated_value: InnerV
-    ) {
-        debug_assert!(
-            !InnerV::NEEDS_TRACE, "Inner field of {} needs trace: {}",
-            std::any::type_name::<V>(), std::any::type_name::<InnerV>()
-        );
-        debug_assert!(
-            !V::NEEDS_TRACE, "Value needs trace: {}",
-            std::any::type_name::<V>()
-        )
-    }
+    /// The type of this value must match the appropriate field
+    unsafe fn write_barrier(&self, owner: &OwningRef, field_offset: usize);
 }
 
 /// Indicates that a type can be safely allocated by a garbage collector.

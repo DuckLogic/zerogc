@@ -306,6 +306,14 @@ macro_rules! unsafe_trace_primitive {
         unsafe impl GcSafe for $target {
             const NEEDS_DROP: bool = std::mem::needs_drop::<$target>();
         }
+        unsafe impl<'gc, OwningRef> $crate::GcDirectWrite<'gc, OwningRef> for $target {
+            #[inline(always)]
+            unsafe fn write_barrier(
+                &self, _owner: &OwningRef, _field_offset: usize,
+            ) {
+                /* NOP */
+            }
+        }
     };
 }
 
