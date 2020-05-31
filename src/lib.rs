@@ -239,18 +239,96 @@ pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
     unsafe fn as_raw_ptr(&self) -> *mut T {
         self.value() as *const T as *mut T
     }
-
-    /// A write barrier, before writing to one of this object's managed fields
+}
+/// Safely write this value to a garbage collected value,
+/// triggering the appropriate write barriers
+///
+/// The value must be in managed memory,
+/// a *direct* part of a garbage collected object.
+/// Write barriers (and writes) must include a reference
+/// to its owning object.
+///
+/// ## Safety
+/// It is undefined behavior to forget to trigger a write barrier.
+///
+/// Field offsets are unchecked. They must refer to the correct
+/// offset (in bytes).
+///
+/// ### Indirection
+/// This trait only support "direct" writes,
+/// where the destination field is inline with the source object.
+///
+/// For example it's correct to implement `GcDirectWrite<Value=A> for (A, B)`,
+/// since since `A` is inline with the owning tuple.
+///
+/// It is **incorrect** to implement `GcDirectWrite<Value=T> for Vec<T>`,
+/// since it `T` is indirectly referred to by the vector.
+/// There's no "field offset" we can use to get from `*mut Vec` -> `*mut T`.
+///
+/// The only exception to this rule is `GcRef` itself.
+/// GcRef can freely implement `GcDirectWrite` for any (and all values),
+/// even though it's just a pointer.
+/// It's the final destination of all write barriers and is expected
+/// to internally handle the indirection.
+pub unsafe trait GcDirectWrite<'gc, OwningRef> {
+    /// Trigger a write barrier,
+    /// before writing to one of the owning object's managed fields
     ///
     /// It is undefined behavior to mutate a garbage collected field
     /// without inserting a write barrier before it.
     ///
     /// Generational, concurrent and incremental GCs need this to maintain
     /// the tricolor invariant.
-    #[inline(always)] // Default is nop, should be removed
-    unsafe fn write_barrier<V, VR>(self, _field_offset: usize, _updated_value: VR)
-        where V: GcSafe + 'gc, VR: GcRef<'gc, V> {
-        debug_assert!(_field_offset < self::mem::size_of_val(self.value()));
+    ///
+    /// ## Safety
+    /// The specified field offset must point to a valid field
+    /// in the source object.
+    ///
+    /// The type of the value must match the appropriate field
+    unsafe fn write_barrier<V: Trace>(
+        &self, owner: OwningRef, field_offset: usize,
+        updated_value: &V
+    );
+
+    /* TODO: Decide on this
+    /// Write the specified value to this object,
+    /// assuming the appropriate write barriers have been triggered
+    ///
+    /// ## Safety
+    /// It is undefined behavior to write to this object's field
+    /// without first triggering its write barrier.
+    ///
+    /// It's undefined behavior to write to an invalid field offset,
+    /// or use a mismatched type.
+    unsafe fn write_unchecked(
+        &mut self,
+        field_offset: usize,
+        updated_value: V
+    ) {
+        // TODO: Default impl??
+        (self as *mut Self as *mut u8)
+            .add(field_offset)
+            .cast::<V>()
+            .write(updated_value)
+    }
+     */
+}
+/// Write barriers aren't needed for (primitives)
+unsafe impl<'gc, OwnerRef, V: NullTrace> GcDirectWrite<'gc, OwnerRef> for V {
+    #[inline]
+    unsafe fn write_barrier<InnerV>(
+        &self, _owner_ref: &OwnerRef,
+        _field_offset: usize,
+        _updated_value: InnerV
+    ) {
+        debug_assert!(
+            !InnerV::NEEDS_TRACE, "Inner field of {} needs trace: {}",
+            std::any::type_name::<V>(), std::any::type_name::<InnerV>()
+        );
+        debug_assert!(
+            !V::NEEDS_TRACE, "Value needs trace: {}",
+            std::any::type_name::<V>()
+        )
     }
 }
 
