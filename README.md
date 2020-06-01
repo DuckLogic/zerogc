@@ -43,7 +43,7 @@ See the [binary-trees](libs/simple/examples/binary_trees.rs) example for a basic
 
 ## Status
 This is extremely experimental. It's really uncharted territory
-in the way it uses the rust garbage collector. It seems to be sound,
+in the way it uses the rust borrow checker. It seems to be sound,
 but I have no way of really knowing for sure.
 
 The simple mark/sweep collector passes basic tests,
