@@ -1,10 +1,10 @@
 extern crate proc_macro;
 
-use quote::{quote, quote_spanned, ToTokens};
+use quote::{quote, quote_spanned};
 use syn::{
     parse_macro_input, parenthesized, parse_quote, DeriveInput, Data,
     Error, Generics, GenericParam, TypeParamBound, Fields, Member,
-    Index, Type, GenericArgument, Attribute, PathArguments, Lifetime
+    Index, Type, GenericArgument, Attribute, PathArguments,
 };
 use proc_macro2::{Ident, TokenStream, Span};
 use syn::spanned::Spanned;
@@ -161,102 +161,6 @@ fn trace_fields(fields: &Fields, access_ref: &mut dyn FnMut(Member) -> TokenStre
     quote!(#(#result;)*)
 }
 
-struct GcRefType {
-    ref_type: Type,
-    #[allow(dead_code)]
-    value_type: Type,
-    lifetime: Lifetime
-}
-impl GcRefType {
-    pub fn with_value_type(&self, updated_value_type: Type) -> GcRefType {
-        let updated_ref_type = match self.ref_type {
-            Type::Path(ref ty) => {
-                let mut path = ty.path.clone();
-                let lt = &self.lifetime;
-                let last_name = &path.segments.last().unwrap()
-                    .ident;
-                *path.segments.last_mut().unwrap()
-                    = parse_quote!(#last_name<#lt, #updated_value_type>);
-                let mut result = ty.clone();
-                result.path = path;
-                Type::Path(result)
-            },
-            _ => unreachable!("GcRefType should be a Path")
-        };
-        GcRefType {
-            ref_type: updated_ref_type,
-            value_type: updated_value_type,
-            lifetime: self.lifetime.clone()
-        }
-    }
-}
-impl ToTokens for GcRefType {
-    fn to_tokens(&self, tokens: &mut TokenStream) {
-        self.ref_type.to_tokens(tokens)
-    }
-}
-/// Parse the type as if it was a GcRef
-fn parse_gc_ref_type(target: &Type) -> Result<GcRefType, Error> {
-    let path = match target {
-        Type::Path(ref ty) => &ty.path,
-        _ => return Err(Error::new(
-            target.span(), "Expected a GcRef type"
-        ))
-    };
-    let last = path.segments.last()
-        .ok_or_else(|| Error::new( // Is this an internal error?
-            target.span(),
-            "GcRef type should have a trailing segment")
-        )?;
-    let mut lifetime = None;
-    let mut value_type = None;
-    if let PathArguments::AngleBracketed(ref bracketed) = last.arguments {
-        for arg in &bracketed.args {
-            match arg {
-                GenericArgument::Lifetime(ref lt) => {
-                    if lt.ident == "gc" {
-                        assert!(!lifetime.is_some(), "Duplicate");
-                        lifetime = Some(lt.clone());
-                    } else {
-                        return Err(Error::new(
-                            lt.span(),
-                            "Lifetime to a GcRef must be named `'gc`"
-                        ))
-                    }
-                },
-                GenericArgument::Type(ref type_arg) => {
-                    if value_type.is_some() {
-                        return Err(Error::new(
-                            type_arg.span(),
-                            "A GcRef can only have one type argument"
-                        ))
-                    } else {
-                        value_type = Some(type_arg.clone());
-                    }
-                },
-                _ => return Err(Error::new(
-                    arg.span(), "Invalid generic arg to GcRef"
-                ))
-            }
-        }
-    } else {
-        return Err(Error::new(
-            last.arguments.span(),
-            "Expected brackated generic arguments for GcRef"
-        ))
-    }
-    let lifetime = lifetime.ok_or_else(|| Error::new(
-        target.span(), "A GcRef must have a lifetime ('gc)"
-    ))?;
-    let value_type = value_type.ok_or_else(|| Error::new(
-        target.span(), "A GcRef must have a type paramater (for its value)"
-    ))?;
-    Ok(GcRefType {
-        ref_type: target.clone(),
-        lifetime, value_type
-    })
-}
-
 /// Implement extra methods
 ///
 /// 1. Implement setters for `GcCell` fields using a write barrier
@@ -306,27 +210,28 @@ fn impl_extras(target: &DeriveInput) -> Result<TokenStream, Error> {
                                         }
                                     }
                                 }
-                                let inner_type = inner_type.ok_or_else(|| Error::new(
+                                inner_type.ok_or_else(|| Error::new(
                                     field.ty.span(),
                                     "GcCell should have one (and only one) type param"
-                                ))?;
-                                parse_gc_ref_type(&inner_type)?
+                                ))?
                             },
                             _ => return Err(Error::new(
                                 field.ty.span(),
                                 "A mutable field must be wrapped in a `GcCell`"
                             ))
                         };
-                        let own_type = value_ref_type
-                            .with_value_type(parse_quote!(Self));
                         // NOTE: Specially quoted since we want to blame the field for errors
-                        let field_as_ptr = quote_spanned!(field.span() => GcCell::as_ptr(&self.value().#original_name));
+                        let field_as_ptr = quote_spanned!(field.span() => GcCell::as_ptr(&(*self.value()).#original_name));
+                        let barrier = quote_spanned!(field.span() => ::zerogc::GcDirectBarrier::write_barrier(&value, &self, offset));
                         extra_items.push(quote! {
-                            #mutator_vis fn #mutator_name(self: #own_type, value: #value_ref_type) {
+                            #[inline] // TODO: Implement `GcDirectBarrier` ourselves
+                            #mutator_vis fn #mutator_name<OwningRef>(self: OwningRef, value: #value_ref_type)
+                                where OwningRef: ::zerogc::GcRef<'gc, Self>,
+                                       #value_ref_type: ::zerogc::GcDirectBarrier<'gc, OwningRef> {
                                 unsafe {
                                     let target_ptr = #field_as_ptr;
-                                    let offset = target_ptr as usize - self.as_ptr() as usize;
-                                    GcRef::write_barrier(self, offset, value);
+                                    let offset = target_ptr as usize - self.as_raw_ptr() as usize;
+                                    #barrier;
                                     target_ptr.write(value);
                                 }
                             }

@@ -1,3 +1,6 @@
+#![feature(
+    arbitrary_self_types, // Unfortunately this is required for methods on Gc refs
+)]
 use zerogc::{safepoint, safepoint_recurse, GcSimpleAlloc, GcCell, GcSafe};
 
 use zerogc_simple::{SimpleCollector, SimpleCollectorContext, Gc};
@@ -5,6 +8,7 @@ use zerogc_derive::Trace;
 
 #[derive(Trace)]
 struct Tree<'gc> {
+    #[zerogc(mutable(public))]
     children: GcCell<Option<(Gc<'gc, Tree<'gc>>, Gc<'gc, Tree<'gc>>)>>,
 }
 
@@ -22,7 +26,7 @@ fn bottom_up_tree<'gc>(collector: &'gc SimpleCollectorContext, depth: i32)
     if depth > 0 {
         let right = bottom_up_tree(collector, depth - 1);
         let left = bottom_up_tree(collector, depth - 1);
-        tree.children.set(Some((left, right)));
+        tree.set_children(Some((left, right)));
     }
     tree
 }

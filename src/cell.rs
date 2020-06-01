@@ -78,8 +78,5 @@ unsafe impl<T: GcSafe + NullTrace + Copy> TraceImmutable for GcCell<T> {
 unsafe impl<T: GcSafe + Copy + NullTrace> NullTrace for GcCell<T> {}
 unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {
     /// Since T is Copy, we shouldn't need to be dropped
-    const NEEDS_DROP: bool = {
-        assert!(!T::NEEDS_DROP); // Should be Copy
-        false
-    };
+    const NEEDS_DROP: bool = false;
 }

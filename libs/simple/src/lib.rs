@@ -13,7 +13,7 @@
     new_uninit, // Until Rust has const generics, this is how we init arrays..
     specialization, // Used for specialization (effectively required by GcRef)
 )]
-use zerogc::{GcSystem, GcSafe, Trace, GcContext, GcVisitor, GcSimpleAlloc, GcRef, GcBrand};
+use zerogc::{GcSystem, GcSafe, Trace, GcContext, GcVisitor, GcSimpleAlloc, GcRef, GcBrand, GcDirectBarrier};
 use std::alloc::Layout;
 use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
@@ -108,6 +108,14 @@ impl<'gc, T: GcSafe + 'gc> Deref for Gc<'gc, T> {
     fn deref(&self) -> &Self::Target {
         unsafe { &*(&self.value as *const NonNull<T> as *const &'gc T) }
     }
+}
+/// Simple GC doesn't need write barriers :)
+///
+/// This implementation is just for writing `Gc<T> -> Gc<T>`
+unsafe impl<'gc, T, V> GcDirectBarrier<'gc, Gc<'gc, T>> for Gc<'gc, V>
+    where T: GcSafe + 'gc, V: GcSafe + 'gc {
+    #[inline(always)]  // NOP
+    unsafe fn write_barrier(&self, _owner: &Gc<'gc, T>, _field_offset: usize) {}
 }
 // We can be copied freely :)
 impl<'gc, T: GcSafe + 'gc> Copy for Gc<'gc, T> {}
