@@ -1,3 +1,6 @@
+#[cfg(feature = "sync")]
+use once_cell::sync::OnceCell;
+#[cfg(not(feature = "sync"))]
 use once_cell::unsync::OnceCell;
 use std::alloc::Layout;
 use crate::{GcHeader};
