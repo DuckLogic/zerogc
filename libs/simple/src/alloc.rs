@@ -3,8 +3,13 @@ use std::alloc::Layout;
 use crate::{GcHeader};
 use std::mem;
 use std::ptr::NonNull;
+#[cfg(not(feature = "sync"))]
 use std::cell::{Cell, RefCell};
 use std::mem::MaybeUninit;
+#[cfg(feature = "sync")]
+use parking_lot::Mutex;
+#[cfg(feature = "sync")]
+use crossbeam::atomic::AtomicCell;
 
 /// The minimum size of supported memory (in words)
 ///
@@ -33,21 +38,53 @@ pub const fn is_small_object<T>() -> bool {
 
 pub(crate) struct Chunk {
     pub start: *mut u8,
-    pub current: Cell<*mut u8>,
+    #[cfg(feature = "sync")]
+    current: AtomicCell<*mut u8>,
+    #[cfg(not(feature = "sync"))]
+    current: Cell<*mut u8>,
     pub end: *mut u8
 }
 impl Chunk {
-    fn alloc(capacity: usize) -> Self {
+    fn alloc(capacity: usize) -> Box<Self> {
         assert!(capacity >= 1);
         let mut result = Vec::<u8>::with_capacity(capacity);
         let start = result.as_mut_ptr();
         std::mem::forget(result);
-        Chunk {
-            start, current: Cell::new(start),
+        let current;
+        #[cfg(feature = "sync")] {
+            current = AtomicCell::new(start);
+        }
+        #[cfg(not(feature = "sync"))] {
+            current = Cell::new(start);
+        }
+        Box::new(Chunk {
+            start, current,
             end: unsafe { start.add(capacity) }
+        })
+    }
+
+    #[inline]
+    #[cfg(feature = "sync")]
+    fn try_alloc(&self, amount: usize) -> Option<NonNull<u8>> {
+        loop {
+            let old_current = self.current.load();
+            let remaining = self.end as usize - old_current as usize;
+            if remaining >= amount {
+                unsafe {
+                    let updated = old_current.add(amount);
+                    if self.current.compare_exchange(old_current, updated).is_ok() {
+                        return Some(NonNull::new_unchecked(old_current))
+                    } else {
+                        continue
+                    }
+                }
+            } else {
+                return None
+            }
         }
     }
     #[inline]
+    #[cfg(not(feature = "sync"))]
     fn try_alloc(&self, amount: usize) -> Option<NonNull<u8>> {
         let old_current = self.current.get();
         let remaining = self.end as usize - old_current as usize;
@@ -60,6 +97,17 @@ impl Chunk {
             None
         }
     }
+    #[inline]
+    #[cfg(feature = "sync")]
+    fn current(&self) -> *mut u8 {
+        self.current.load()
+    }
+    #[inline]
+    #[cfg(not(feature = "sync"))]
+    fn current(&self) -> *mut u8 {
+        self.current.get()
+    }
+    #[inline]
     fn capacity(&self) -> usize {
         self.end as usize - self.start as usize
     }
@@ -111,12 +159,198 @@ impl MaybeFreeSlot {
 pub const NUM_SMALL_ARENAS: usize = 15;
 const INITIAL_SIZE: usize = 512;
 
+/// The current state of the allocator.
+///
+/// This is the thread-safe implementation
+#[cfg(feature = "sync")]
+struct ArenaState {
+    /// We have to Box the chunk so that it'll remain valid
+    /// even when we move it.
+    ///
+    /// This is required for thread safety.
+    /// One thread could still be seeing an old chunk's location
+    /// after it's been moved.
+    chunks: Mutex<Vec<Box<Chunk>>>,
+    /// Lockless access to the current chunk
+    ///
+    /// The pointers wont be invalidated,
+    /// since the references are internally boxed.
+    current_chunk: AtomicCell<NonNull<Chunk>>
+}
+#[cfg(feature = "sync")]
+impl ArenaState {
+    fn new(chunks: Vec<Box<Chunk>>) -> Self {
+        assert!(chunks.len() >= 1);
+        let current_chunk = NonNull::from(&**chunks.last().unwrap());
+        ArenaState {
+            chunks: Mutex::new(chunks),
+            current_chunk: AtomicCell::new(current_chunk)
+        }
+    }
+    #[inline]
+    fn lock_chunks(&self) -> ::parking_lot::MutexGuard<Vec<Box<Chunk>>> {
+        self.chunks.lock()
+    }
+    #[inline]
+    fn current_chunk(&self) -> NonNull<Chunk> {
+        self.current_chunk.load()
+    }
+    #[inline]
+    unsafe fn force_current_chunk(&self, ptr: NonNull<Chunk>) {
+        self.current_chunk.store(ptr);
+    }
+}
+/// The single-threaded implementation of `AllocState`
+#[cfg(not(feature = "sync"))]
+struct ArenaState {
+    /// The Box is unessicarry but we keep it for
+    /// consistency with multithreaded implementation
+    chunks: RefCell<Vec<Box<Chunk>>>,
+    /// Lockless access to the current chunk
+    ///
+    /// The pointers wont be invalidated,
+    /// since the references are internally boxed.
+    current_chunk: Cell<NonNull<Chunk>>
+}
+#[cfg(not(feature = "sync"))]
+impl ArenaState {
+    fn new(chunks: Vec<Box<Chunk>>) -> Self {
+        assert!(chunks.len() >= 1);
+        let current_chunk = NonNull::from(&**chunks.last().unwrap());
+        ArenaState {
+            chunks: RefCell::new(chunks),
+            current_chunk: Cell::new(current_chunk)
+        }
+    }
+    #[inline]
+    fn lock_chunks(&self) -> ::std::cell::RefMut<'_, Vec<Box<Chunk>>> {
+        self.chunks.borrow_mut()
+    }
+    #[inline]
+    fn current_chunk(&self) -> NonNull<Chunk> {
+        self.current_chunk.get()
+    }
+    #[inline]
+    unsafe fn force_current_chunk(&self, ptr: NonNull<Chunk>) {
+        self.current_chunk.set(ptr);
+    }
+}
+impl ArenaState {
+    #[inline]
+    fn alloc(&self, element_size: usize) -> NonNull<GcHeader> {
+        unsafe {
+            let chunk = &*self.current_chunk().as_ptr();
+            match chunk.try_alloc(element_size) {
+                Some(header) => header.cast(),
+                None => self.alloc_fallback(element_size)
+            }
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn alloc_fallback(&self, element_size: usize) -> NonNull<GcHeader> {
+        let mut chunks = self.lock_chunks();
+        // Now that we hold the lock, check the current chunk again
+        unsafe {
+            if let Some(header) = self.current_chunk().as_ref()
+                .try_alloc(element_size) {
+                return header.cast();
+            }
+        }
+        // Double capacity to amortize growth
+        let last_capacity = chunks.last().unwrap().capacity();
+        chunks.push(Chunk::alloc(last_capacity * 2));
+        unsafe {
+            self.force_current_chunk(NonNull::from(&**chunks.last().unwrap()));
+            self.current_chunk().as_ref()
+                .try_alloc(element_size).unwrap()
+                .cast::<GcHeader>()
+        }
+    }
+}
+
+/// The free list
+///
+/// This is the multithreaded, lock-free implementation
+#[cfg(feature = "sync")]
+#[derive(Default)]
+pub(crate) struct FreeList {
+    next: AtomicCell<Option<NonNull<MaybeFreeSlot>>>
+}
+#[cfg(feature = "sync")]
+impl FreeList {
+    #[inline]
+    pub(crate) fn next_free(&self) -> Option<NonNull<MaybeFreeSlot>> {
+        self.next.load()
+    }
+    #[inline]
+    pub(crate) unsafe fn set_next_free(&self, next: Option<NonNull<MaybeFreeSlot>>) {
+        self.next.store(next)
+    }
+    #[inline]
+    fn take_free(&self) -> Option<NonNull<GcHeader>> {
+        loop {
+            let next_free = match self.next.load() {
+                Some(free) => free,
+                None => return None, // Out of free space
+            };
+            // Update free pointer
+            unsafe {
+                if self.next.compare_exchange(
+                    Some(next_free),
+                    next_free.as_ref().free.prev_free
+                ).is_err() { continue /* retry */ }
+                debug_assert_eq!(
+                    next_free.as_ref().free.marker,
+                    FREE_SLOT_MARKER
+                );
+                return Some(NonNull::from(&next_free.as_ref().header))
+            }
+        }
+    }
+}
+
+/// The free list
+///
+/// This is the single-threaded, simlple implementation
+#[cfg(not(feature = "sync"))]
+#[derive(Default)]
+pub(crate) struct FreeList {
+    next: Cell<Option<NonNull<MaybeFreeSlot>>>
+}
+#[cfg(not(feature = "sync"))]
+impl FreeList {
+    #[inline]
+    pub(crate) fn next_free(&self) -> Option<NonNull<MaybeFreeSlot>> {
+        self.next.get()
+    }
+    #[inline]
+    pub(crate) unsafe fn set_next_free(&self, next: Option<NonNull<MaybeFreeSlot>>) {
+        self.next.set(next)
+    }
+    #[inline]
+    fn take_free(&self) -> Option<NonNull<GcHeader>> {
+        if let Some(next_free) = self.next.get() {
+            // Update free pointer
+            unsafe {
+                debug_assert_eq!(
+                    next_free.as_ref().free.marker,
+                    FREE_SLOT_MARKER
+                );
+                self.next.set(next_free.as_ref().free.prev_free);
+                Some(NonNull::from(&next_free.as_ref().header))
+            }
+        } else {
+            None
+        }
+    }
+}
+
 pub struct SmallArena {
     pub(crate) element_size: usize,
-    chunks: RefCell<Vec<Chunk>>,
-    current_chunk: Cell<NonNull<Chunk>>,
-    /// The next free slot
-    pub(crate) free: Cell<Option<NonNull<MaybeFreeSlot>>>
+    state: ArenaState,
+    pub(crate) free: FreeList
 }
 impl SmallArena {
     #[cold] // Initialization is the slow path
@@ -125,53 +359,25 @@ impl SmallArena {
         let element_size = num_words * mem::size_of::<usize>();
         assert!(INITIAL_SIZE >= element_size * 2);
         let chunks = vec![Chunk::alloc(INITIAL_SIZE)];
-        let current_chunk = NonNull::from(chunks.last().unwrap());
         SmallArena {
-            chunks: RefCell::new(chunks),
-            current_chunk: Cell::new(current_chunk),
-            element_size, free: Cell::new(None),
+            state: ArenaState::new(chunks),
+            element_size, free: Default::default(),
         }
     }
     #[inline]
     pub(crate) fn alloc(&self) -> NonNull<GcHeader> {
         // Check the free list
-        if let Some(next_free) = self.free.get() {
-            // Update free pointer
-            unsafe {
-                debug_assert_eq!(next_free.as_ref().free.marker, FREE_SLOT_MARKER);
-                self.free.set(next_free.as_ref().free.prev_free);
-                NonNull::from(&next_free.as_ref().header)
-            }
+        if let Some(free) = self.free.take_free() {
+            free
         } else {
-            // Fallback to allocating new memory...
-            unsafe {
-                match self.current_chunk.get().as_ref()
-                    .try_alloc(self.element_size) {
-                    Some(bytes) => bytes.cast::<GcHeader>(),
-                    None => self.alloc_fallback()
-                }
-            }
-        }
-    }
-    #[cold]
-    #[inline(never)]
-    fn alloc_fallback(&self) -> NonNull<GcHeader> {
-        let mut chunks = self.chunks.borrow_mut();
-        // Double capacity to amortize growth
-        let last_capacity = chunks.last().unwrap().capacity();
-        chunks.push(Chunk::alloc(last_capacity * 2));
-        self.current_chunk.set(NonNull::from(chunks.last().unwrap()));
-        unsafe {
-            self.current_chunk.get().as_ref()
-                .try_alloc(self.element_size).unwrap()
-                .cast::<GcHeader>()
+            self.state.alloc(self.element_size)
         }
     }
     pub(crate) unsafe fn for_each<F: FnMut(*mut MaybeFreeSlot)>(&self, mut func: F) {
-        let chunks = self.chunks.borrow();
+        let chunks = self.state.lock_chunks();
         for chunk in &*chunks {
             let mut ptr = chunk.start;
-            let end = chunk.current.get();
+            let end = chunk.current();
             while ptr < end {
                 func(ptr as *mut MaybeFreeSlot);
                 ptr = ptr.add(self.element_size);

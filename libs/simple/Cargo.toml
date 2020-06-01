@@ -8,6 +8,9 @@ edition = "2018"
 [dependencies]
 zerogc = { path = "../.." }
 once_cell = { version = "1.4.0", optional = true }
+# Concurrency
+parking_lot = { version = "^0.10", optional = true, features = ["nightly"] }
+crossbeam = { version = "^0.7", optional = true }
 
 [features]
 default = [
@@ -26,6 +29,16 @@ small-object-arenas = ["once_cell"]
 # This risks stack overflow at a possible performance gain
 # See commit 9a9634d68a4933d
 implicit-grey-stack = []
+# Support thread safety
+#
+# This slows down allocation
+# It also waits for all mutator threads to reach a safepoint
+# before collection can begin. This is bacially copperative
+# threading.....
+sync = [
+    "parking_lot",
+    "crossbeam"
+]
 
 [dev-dependencies]
 # Used for examples :)

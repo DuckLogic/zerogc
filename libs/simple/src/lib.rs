@@ -320,7 +320,7 @@ impl SimpleAlloc {
         // Clear small arenas
         #[cfg(feature = "small-object-arenas")]
         for arena in self.small_arenas.iter() {
-            let mut last_free = arena.free.get();
+            let mut last_free = arena.free.next_free();
             arena.for_each(|slot| {
                 if (*slot).is_free() {
                     /*
@@ -352,7 +352,7 @@ impl SimpleAlloc {
                     }
                 }
             });
-            arena.free.set(last_free);
+            arena.free.set_next_free(last_free);
         }
         // Clear large objects
         let mut last_linked = None;
