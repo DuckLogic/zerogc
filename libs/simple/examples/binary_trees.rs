@@ -53,7 +53,7 @@ fn main() {
     let max_depth = if min_depth + 2 > n { min_depth + 2 } else { n };
 
     let collector = SimpleCollector::create();
-    let mut gc = collector.into_context();
+    let mut gc = collector.create_context();
     {
         let depth = max_depth + 1;
         let tree = bottom_up_tree(&gc, depth);
