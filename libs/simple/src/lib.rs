@@ -26,6 +26,11 @@ use std::hash::{Hash, Hasher};
 use std::fmt::{Debug, Formatter};
 use std::fmt;
 use std::marker::PhantomData;
+#[cfg(feature = "sync")]
+use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
+#[cfg(feature = "sync")]
+use crossbeam::atomic::AtomicCell;
+use std::sync::Arc;
 
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
@@ -229,11 +234,27 @@ impl ShadowStack {
 const INITIAL_COLLECTION_THRESHOLD: usize = 2048;
 
 struct GcHeap {
+    #[cfg(feature = "sync")]
+    threshold: AtomicUsize,
+    #[cfg(not(feature = "sync"))]
     threshold: Cell<usize>,
     allocator: SimpleAlloc
 }
 impl GcHeap {
     #[inline]
+    #[cfg(feature = "sync")]
+    fn should_collect(&self) -> bool {
+        /*
+         * Going with relaxed ordering because it's not essential
+         * that we see updates immediately.
+         * Eventual consistency should be enough to eventually
+         * trigger a collection.
+         */
+        self.allocator.allocated_size.load(Ordering::Relaxed)
+            >= threshold.load(Ordering::Relaxed)
+    }
+    #[inline]
+    #[cfg(not(feature = "sync"))]
     fn should_collect(&self) -> bool {
         self.allocator.allocated_size() >= self.threshold.get()
     }
@@ -241,9 +262,11 @@ impl GcHeap {
 
 /// A link in the chain of `BigGcObject`s
 type BigObjectLink = Option<NonNull<BigGcObject<DynamicObj>>>;
-pub struct SimpleAlloc {
+/// The single-threaded implementation of an allocator
+#[cfg(not(feature = "sync"))]
+pub(crate) struct SimpleAlloc {
     // NOTE: We lazy init this...
-    collector_ptr: Cell<*mut RawSimpleCollector>,
+    collector_ptr: once_cell::unsync::OnceCell<Arc<RawSimpleCollector>>,
     allocated_size: Cell<usize>,
     small_arenas: SmallArenaList,
     big_object_link: Cell<BigObjectLink>,
@@ -252,10 +275,12 @@ pub struct SimpleAlloc {
     /// This flips every collection
     mark_inverted: Cell<bool>,
 }
+
+#[cfg(not(feature = "sync"))]
 impl SimpleAlloc {
-    fn new(collector_ptr: *mut RawSimpleCollector) -> SimpleAlloc {
+    fn new() -> SimpleAlloc {
         SimpleAlloc {
-            collector_ptr: Cell::new(collector_ptr),
+            collector_ptr: Default::default(),
             allocated_size: Cell::new(0),
             small_arenas: SmallArenaList::new(),
             big_object_link: Cell::new(None),
@@ -266,6 +291,75 @@ impl SimpleAlloc {
     fn allocated_size(&self) -> usize {
         self.allocated_size.get()
     }
+    #[inline]
+    fn add_allocated_size(&self, amount: usize) {
+        let old = self.allocated_size.get();
+        self.allocated_size.set(old + amount);
+    }
+    #[inline]
+    fn next_big_object(&self) -> BigObjectLink {
+        self.big_object_link.get()
+    }
+    #[inline]
+    fn append_big_object(&self, big_obj: Box<BigGcObject>) {
+        /*
+         * This actually isn't a risk since we're not atomic
+         * Just putting it here to clarify its relationship
+         * to the atomic CAS loop
+         */
+        debug_assert_eq!(self.next_big_object(), big_obj.prev);
+        self.big_object_link
+            .set(unsafe { NonNull::new_unchecked(Box::into_raw(obj)) };
+    }
+}
+
+/// The thread-safe implementation of an allocator
+///
+/// Most allocations should avoid locking.
+#[cfg(feature = "sync")]
+pub(crate) struct SimpleAlloc {
+    collector: once_cell::unsync::OnceCell<Arc<RawSimpleCollector>>,
+    small_arenas: SmallArenaList,
+    big_object_link: AtomicCell<BigObjectLink>,
+    mark_inverted: AtomicBool
+}
+#[cfg(feature = "sync")]
+impl SimpleAlloc {
+    fn new() -> SimpleAlloc {
+        SimpleAlloc {
+            collector_ptr: Default::default(),
+            allocated_size: AtomicUsize::new(0),
+            small_arenas: SmallArenaList::new(),
+            big_object_link: AtomicCell::new(None),
+            mark_inverted: AtomicBool::new(false)
+        }
+    }
+    #[inline]
+    fn allocated_size(&self) -> usize {
+        self.allocated_size.load(Ordering::SeqCst)
+    }
+    #[inline]
+    fn add_allocated_size(&self, amount: usize) {
+        self.allocated_size.fetch_add(amount, Ordering::SeqCst);
+    }
+    #[inline]
+    fn next_big_object(&self) -> BigObjectLink {
+        self.big_object_link.load()
+    }
+    #[inline]
+    fn append_big_object(&self, big_obj: Box<BigGcObject>) {
+        // Must use CAS loop since b
+        let mut expected_prev =
+        loop {
+            match self.big_object_link.
+        }
+        debug_assert_eq!(self.next_big_object(), big_obj.prev);
+        self.big_object_link
+            .set(unsafe { NonNull::new_unchecked(Box::into_raw(obj)) };
+    }
+}
+/// Code shared between single-threaded and multi-threaded implementations
+impl SimpleAlloc {
     #[inline]
     fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
         if let Some(arena) = self.small_arenas.find::<T>() {
@@ -278,10 +372,7 @@ impl SimpleAlloc {
                 });
                 let value_ptr = header.as_ref().value().cast::<T>();
                 value_ptr.write(value);
-                self.allocated_size.set(
-                    self.allocated_size.get()
-                        + small_object_size::<T>()
-                );
+                self.add_allocated_size(small_object_size::<T>());
                 Gc::from_raw(
                     NonNull::new_unchecked(self.collector_ptr.get()),
                     NonNull::new_unchecked(value_ptr),
@@ -310,12 +401,12 @@ impl SimpleAlloc {
             unsafe { self.big_object_link.set(Some(NonNull::new_unchecked(
                 Box::into_raw(BigGcObject::into_dynamic_box(object))
             ))); }
-            self.allocated_size.set(self.allocated_size() + size);
+            self.add_allocated_size(size);
         }
         gc
     }
     unsafe fn sweep<'a>(&self, _roots: &[*mut (dyn DynTrace + 'a)]) {
-        let mut expected_size = self.allocated_size.get();
+        let mut expected_size = self.allocated_size();
         let mut actual_size = 0;
         // Clear small arenas
         #[cfg(feature = "small-object-arenas")]
@@ -632,7 +723,10 @@ struct GcHeader {
      * If the value is small `(u32)`, we could reduce
      * the padding to a 3 bytes and fit everything in a word.
      */
-    raw_state: RawMarkState
+    #[cfg(not(feature = "sync"))]
+    raw_state: RawMarkState,
+    #[cfg(feature = "sync")] // Atomic stores needed for safety
+    raw_state: AtomicCell<RawMarkState>,
 }
 impl GcHeader {
     #[inline]
