@@ -17,6 +17,7 @@ use zerogc::{GcSystem, GcSafe, Trace, GcContext, GcVisitor, GcSimpleAlloc, GcRef
 use std::alloc::Layout;
 use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
+#[cfg(not(feature = "sync"))]
 use std::rc::Rc;
 use std::os::raw::c_void;
 use std::mem::{transmute, ManuallyDrop};
@@ -30,6 +31,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 #[cfg(feature = "sync")]
 use crossbeam::atomic::AtomicCell;
+#[cfg(feature = "sync")]
 use std::sync::Arc;
 
 #[cfg(feature = "small-object-arenas")]
@@ -171,23 +173,23 @@ impl<V: GcVisitor> GcVisit for V {
     default fn visit_gc<'gc, T: GcSafe + 'gc>(&mut self, _gc: &mut Gc<'gc, T>) {}
 }
 
+#[cfg(feature = "sync")]
+type CollectorRc = Arc<RawSimpleCollector>;
+#[cfg(not(feature = "sync"))]
+type CollectorRc = Rc<RawSimpleCollector>;
 
-pub struct SimpleCollector(Rc<RawSimpleCollector>);
+pub struct SimpleCollector(CollectorRc);
 impl SimpleCollector {
     pub fn create() -> Self {
-        let collector = Rc::new(RawSimpleCollector {
+        let mut collector = CollectorRc::new(RawSimpleCollector {
             shadow_stack: RefCell::new(ShadowStack(Vec::new())),
-            heap: GcHeap {
-                threshold: Cell::new(INITIAL_COLLECTION_THRESHOLD),
-                allocator: SimpleAlloc::new(
-                    std::ptr::null_mut() // This is initialized later
-                )
-            }
+            heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD)
         });
-        collector.heap.allocator.collector_ptr.set(
-            &*collector as *const RawSimpleCollector
-                as *mut RawSimpleCollector
-        );
+        let collector_ptr = &*collector
+            as *const _
+            as *mut RawSimpleCollector;
+        CollectorRc::get_mut(&mut collector).unwrap()
+            .heap.allocator.collector_ptr = collector_ptr;
         SimpleCollector(collector)
     }
     /// Make this collector into a context
@@ -241,6 +243,20 @@ struct GcHeap {
     allocator: SimpleAlloc
 }
 impl GcHeap {
+    #[cfg(feature = "sync")]
+    fn new(threshold: usize) -> GcHeap {
+        GcHeap {
+            threshold: AtomicUsize::new(threshold),
+            allocator: SimpleAlloc::new()
+        }
+    }
+    #[cfg(not(feature = "sync"))]
+    fn new(threshold: usize) -> GcHeap {
+        GcHeap {
+            threshold: Cell::new(threshold),
+            allocator: SimpleAlloc::new()
+        }
+    }
     #[inline]
     #[cfg(feature = "sync")]
     fn should_collect(&self) -> bool {
@@ -261,15 +277,95 @@ impl GcHeap {
 }
 
 /// A link in the chain of `BigGcObject`s
-type BigObjectLink = Option<NonNull<BigGcObject<DynamicObj>>>;
+type BigObjectLinkItem = Option<NonNull<BigGcObject<DynamicObj>>>;
+/// A mutable cell for a BigObjectLink
+///
+/// This is not thread-safe
+#[cfg(not(feature = "sync"))]
+#[derive(Default)]
+struct BigObjectLink(Cell<BigObjectLinkItem>);
+#[cfg(not(feature = "sync"))]
+impl BigObjectLink {
+    #[inline]
+    pub fn new(item: BigObjectLinkItem) -> Self {
+        BigObjectLink(Cell::new(item))
+    }
+    #[inline]
+    fn item(&self) -> BigObjectLinkItem {
+        self.0.get()
+    }
+    #[inline]
+    unsafe fn set_item_forced(&self, val: BigObjectLinkItem) {
+        self.0.set(val)
+    }
+    #[inline]
+    fn append_item(&self, big_obj: Box<BigGcObject>) {
+        /*
+         * This actually isn't a risk since we're not atomic
+         * Just putting it here to clarify its relationship
+         * to the atomic CAS loop
+         */
+        debug_assert_eq!(self.0.get(), big_obj.prev.item());
+        self.0.set(unsafe {
+            Some(NonNull::new_unchecked(Box::into_raw(big_obj)))
+        });
+    }
+}
+/// An atomic cell for a BigObjectLink
+///
+/// This is thread-safe
+#[cfg(feature = "sync")]
+#[derive(Default)]
+struct BigObjectLink(AtomicCell<BigObjectLinkItem>);
+#[cfg(feature = "sync")]
+impl BigObjectLink {
+    #[inline]
+    pub fn new(item: BigObjectLinkItem) -> Self {
+        BigObjectLink(AtomicCell::new(item))
+    }
+    #[inline]
+    fn item(&self) -> BigObjectLink {
+        self.0.load()
+    }
+    #[inline]
+    unsafe fn set_item_forced(&self, val: BigObjectLinkItem) {
+        self.0.store(val)
+    }
+    #[inline]
+    fn append_big_object(&self, big_obj: Box<BigGcObject>) {
+        // Must use CAS loop in case another thread updates
+        let mut expected_prev = big_obj.prev.item();
+        let mut updated_item = unsafe {
+            NonNull::new_unchecked(Box::into_raw(obj))
+        };
+        loop {
+            match self.0.compare_exchange(expected_prev, updated_item) {
+                Ok(_) => break,
+                Err(actual_prev) => {
+                    unsafe {
+                        /*
+                         * We have exclusive access to `updated_item`
+                         * here so we don't need to worry about CAS.
+                         * We just need to update its `prev`
+                         * link to point to the new value.
+                         */
+                        updated_item.as_mut().prev.0.store(actual_prev);
+                        expected_prev = actual_prev;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The single-threaded implementation of an allocator
 #[cfg(not(feature = "sync"))]
 pub(crate) struct SimpleAlloc {
     // NOTE: We lazy init this...
-    collector_ptr: once_cell::unsync::OnceCell<Arc<RawSimpleCollector>>,
+    collector_ptr: *mut RawSimpleCollector,
     allocated_size: Cell<usize>,
     small_arenas: SmallArenaList,
-    big_object_link: Cell<BigObjectLink>,
+    big_object_link: BigObjectLink,
     /// Whether the meaning of the mark bit is currently inverted.
     ///
     /// This flips every collection
@@ -280,10 +376,10 @@ pub(crate) struct SimpleAlloc {
 impl SimpleAlloc {
     fn new() -> SimpleAlloc {
         SimpleAlloc {
-            collector_ptr: Default::default(),
+            collector_ptr: std::ptr::null_mut(),
             allocated_size: Cell::new(0),
             small_arenas: SmallArenaList::new(),
-            big_object_link: Cell::new(None),
+            big_object_link: Default::default(),
             mark_inverted: Cell::new(false)
         }
     }
@@ -297,19 +393,16 @@ impl SimpleAlloc {
         self.allocated_size.set(old + amount);
     }
     #[inline]
-    fn next_big_object(&self) -> BigObjectLink {
-        self.big_object_link.get()
+    fn set_allocated_size(&self, amount: usize) {
+        self.allocated_size.set(amount)
     }
     #[inline]
-    fn append_big_object(&self, big_obj: Box<BigGcObject>) {
-        /*
-         * This actually isn't a risk since we're not atomic
-         * Just putting it here to clarify its relationship
-         * to the atomic CAS loop
-         */
-        debug_assert_eq!(self.next_big_object(), big_obj.prev);
-        self.big_object_link
-            .set(unsafe { NonNull::new_unchecked(Box::into_raw(obj)) };
+    fn mark_inverted(&self) -> bool {
+        self.mark_inverted.get()
+    }
+    #[inline]
+    fn set_mark_inverted(&self, b: bool) {
+        self.mark_inverted.set(b)
     }
 }
 
@@ -318,16 +411,16 @@ impl SimpleAlloc {
 /// Most allocations should avoid locking.
 #[cfg(feature = "sync")]
 pub(crate) struct SimpleAlloc {
-    collector: once_cell::unsync::OnceCell<Arc<RawSimpleCollector>>,
+    collector_ptr: *mut RawSimpleCollector,
     small_arenas: SmallArenaList,
-    big_object_link: AtomicCell<BigObjectLink>,
+    big_object_link: BigObjectLink,
     mark_inverted: AtomicBool
 }
 #[cfg(feature = "sync")]
 impl SimpleAlloc {
     fn new() -> SimpleAlloc {
         SimpleAlloc {
-            collector_ptr: Default::default(),
+            collector_ptr: std::ptr::null_mut(),
             allocated_size: AtomicUsize::new(0),
             small_arenas: SmallArenaList::new(),
             big_object_link: AtomicCell::new(None),
@@ -336,26 +429,23 @@ impl SimpleAlloc {
     }
     #[inline]
     fn allocated_size(&self) -> usize {
-        self.allocated_size.load(Ordering::SeqCst)
+        self.allocated_size.load(Ordering::Acquire)
     }
     #[inline]
     fn add_allocated_size(&self, amount: usize) {
-        self.allocated_size.fetch_add(amount, Ordering::SeqCst);
+        self.allocated_size.fetch_add(amount, Ordering::AcqRel);
     }
     #[inline]
-    fn next_big_object(&self) -> BigObjectLink {
-        self.big_object_link.load()
+    fn set_allocated_size(&self, amount: usize) {
+        self.allocated_size.store(amount, Ordering::Release)
     }
     #[inline]
-    fn append_big_object(&self, big_obj: Box<BigGcObject>) {
-        // Must use CAS loop since b
-        let mut expected_prev =
-        loop {
-            match self.big_object_link.
-        }
-        debug_assert_eq!(self.next_big_object(), big_obj.prev);
-        self.big_object_link
-            .set(unsafe { NonNull::new_unchecked(Box::into_raw(obj)) };
+    fn mark_inverted(&self) -> bool {
+        self.mark_inverted.load(Ordering::Acquire)
+    }
+    #[inline]
+    fn set_mark_inverted(&self, b: bool) {
+        self.mark_inverted.store(b, Ordering::Release)
     }
 }
 /// Code shared between single-threaded and multi-threaded implementations
@@ -365,16 +455,15 @@ impl SimpleAlloc {
         if let Some(arena) = self.small_arenas.find::<T>() {
             let header = arena.alloc();
             unsafe {
-                header.as_ptr().write(GcHeader {
-                    type_info: T::STATIC_TYPE,
-                    raw_state: MarkState::White
-                        .to_raw(self.mark_inverted.get())
-                });
+                header.as_ptr().write(GcHeader::new(
+                    T::STATIC_TYPE,
+                    MarkState::White.to_raw(self.mark_inverted())
+                ));
                 let value_ptr = header.as_ref().value().cast::<T>();
                 value_ptr.write(value);
                 self.add_allocated_size(small_object_size::<T>());
                 Gc::from_raw(
-                    NonNull::new_unchecked(self.collector_ptr.get()),
+                    NonNull::new_unchecked(self.collector_ptr),
                     NonNull::new_unchecked(value_ptr),
                 )
             }
@@ -384,23 +473,22 @@ impl SimpleAlloc {
     }
     fn alloc_big<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
         let mut object = Box::new(BigGcObject {
-            header: GcHeader {
-                type_info: T::STATIC_TYPE,
-                raw_state: MarkState::White
-                    .to_raw(self.mark_inverted.get())
-            },
+            header: GcHeader::new(
+                T::STATIC_TYPE,
+                MarkState::White.to_raw(self.mark_inverted())
+            ),
             static_value: ManuallyDrop::new(value),
-            prev: self.big_object_link.get(),
+            prev: BigObjectLink::new(self.big_object_link.item()),
         });
         let gc = unsafe { Gc::from_raw(
-            NonNull::new_unchecked(self.collector_ptr.get()),
+            NonNull::new_unchecked(self.collector_ptr),
             NonNull::new_unchecked(&mut *object.static_value),
         ) };
         {
             let size = std::mem::size_of::<BigGcObject<T>>();
-            unsafe { self.big_object_link.set(Some(NonNull::new_unchecked(
-                Box::into_raw(BigGcObject::into_dynamic_box(object))
-            ))); }
+            self.big_object_link.append_item(unsafe {
+                BigGcObject::into_dynamic_box(object)
+            });
             self.add_allocated_size(size);
         }
         gc
@@ -419,7 +507,7 @@ impl SimpleAlloc {
                      * of allocated objects.
                      */
                 } else {
-                    match (*slot).header.raw_state.resolve(self.mark_inverted.get()) {
+                    match (*slot).header.raw_state().resolve(self.mark_inverted.get()) {
                         MarkState::White => {
                             // Free the object, dropping if necessary
                             expected_size -= (*slot).header.type_info.total_size();
@@ -447,10 +535,12 @@ impl SimpleAlloc {
         }
         // Clear large objects
         let mut last_linked = None;
-        while let Some(big_link) = self.big_object_link.get() {
+        let mut link_item = self.big_object_link.item();
+        let was_mark_inverted = self.mark_inverted();
+        while let Some(big_link) = link_item {
             let obj = &mut *big_link.as_ptr();
-            self.big_object_link.set(obj.prev);
-            match obj.header.raw_state.resolve(self.mark_inverted.get()) {
+            link_item = obj.prev.item();
+            match obj.header.raw_state().resolve(was_mark_inverted) {
                 MarkState::White => {
                     // Free the object
                     expected_size -= obj.header.type_info.total_size();
@@ -464,7 +554,7 @@ impl SimpleAlloc {
                      * by inverting mark the meaning of the mark bits.
                      */
                     actual_size += obj.header.type_info.total_size();
-                    obj.prev = last_linked;
+                    obj.prev.set_item_forced(last_linked);
                     last_linked = Some(NonNull::from(&mut *obj));
                 }
             }
@@ -474,10 +564,10 @@ impl SimpleAlloc {
          * implicitly resetting all Black (reachable) objects
          * to White.
          */
-        self.mark_inverted.set(!self.mark_inverted.get());
-        self.big_object_link.set(last_linked);
+        self.set_mark_inverted(!was_mark_inverted);
+        self.big_object_link.set_item_forced(last_linked);
         assert_eq!(expected_size, actual_size);
-        self.allocated_size.set(actual_size);
+        self.set_allocated_size(actual_size);
     }
 }
 
@@ -529,23 +619,25 @@ impl<'a> CollectionTask<'a> {
             // Dynamically dispatched
             unsafe { (*root).trace(&mut visitor); }
         }
+        let was_inverted_mark = self.heap.allocator.mark_inverted();
+
         #[cfg(not(feature = "implicit-grey-stack"))] unsafe {
             while let Some(obj) = self.grey_stack.pop() {
-                let inverted_mark = self.heap.allocator.mark_inverted.get();
-                debug_assert_eq!((*obj).raw_state.resolve(inverted_mark), MarkState::Grey);
+                debug_assert_eq!(
+                    (*obj).raw_state().resolve(was_inverted_mark),
+                    MarkState::Grey
+                );
                 let mut visitor = MarkVisitor {
                     expected_collector: self.expected_collector,
                     grey_stack: &mut self.grey_stack,
-                    inverted_mark
+                    inverted_mark: was_inverted_mark
                 };
                 ((*obj).type_info.trace_func)(
                     &mut *(*obj).value(),
                     &mut visitor
                 );
                 // Mark the object black now it's innards have been traced
-                (*obj).raw_state = MarkState::Black.to_raw(
-                    self.heap.allocator.mark_inverted.get()
-                );
+                (*obj).update_raw_state(MarkState::Black.to_raw(was_inverted_mark));
             }
         }
         // Sweep
@@ -576,7 +668,7 @@ impl GcVisit for MarkVisitor<'_> {
          */
         assert_eq!(gc.collector_ptr.as_ptr(), self.expected_collector);
         let obj = unsafe { &mut *GcHeader::from_value_ptr(gc.as_raw_ptr()) };
-        match obj.raw_state.resolve(self.inverted_mark) {
+        match obj.raw_state().resolve(self.inverted_mark) {
             MarkState::White => {
                 if !T::NEEDS_TRACE {
                     /*
@@ -584,13 +676,13 @@ impl GcVisit for MarkVisitor<'_> {
                      * It has no internals that need to be traced.
                      * We can directly move it directly to the black set
                      */
-                    obj.raw_state = MarkState::Black.to_raw(self.inverted_mark);
+                    obj.update_raw_state(MarkState::Black.to_raw(self.inverted_mark));
                 } else {
                     /*
                      * We need to mark this object grey and push it onto the grey stack.
                      * It will be processed later
                      */
-                    (*obj).raw_state = MarkState::Grey.to_raw(self.inverted_mark);
+                    (*obj).update_raw_state(MarkState::Grey.to_raw(self.inverted_mark));
                     #[cfg(not(feature = "implicit-grey-stack"))] {
                         self.grey_stack.push(obj as *mut GcHeader);
                     }
@@ -609,7 +701,7 @@ impl GcVisit for MarkVisitor<'_> {
                          * Mark the object black now it's innards have been traced
                          * NOTE: We do **not** do this with an implicit stack.
                          */
-                        (*obj).state = MarkState::Black;
+                        (*obj).update_raw_state(MarkState::Black);
                     }
                 }
             },
@@ -626,11 +718,8 @@ impl GcVisit for MarkVisitor<'_> {
     }
 }
 
-/// A simple collector can only be used from a single thread
-impl !Send for RawSimpleCollector {}
-
 pub struct SimpleCollectorContext {
-    collector: Rc<RawSimpleCollector>
+    collector: CollectorRc
 }
 unsafe impl GcContext for SimpleCollectorContext {
     type System = SimpleCollector;
@@ -667,6 +756,10 @@ unsafe impl<'gc, T: GcSafe + 'gc> GcSimpleAlloc<'gc, T> for &'gc SimpleCollector
         self.collector.heap.allocator.alloc(value)
     }
 }
+/// A collector context can only be used on a single thread
+///
+/// This is true even if were operating in thread-safe mode
+impl !Send for SimpleCollectorContext {}
 
 struct GcType {
     value_size: usize,
@@ -724,11 +817,21 @@ struct GcHeader {
      * the padding to a 3 bytes and fit everything in a word.
      */
     #[cfg(not(feature = "sync"))]
-    raw_state: RawMarkState,
+    raw_state: Cell<RawMarkState>,
     #[cfg(feature = "sync")] // Atomic stores needed for safety
     raw_state: AtomicCell<RawMarkState>,
 }
 impl GcHeader {
+    #[cfg(not(feature = "sync"))]
+    #[inline]
+    pub fn new(type_info: &'static GcType, raw_state: RawMarkState) -> Self {
+        GcHeader { type_info, raw_state: Cell::new(raw_state) }
+    }
+    #[cfg(feature = "sync")]
+    #[inline]
+    pub fn new(type_info: &'static GcType, raw_state: RawMarkState) -> Self {
+        GcHeader { type_info, raw_state: AtomicCell::new(raw_state) }
+    }
     #[inline]
     pub fn value(&self) -> *mut c_void {
         unsafe {
@@ -741,6 +844,28 @@ impl GcHeader {
     #[inline]
     pub unsafe fn from_value_ptr<T: GcSafe>(ptr: *mut T) -> *mut GcHeader {
         (ptr as *mut u8).sub(T::STATIC_TYPE.value_offset) as *mut GcHeader
+    }
+}
+#[cfg(not(feature = "sync"))]
+impl GcHeader {
+    #[inline]
+    fn raw_state(&self) -> RawMarkState {
+        self.raw_state.get()
+    }
+    #[inline]
+    fn update_raw_state(&self, raw_state: RawMarkState) {
+        self.raw_state.set(raw_state);
+    }
+}
+#[cfg(feature = "sync")]
+impl GcHeader {
+    #[inline]
+    fn raw_state(&self) -> RawMarkState {
+        self.raw_state.load()
+    }
+    #[inline]
+    fn update_raw_state(&self, raw_state: RawMarkState) {
+        self.raw_state.store(raw_state);
     }
 }
 
