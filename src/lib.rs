@@ -131,6 +131,11 @@ macro_rules! safepoint {
     ($collector:ident, $value:expr) => {unsafe {
         use $crate::{GcContext};
         // TODO: What happens if we panic during a collection
+        /*
+         * Some collectors support multiple running instances
+         * with different ids, handing out different GC pointers.
+         * TODO: Should we be checking somehow that the ids match?
+         */
         let mut erased = $collector.rebrand_static($value);
         $collector.basic_safepoint(&mut &mut erased);
         $collector.rebrand_self(erased)
@@ -146,7 +151,27 @@ macro_rules! safepoint {
 #[macro_export]
 macro_rules! freeze_safepoint {
     ($collector:ident, $value:expr) => {unsafe {
-       todo!() // TODO: Finish
+        use $crate::{GcContext};
+        // See also `safepoint!` macro
+        let mut erased = $collector.frozen_safepoint($value);
+        let frozen = $collector.basic_safepoint(&mut &mut erased);
+        // NOTE: This is branded to `frozen` now
+        let new_root = frozen.rebrand_self(erased);
+        // TODO: Undefined behavior if we don't unfreeze -_-
+        (frozen, new_root)
+    }};
+}
+
+/// Unfreeze the context, allowing it to be used again
+#[macro_export]
+macro_rules! unfreeze {
+    ($frozen:ident, $value:expr) => {unsafe {
+        use $crate::{GcContext, FrozenContext};
+        let erased = frozen.rebrand_static($value);
+        let context = FrozenContext::unfreeze($frozen);
+        let new_value = context.rebrand_self(erased);
+        // See also `safepoint!` macro
+        ($context, new_value)
     }};
 }
 
@@ -259,6 +284,7 @@ pub unsafe trait GcSimpleAlloc<'gc, T: GcSafe + 'gc>: 'gc {
 /// ## Safety
 /// Don't use this directly!!!
 #[doc(hidden)]
+#[must_use]
 pub struct FrozenContext<'a, C: GcContext>(&'a mut C);
 impl<'a, C: GcContext> FrozenContext<'a, C> {
     #[inline]
@@ -276,7 +302,13 @@ impl<'a, C: GcContext> FrozenContext<'a, C> {
     /// This should only be used internally
     #[inline]
     pub unsafe fn into_inner(ctx: Self) -> &'a mut C {
-        ctx.0
+        /*
+         * This is needed because we have a dummy destructor
+         * TODO: Remove once we resolve issues with use after free
+         */
+        let taken = std::ptr::read(&ctx.0);
+        mem::forget(ctx); // Don't panic (42)
+        taken
     }
     /// Unfreezes the context, dispatching to `GcContext::unfreeze`.
     ///
@@ -290,6 +322,27 @@ impl<'a, C: GcContext> FrozenContext<'a, C> {
     #[inline]
     pub unsafe fn unfreeze(ctx: Self) {
         C::unfreeze(ctx)
+    }
+    #[inline(always)]
+    #[doc(hidden)]
+    /// Copied from GcContext::rebrand_self
+    pub unsafe fn rebrand_self<T: GcBrand<'a, C::System>>(&self, value: T) -> T::Branded {
+        let branded = mem::transmute_copy(&value);
+        mem::forget(value);
+        branded
+    }
+    /// Likewise copied from GcContext::rebrand_static
+    #[inline(always)]
+    #[doc(hidden)]
+    pub unsafe fn rebrand_static<T: GcBrand<'static, C::System>>(&self, value: T) -> T::Branded {
+        let branded = mem::transmute_copy(&value);
+        mem::forget(value);
+        branded
+    }
+}
+impl<'a, C: GcContext> Drop for FrozenContext<'a, C> {
+    fn drop(&mut self) {
+        todo!("Undefined behavior to forget to unfreeze")
     }
 }
 

@@ -35,6 +35,7 @@ use crossbeam::atomic::AtomicCell;
 use std::sync::{Arc};
 #[cfg(feature = "sync")]
 use parking_lot::{Mutex, Condvar};
+use std::collections::HashSet;
 
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
@@ -191,16 +192,82 @@ type InternalRc<T> = Arc<T>;
 #[cfg(not(feature = "sync"))]
 type InternalRc<T> = Rc<T>;
 
-/// The roots of a particular collection
-struct RootSet {
+/// Persistent roots of the collector,
+/// that are known to be valid longer than the lifetime
+/// of a single call to `safepoint!`
+///
+/// These are not nessicarrily eternal.
+#[cfg(not(feature = "sync"))]
+struct PersistentRoots {
     /// Pointers to the currently used shadow stacks
+    ///
+    /// I guess we could use a faster hash function but
+    /// I don't really think freezing collectors is performance
+    /// critical.
+    frozen_shadow_stacks: RefCell<HashSet<NonNull<ShadowStack>>>
+}
+#[cfg(not(feature = "sync"))]
+impl PersistentRoots {
+    fn new() -> Self {
+        PersistentRoots {
+            frozen_shadow_stacks: RefCell::new(HashSet::new())
+        }
+    }
+    unsafe fn add_frozen_stack(&self, ptr: NonNull<ShadowStack>) {
+        assert!(self.frozen_shadow_stacks.borrow_mut().insert(ptr));
+    }
+    unsafe fn remove_frozen_stack(&self, ptr: NonNull<ShadowStack>) {
+        assert!(self.frozen_shadow_stacks.borrow_mut().remove(&ptr));
+    }
+    fn frozen_stacks(&self) -> Vec<NonNull<ShadowStack>> {
+        self.frozen_shadow_stacks.borrow().iter().cloned().collect()
+    }
+    #[inline]
+    fn num_frozen_stacks(&self) -> usize {
+        self.frozen_shadow_stacks.borrow().len()
+    }
+}
+#[cfg(feature = "sync")]
+struct PersistentRoots {
+    frozen_shadow_stacks: Mutex<HashSet<NonNull<ShadowStack>>>
+}
+#[cfg(feature = "sync")]
+impl PersistentRoots {
+    fn new() -> Self {
+        PersistentRoots {
+            frozen_shadow_stacks: RefCell::new(HashSet::new())
+        }
+    }
+    unsafe fn add_frozen_stack(&self, ptr: NonNull<ShadowStack>) {
+        assert!(self.frozen_shadow_stacks.lock().insert(ptr));
+    }
+    unsafe fn remove_frozen_stack(&self, ptr: NonNull<ShadowStack>) {
+        assert!(self.frozen_shadow_stacks.lock().remove(&ptr));
+    }
+    fn frozen_stacks(&self) -> Vec<NonNull<ShadowStack>> {
+        self.frozen_shadow_stacks.lock().iter().cloned().collect()
+    }
+}
+/// We're careful with our pointers
+unsafe impl Send for PersistentRoots {}
+#[cfg(feature = "sync")] // This is only safe when we use a mutex
+unsafe impl Sync for PersistentRoots {}
+
+/// The state of a collector waiting for all its contexts
+/// to reach a safepoint
+struct PendingCollection {
+    /// The shadow stacks for all of the collectors that
+    /// are currently waiting.
+    ///
+    /// This does not contain any of the frozen context stacks.
+    /// Those are handled by [PersistentRoots].
     shadow_stacks: Vec<NonNull<ShadowStack>>
 }
-/// We're careful with the pointers to the shadow stacks
-unsafe impl Send for RootSet {}
-impl RootSet {
-    fn new() -> RootSet {
-        RootSet { shadow_stacks: Vec::new() }
+impl PendingCollection {
+    fn new() -> Self {
+        PendingCollection {
+            shadow_stacks: Vec::new()
+        }
     }
     #[inline]
     unsafe fn iter(&self) -> impl Iterator<Item=*mut dyn DynTrace> + '_ {
@@ -631,15 +698,14 @@ enum PendingState {
 /// Keeps track of a pending collection (if any)
 #[cfg(not(feature = "sync"))]
 struct PendingCollectionTracker {
+    persistent_roots: PersistentRoots,
     state: Cell<PendingState>,
-    /// The roots of the current collection
+    /// The currently pending collection (if any)
     ///
-    /// Once the size of the root set of the pending collection
+    /// Once the number of the known roots in the pending collection
     /// is equal to the number of `total_contexts`,
     /// collection can safely begin.
-    ///
-    /// This is None if no collection is pending
-    roots: RefCell<Option<RootSet>>,
+    pending: RefCell<Option<PendingCollection>>,
     /// The number of active contexts
     ///
     /// Leaking a context is "safe" in the sense
@@ -651,9 +717,10 @@ struct PendingCollectionTracker {
 impl PendingCollectionTracker {
     fn new() -> PendingCollectionTracker {
         PendingCollectionTracker {
+            persistent_roots: PersistentRoots::new(),
             state: Cell::new(PendingState::NotCollecting),
             total_contexts: Cell::new(0),
-            roots: RefCell::new(None)
+            pending: RefCell::new(None)
         }
     }
     #[inline]
@@ -677,19 +744,19 @@ impl PendingCollectionTracker {
     ///
     /// Undefined behavior if the context roots are invalid in any way.
     unsafe fn push_pending_context(&self, shadow_stack: &ShadowStack, should_begin: bool) -> PendingStatus {
-        let mut roots = self.roots.borrow_mut();
+        let mut roots = self.pending.borrow_mut();
         if should_begin {
             match self.state.get() {
                 PendingState::InProgress => unreachable!(),
                 PendingState::NotCollecting => {
                     self.state.set(PendingState::Waiting);
                     assert!(roots.is_none());
-                    *roots = Some(RootSet::new());
+                    *roots = Some(PendingCollection::new());
                 },
                 PendingState::Waiting => {}, // Already waiting
             }
         }
-        let known_shadow_stacks: usize = match *roots {
+        let temp_shadow_stacks: usize = match *roots {
             None => {
                 assert_eq!(self.state.get(), PendingState::NotCollecting);
                 assert!(!should_begin);
@@ -702,6 +769,9 @@ impl PendingCollectionTracker {
                 roots.shadow_stacks.len()
             }
         };
+        // Add in shadow stacks from frozen collectors
+        let known_shadow_stacks = temp_shadow_stacks
+            + self.persistent_roots.num_frozen_stacks();
         use std::cmp::Ordering;
         match known_shadow_stacks.cmp(&self.total_contexts.get()) {
             Ordering::Less => {
@@ -728,7 +798,10 @@ impl PendingCollectionTracker {
                     self.state.replace(PendingState::InProgress),
                     PendingState::Waiting,
                 );
-                PendingStatus::ShouldCollect(roots.take().unwrap())
+                PendingStatus::ShouldCollect {
+                    pending: roots.take().unwrap(),
+                    frozen_stacks: self.persistent_roots.frozen_stacks()
+                }
             },
             Ordering::Greater => {
                 /*
@@ -748,19 +821,23 @@ impl PendingCollectionTracker {
             self.state.replace(PendingState::NotCollecting),
             PendingState::InProgress
         );
-        assert!(self.roots.borrow().is_none());
+        assert!(self.pending.borrow().is_none());
     }
 }
 enum PendingStatus {
     AlreadyFinished,
-    ShouldCollect(RootSet),
+    ShouldCollect {
+        pending: PendingCollection,
+        frozen_stacks: Vec<NonNull<ShadowStack>>
+    },
     NeedToWait
 }
 
 #[cfg(feature = "sync")]
 struct PendingCollectionTracker {
+    persistent_roots: PersistentRoots,
     state: AtomicCell<PendingState>,
-    roots: Mutex<Option<RootSet>>,
+    pending: Mutex<Option<PendingCollection>>,
     wait: Condvar,
     total_contexts: AtomicUsize,
 }
@@ -768,8 +845,9 @@ struct PendingCollectionTracker {
 impl PendingCollectionTracker {
     fn new() -> PendingCollectionTracker {
         PendingCollectionTracker {
+            persistent_roots: PersistentRoots::new(),
             state: AtomicCell::new(PendingState::NotCollecting),
-            roots: Mutex::new(None),
+            pending: Mutex::new(None),
             wait: Condvar::new(),
             total_contexts: AtomicUsize::new(0)
         }
@@ -814,7 +892,7 @@ impl PendingCollectionTracker {
                 PendingState::InProgress => unreachable!(),
                 PendingState::NotCollecting => {
                     assert!(roots.is_none());
-                    *roots = Some(RootSet::new());
+                    *roots = Some(PendingCollection::new());
                 },
                 PendingState::Waiting => {}, // We were already waiting
             }
@@ -924,11 +1002,16 @@ impl RawSimpleCollector {
     }
     #[cold]
     #[inline(never)]
-    unsafe fn perform_raw_collection(&self, roots: RootSet) {
+    unsafe fn perform_raw_collection(
+        &self, pending: PendingCollection,
+        frozen_stacks: &[NonNull<ShadowStack>]
+    ) {
+        let mut roots: Vec<*mut dyn DynTrace> = pending.iter().collect();
+        roots.extend(frozen_stacks.iter()
+            .flat_map(|stack| (*stack.as_ptr()).0.iter()));
         let mut task = CollectionTask {
             expected_collector: self as *const Self as *mut Self,
-            roots,
-            heap: &self.heap,
+            roots, heap: &self.heap,
             grey_stack: if cfg!(feature = "implicit-grey-stack") {
                 Vec::new()
             } else {
@@ -941,7 +1024,7 @@ impl RawSimpleCollector {
 }
 struct CollectionTask<'a> {
     expected_collector: *mut RawSimpleCollector,
-    roots: RootSet,
+    roots: Vec<*mut dyn DynTrace>,
     heap: &'a GcHeap,
     #[cfg_attr(feature = "implicit-grey-stack", allow(dead_code))]
     grey_stack: Vec<*mut GcHeader>
@@ -949,7 +1032,7 @@ struct CollectionTask<'a> {
 impl<'a> CollectionTask<'a> {
     fn run(&mut self) {
         // Mark
-        for root in unsafe { self.roots.iter() } {
+        for &root in &self.roots {
             let mut visitor = MarkVisitor {
                 expected_collector: self.expected_collector,
                 grey_stack: &mut self.grey_stack,
@@ -1072,8 +1155,8 @@ impl RawContext {
     unsafe fn maybe_collect(&self) {
         let shadow_stack = self.shadow_stack.borrow();
         match self.collector.pending.push_pending_context(&*shadow_stack, true) {
-            PendingStatus::ShouldCollect(roots) => {
-                self.collector.perform_raw_collection(roots)
+            PendingStatus::ShouldCollect { pending, frozen_stacks } => {
+                self.collector.perform_raw_collection(pending, &frozen_stacks)
             },
             PendingStatus::NeedToWait => {
                 self.collector.pending.await_collection();
@@ -1084,6 +1167,9 @@ impl RawContext {
 }
 impl Drop for RawContext {
     fn drop(&mut self) {
+        if self.frozen_ptr.get().is_some() {
+            todo!("Undefined behavior to leak/drop frozen collector")
+        }
         unsafe { self.collector.pending.free_context() }
     }
 }
@@ -1102,22 +1188,31 @@ unsafe impl GcContext for SimpleCollectorContext {
         );
     }
 
-    #[inline]
     unsafe fn frozen_safepoint<T: Trace>(&mut self, value: &mut &mut T)
-        -> ::zerogc::FrozenContext<'_, Self> {
+        -> FrozenContext<'_, Self> {
         assert!(self.0.frozen_ptr.get().is_none());
         let dyn_ptr = self.0.shadow_stack.borrow_mut().push(value);
         if self.0.collector.should_collect() {
             self.0.maybe_collect();
         }
         self.0.frozen_ptr.set(Some(dyn_ptr));
-        todo!("Persistently add to root set")
+        /*
+         * The guard (FrozenContext) ensures that we wont be mutated.
+         * This is still extremely unsafe since we're assuming the pointer
+         * will remain valid.
+         * TODO: This is use after free if the user **doesn't** call unfreeze
+         * We should probably fix that.....
+         */
+        self.0.collector.pending.persistent_roots
+            .add_frozen_stack(NonNull::from(&*self.0.shadow_stack.borrow()));
+        FrozenContext::new(self)
     }
 
-    #[inline]
     unsafe fn unfreeze(frozen: FrozenContext<Self>) {
         let ctx = FrozenContext::into_inner(frozen);
         let dyn_ptr = ctx.0.frozen_ptr.replace(None).unwrap();
+        ctx.0.collector.pending.persistent_roots
+            .remove_frozen_stack(NonNull::from(&*ctx.0.shadow_stack.borrow()));
         assert_eq!(
             ctx.0.shadow_stack.borrow_mut().pop(),
             Some(dyn_ptr)
