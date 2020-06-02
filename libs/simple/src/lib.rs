@@ -13,7 +13,7 @@
     new_uninit, // Until Rust has const generics, this is how we init arrays..
     specialization, // Used for specialization (effectively required by GcRef)
 )]
-use zerogc::{GcSystem, GcSafe, Trace, GcContext, GcVisitor, GcSimpleAlloc, GcRef, GcBrand, GcDirectBarrier};
+use zerogc::{GcSystem, GcSafe, Trace, GcContext, GcVisitor, GcSimpleAlloc, GcRef, GcBrand, GcDirectBarrier, FrozenContext};
 use std::alloc::Layout;
 use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
@@ -234,7 +234,8 @@ impl SimpleCollector {
         ));
         unsafe { self.0.pending.add_context(); }
         SimpleCollectorContext(InternalRc::new(RawContext {
-            shadow_stack, collector: self.0.clone()
+            shadow_stack, collector: self.0.clone(),
+            frozen_ptr: Cell::new(None)
         }))
     }
 }
@@ -631,7 +632,7 @@ enum PendingState {
 #[cfg(not(feature = "sync"))]
 struct PendingCollectionTracker {
     state: Cell<PendingState>,
-    /// The roots of the
+    /// The roots of the current collection
     ///
     /// Once the size of the root set of the pending collection
     /// is equal to the number of `total_contexts`,
@@ -669,28 +670,29 @@ impl PendingCollectionTracker {
         assert_ne!(old, 0);
         self.total_contexts.set(old - 1);
     }
-    unsafe fn try_begin_collection(&self) {
-        match self.state.get() {
-            PendingState::InProgress => unreachable!(),
-            PendingState::NotCollecting => {
-                self.state.set(PendingState::Waiting);
-                let mut roots = self.roots.borrow_mut();
-                assert!(roots.is_none());
-                *roots = Some(RootSet::new());
-            },
-            PendingState::Waiting => return, // Already waiting
-        }
-    }
     /// Push a context that's pending collection
     ///
-    /// The collection should've already begun
+    /// If `should_collect == true`, this will implicitly begin a collection
+    /// if we're not already collecting.
     ///
     /// Undefined behavior if the context roots are invalid in any way.
-    unsafe fn push_pending_context(&self, shadow_stack: &ShadowStack) -> PendingStatus {
+    unsafe fn push_pending_context(&self, shadow_stack: &ShadowStack, should_begin: bool) -> PendingStatus {
         let mut roots = self.roots.borrow_mut();
+        if should_begin {
+            match self.state.get() {
+                PendingState::InProgress => unreachable!(),
+                PendingState::NotCollecting => {
+                    self.state.set(PendingState::Waiting);
+                    assert!(roots.is_none());
+                    *roots = Some(RootSet::new());
+                },
+                PendingState::Waiting => {}, // Already waiting
+            }
+        }
         let known_shadow_stacks: usize = match *roots {
             None => {
                 assert_eq!(self.state.get(), PendingState::NotCollecting);
+                assert!(!should_begin);
                 // We didn't have anything pending
                 return PendingStatus::AlreadyFinished
             },
@@ -801,28 +803,28 @@ impl PendingCollectionTracker {
             }
         }
     }
-    unsafe fn try_begin_collection(&self) {
-        let roots = self.roots.lock();
-        match self.state.compare_and_swap(
-            PendingState::NotCollecting,
-            PendingState::Waiting
-        ) {
-            PendingState::InProgress => unreachable!(),
-            PendingState::NotCollecting => {
-                assert!(roots.is_none());
-                *roots = Some(RootSet::new());
-            },
-            PendingState::Waiting => return, // We were already waiting
-        }
-    }
-    unsafe fn push_pending_context(&self, shadow_stack: &ShadowStack) -> PendingStatus {
+    unsafe fn push_pending_context(&self, shadow_stack: &ShadowStack, should_begin: bool) -> PendingStatus {
         // NOTE: See single-threaded impl
         let mut roots = self.roots.lock();
+        if should_begin {
+            match self.state.compare_and_swap(
+                PendingState::NotCollecting,
+                PendingState::Waiting
+            ) {
+                PendingState::InProgress => unreachable!(),
+                PendingState::NotCollecting => {
+                    assert!(roots.is_none());
+                    *roots = Some(RootSet::new());
+                },
+                PendingState::Waiting => {}, // We were already waiting
+            }
+        }
         // Now that we've acquired the lock, these should be consistent
         assert_eq!(self.is_pending(), roots.is_some());
         let known_shadow_stacks: usize = match roots {
             None => {
                 // We didn't have anything pending
+                assert!(!should_begin);
                 return PendingStatus::AlreadyFinished
             },
             Some(ref mut roots) => {
@@ -1057,7 +1059,8 @@ impl GcVisit for MarkVisitor<'_> {
 
 struct RawContext {
     collector: InternalRc<RawSimpleCollector>,
-    shadow_stack: RefCell<ShadowStack>
+    shadow_stack: RefCell<ShadowStack>,
+    frozen_ptr: Cell<Option<*mut dyn DynTrace>>
 }
 impl RawContext {
     /// Attempt a collection,
@@ -1067,11 +1070,8 @@ impl RawContext {
     #[cold]
     #[inline(never)]
     unsafe fn maybe_collect(&self) {
-        if !self.collector.pending.is_waiting() {
-            self.collector.pending.try_begin_collection();
-        }
         let shadow_stack = self.shadow_stack.borrow();
-        match self.collector.pending.push_pending_context(&*shadow_stack) {
+        match self.collector.pending.push_pending_context(&*shadow_stack, true) {
             PendingStatus::ShouldCollect(roots) => {
                 self.collector.perform_raw_collection(roots)
             },
@@ -1101,6 +1101,29 @@ unsafe impl GcContext for SimpleCollectorContext {
             Some(dyn_ptr)
         );
     }
+
+    #[inline]
+    unsafe fn frozen_safepoint<T: Trace>(&mut self, value: &mut &mut T)
+        -> ::zerogc::FrozenContext<'_, Self> {
+        assert!(self.0.frozen_ptr.get().is_none());
+        let dyn_ptr = self.0.shadow_stack.borrow_mut().push(value);
+        if self.0.collector.should_collect() {
+            self.0.maybe_collect();
+        }
+        self.0.frozen_ptr.set(Some(dyn_ptr));
+        todo!("Persistently add to root set")
+    }
+
+    #[inline]
+    unsafe fn unfreeze(frozen: FrozenContext<Self>) {
+        let ctx = FrozenContext::into_inner(frozen);
+        let dyn_ptr = ctx.0.frozen_ptr.replace(None).unwrap();
+        assert_eq!(
+            ctx.0.shadow_stack.borrow_mut().pop(),
+            Some(dyn_ptr)
+        );
+    }
+
 
     unsafe fn recurse_context<T, F, R>(&self, value: &mut &mut T, func: F) -> R
         where T: Trace, F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R {

@@ -25,7 +25,6 @@ use std::fmt::{Debug};
 mod manually_traced;
 pub mod cell;
 
-
 pub use self::cell::{GcCell};
 
 /// Invoke the closure with a temporary [GcContext],
@@ -95,6 +94,7 @@ macro_rules! safepoint_recurse {
 ///
 /// It is not publicly exposed for this reason
 #[macro_export]
+#[doc(hidden)]
 macro_rules! __recurse_context {
     ($context:ident, $root:expr, |$sub_context:ident, $new_root:ident| $closure:expr) => {{
         use $crate::{GcContext};
@@ -137,6 +137,19 @@ macro_rules! safepoint {
     }};
 }
 
+/// Indicate its safe to begin a garbage collection (like [safepoint!])
+/// and then "freeze" the specified context.
+///
+/// Until it's unfrozen, the context can't be used for allocation.
+/// However its roots are still considered valid and it allows other
+/// threads to perform collections *without blocking this thread*.
+#[macro_export]
+macro_rules! freeze_safepoint {
+    ($collector:ident, $value:expr) => {unsafe {
+       todo!() // TODO: Finish
+    }};
+}
+
 /// A garbage collector implementation.
 ///
 /// These implementations should be completely safe and zero-overhead.
@@ -148,8 +161,8 @@ pub unsafe trait GcSystem {}
 /// This is essentially used to maintain a shadow-stack to a set of roots,
 /// which are guarenteed not to be collected until a safepoint.
 ///
-/// This context doesn't necessarily support allocation (see [GcAllocContext] for that).
-pub unsafe trait GcContext {
+/// This context doesn't necessarily support allocation (see [GcSimpleAlloc] for that).
+pub unsafe trait GcContext: Sized {
     type System: GcSystem;
     /// Inform the garbage collection system we are at a safepoint
     /// and are ready for a potential garbage collection.
@@ -159,6 +172,32 @@ pub unsafe trait GcContext {
     ///
     /// See the [safepoint!] macro for a safe wrapper.
     unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T);
+
+    /// Inform the garbage collection system we are at a safepoint
+    /// and are ready for a potential garbage collection.
+    ///
+    /// Unlike a `basic_safepoint`, the collector continues to
+    /// stay at the safepoint instead of returning immediately.
+    /// The context can't be used for anything (including allocations),
+    /// until it is unfrozen.
+    ///
+    /// This allows other threds to perform collections while this
+    /// thread does other work (without using the GC).
+    ///
+    /// ## Safety
+    /// Unsafe for the same reasons as `basic_safepoint`.
+    ///
+    /// It's assumed that this context's roots are valid for the entire
+    /// duration of the freeze.
+    unsafe fn frozen_safepoint<T: Trace>(&mut self, value: &mut &mut T) -> FrozenContext<'_, Self>;
+
+    /// Unfreeze this context
+    ///
+    /// ## Safety
+    /// Must be a valid context!
+    ///
+    /// Don't invoke this directly
+    unsafe fn unfreeze(frozen: FrozenContext<Self>);
 
     #[inline(always)]
     #[doc(hidden)]
@@ -214,6 +253,44 @@ pub unsafe trait GcSimpleAlloc<'gc, T: GcSafe + 'gc>: 'gc {
     /// This gives a immutable reference to the resulting object.
     /// Once allocated, the object can only be correctly modified with a `GcCell`
     fn alloc(&self, value: T) -> Self::Ref;
+}
+/// The internal representation of a frozen context
+///
+/// ## Safety
+/// Don't use this directly!!!
+#[doc(hidden)]
+pub struct FrozenContext<'a, C: GcContext>(&'a mut C);
+impl<'a, C: GcContext> FrozenContext<'a, C> {
+    #[inline]
+    pub unsafe fn new(ctx: &'a mut C) -> Self {
+        FrozenContext(ctx)
+    }
+    /// Get the underlying reference to the context
+    ///
+    /// This is an associated function because I don't want users
+    /// invoking it directly.
+    ///
+    /// ## Safety
+    /// It's unsafe to actually allocate or mutate a frozen collector.
+    ///
+    /// This should only be used internally
+    #[inline]
+    pub unsafe fn into_inner(ctx: Self) -> &'a mut C {
+        ctx.0
+    }
+    /// Unfreezes the context, dispatching to `GcContext::unfreeze`.
+    ///
+    /// This is an associated function because I don't want users
+    /// invoking it directly.
+    ///
+    /// ## Safety
+    /// Don't invoke this directly!
+    ///
+    /// This is an implementation detail
+    #[inline]
+    pub unsafe fn unfreeze(ctx: Self) {
+        C::unfreeze(ctx)
+    }
 }
 
 /// A garbage collected pointer to a value.
