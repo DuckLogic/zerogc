@@ -9,36 +9,27 @@ edition = "2018"
 zerogc = { path = "../.." }
 once_cell = { version = "1.4.0", optional = true }
 # Concurrency
-parking_lot = { version = "^0.10", optional = true, features = ["nightly"] }
-crossbeam = { version = "^0.7", optional = true }
+parking_lot = { version = "^0.10", features = ["nightly"] }
+crossbeam = "^0.7"
 
 [features]
 default = [
     "small-object-arenas", # Without this, allocating small objects is slow
 ]
 # Use very fast dedicated arenas for small objects.
-# This makes allocation **extremly** fast
+# This makes allocation much faster
 # Time spent in malloc (even in heavy workloads) drops to near zero
 # This can also improve memory significantly by avoiding per-object overheads
 #
 # However, it increases code complexity and is more
 # agressive (memory wise) then delegating all work to std::alloc
 # TODO: Return unused memory to the operating systems
+# TODO: Thread-local caching (make arenas fast again)
 small-object-arenas = ["once_cell"]
 # Use recursion to implicitly track the grey stack
 # This risks stack overflow at a possible performance gain
 # See commit 9a9634d68a4933d
 implicit-grey-stack = []
-# Support thread safety
-#
-# This slows down allocation slightly
-# It also waits for all mutator threads to reach a safepoint
-# before collection can begin. This is bacially copperative
-# threading.....
-sync = [
-    "parking_lot",
-    "crossbeam"
-]
 
 [dev-dependencies]
 # Used for examples :)

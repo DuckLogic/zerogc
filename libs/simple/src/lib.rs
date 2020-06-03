@@ -17,8 +17,6 @@ use zerogc::{GcSystem, GcSafe, Trace, GcContext, GcVisitor, GcSimpleAlloc, GcRef
 use std::alloc::Layout;
 use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
-#[cfg(not(feature = "sync"))]
-use std::rc::{Rc};
 use std::os::raw::c_void;
 use std::mem::{transmute, ManuallyDrop};
 use crate::alloc::{SmallArenaList, small_object_size};
@@ -27,13 +25,9 @@ use std::hash::{Hash, Hasher};
 use std::fmt::{Debug, Formatter};
 use std::fmt;
 use std::marker::PhantomData;
-#[cfg(feature = "sync")]
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-#[cfg(feature = "sync")]
 use crossbeam::atomic::AtomicCell;
-#[cfg(feature = "sync")]
-use std::sync::{Arc};
-#[cfg(feature = "sync")]
 use parking_lot::{Mutex, Condvar};
 use std::collections::HashSet;
 
@@ -179,18 +173,12 @@ impl<V: GcVisitor> GcVisit for V {
 /// the underlying type must be sync.
 ///
 /// This is the same reason that `Arc<T>: Send` requires `T: Sync`
-#[cfg(feature = "sync")]
 unsafe impl<'gc, T: GcSafe + Sync> Send for Gc<'gc, T> {}
-/// As long as the collector is thread safe
-/// and the underlying type is `Sync`, it's safe
+/// If the underlying type is `Sync`, it's safe
 /// to share garbage collected references between threads.
-#[cfg(feature = "sync")]
+///
+/// The collector itself is always safe :D
 unsafe impl<'gc, T: GcSafe + Sync> Sync for Gc<'gc, T> {}
-
-#[cfg(feature = "sync")]
-type InternalRc<T> = Arc<T>;
-#[cfg(not(feature = "sync"))]
-type InternalRc<T> = Rc<T>;
 
 /// Persistent roots of the collector,
 /// that are known to be valid longer than the lifetime
@@ -204,38 +192,12 @@ struct PersistentRoots {
     /// I guess we could use a faster hash function but
     /// I don't really think freezing collectors is performance
     /// critical.
-    frozen_shadow_stacks: RefCell<HashSet<NonNull<ShadowStack>>>
-}
-#[cfg(not(feature = "sync"))]
-impl PersistentRoots {
-    fn new() -> Self {
-        PersistentRoots {
-            frozen_shadow_stacks: RefCell::new(HashSet::new())
-        }
-    }
-    unsafe fn add_frozen_stack(&self, ptr: NonNull<ShadowStack>) {
-        assert!(self.frozen_shadow_stacks.borrow_mut().insert(ptr));
-    }
-    unsafe fn remove_frozen_stack(&self, ptr: NonNull<ShadowStack>) {
-        assert!(self.frozen_shadow_stacks.borrow_mut().remove(&ptr));
-    }
-    fn frozen_stacks(&self) -> Vec<NonNull<ShadowStack>> {
-        self.frozen_shadow_stacks.borrow().iter().cloned().collect()
-    }
-    #[inline]
-    fn num_frozen_stacks(&self) -> usize {
-        self.frozen_shadow_stacks.borrow().len()
-    }
-}
-#[cfg(feature = "sync")]
-struct PersistentRoots {
     frozen_shadow_stacks: Mutex<HashSet<NonNull<ShadowStack>>>
 }
-#[cfg(feature = "sync")]
 impl PersistentRoots {
     fn new() -> Self {
         PersistentRoots {
-            frozen_shadow_stacks: RefCell::new(HashSet::new())
+            frozen_shadow_stacks: Mutex::new(HashSet::new())
         }
     }
     unsafe fn add_frozen_stack(&self, ptr: NonNull<ShadowStack>) {
@@ -244,13 +206,16 @@ impl PersistentRoots {
     unsafe fn remove_frozen_stack(&self, ptr: NonNull<ShadowStack>) {
         assert!(self.frozen_shadow_stacks.lock().remove(&ptr));
     }
+    fn num_frozen_stacks(&self) -> usize {
+        self.frozen_shadow_stacks.lock().len()
+    }
     fn frozen_stacks(&self) -> Vec<NonNull<ShadowStack>> {
         self.frozen_shadow_stacks.lock().iter().cloned().collect()
     }
 }
 /// We're careful with our pointers
 unsafe impl Send for PersistentRoots {}
-#[cfg(feature = "sync")] // This is only safe when we use a mutex
+/// This is only safe since we use a mutex
 unsafe impl Sync for PersistentRoots {}
 
 /// The state of a collector waiting for all its contexts
@@ -276,17 +241,17 @@ impl PendingCollection {
     }
 }
 
-pub struct SimpleCollector(InternalRc<RawSimpleCollector>);
+pub struct SimpleCollector(Arc<RawSimpleCollector>);
 impl SimpleCollector {
     pub fn create() -> Self {
-        let mut collector = InternalRc::new(RawSimpleCollector {
+        let mut collector = Arc::new(RawSimpleCollector {
             pending: PendingCollectionTracker::new(),
             heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD)
         });
         let collector_ptr = &*collector
             as *const _
             as *mut RawSimpleCollector;
-        InternalRc::get_mut(&mut collector).unwrap()
+        Arc::get_mut(&mut collector).unwrap()
             .heap.allocator.collector_ptr = collector_ptr;
         SimpleCollector(collector)
     }
@@ -300,7 +265,7 @@ impl SimpleCollector {
             Vec::with_capacity(4)
         ));
         unsafe { self.0.pending.add_context(); }
-        SimpleCollectorContext(InternalRc::new(RawContext {
+        SimpleCollectorContext(Arc::new(RawContext {
             shadow_stack, collector: self.0.clone(),
             frozen_ptr: Cell::new(None)
         }))
@@ -342,29 +307,17 @@ impl ShadowStack {
 const INITIAL_COLLECTION_THRESHOLD: usize = 2048;
 
 struct GcHeap {
-    #[cfg(feature = "sync")]
     threshold: AtomicUsize,
-    #[cfg(not(feature = "sync"))]
-    threshold: Cell<usize>,
     allocator: SimpleAlloc
 }
 impl GcHeap {
-    #[cfg(feature = "sync")]
     fn new(threshold: usize) -> GcHeap {
         GcHeap {
             threshold: AtomicUsize::new(threshold),
             allocator: SimpleAlloc::new()
         }
     }
-    #[cfg(not(feature = "sync"))]
-    fn new(threshold: usize) -> GcHeap {
-        GcHeap {
-            threshold: Cell::new(threshold),
-            allocator: SimpleAlloc::new()
-        }
-    }
     #[inline]
-    #[cfg(feature = "sync")]
     fn should_collect(&self) -> bool {
         /*
          * Going with relaxed ordering because it's not essential
@@ -373,64 +326,24 @@ impl GcHeap {
          * trigger a collection.
          */
         self.allocator.allocated_size.load(Ordering::Relaxed)
-            >= threshold.load(Ordering::Relaxed)
-    }
-    #[inline]
-    #[cfg(not(feature = "sync"))]
-    fn should_collect(&self) -> bool {
-        self.allocator.allocated_size() >= self.threshold.get()
+            >= self.threshold.load(Ordering::Relaxed)
     }
 }
 
 /// A link in the chain of `BigGcObject`s
 type BigObjectLinkItem = Option<NonNull<BigGcObject<DynamicObj>>>;
-/// A mutable cell for a BigObjectLink
-///
-/// This is not thread-safe
-#[cfg(not(feature = "sync"))]
-#[derive(Default)]
-struct BigObjectLink(Cell<BigObjectLinkItem>);
-#[cfg(not(feature = "sync"))]
-impl BigObjectLink {
-    #[inline]
-    pub fn new(item: BigObjectLinkItem) -> Self {
-        BigObjectLink(Cell::new(item))
-    }
-    #[inline]
-    fn item(&self) -> BigObjectLinkItem {
-        self.0.get()
-    }
-    #[inline]
-    unsafe fn set_item_forced(&self, val: BigObjectLinkItem) {
-        self.0.set(val)
-    }
-    #[inline]
-    fn append_item(&self, big_obj: Box<BigGcObject>) {
-        /*
-         * This actually isn't a risk since we're not atomic
-         * Just putting it here to clarify its relationship
-         * to the atomic CAS loop
-         */
-        debug_assert_eq!(self.0.get(), big_obj.prev.item());
-        self.0.set(unsafe {
-            Some(NonNull::new_unchecked(Box::into_raw(big_obj)))
-        });
-    }
-}
-/// An atomic cell for a BigObjectLink
+/// An atomic link in the linked-list of BigObjects
 ///
 /// This is thread-safe
-#[cfg(feature = "sync")]
 #[derive(Default)]
 struct BigObjectLink(AtomicCell<BigObjectLinkItem>);
-#[cfg(feature = "sync")]
 impl BigObjectLink {
     #[inline]
     pub fn new(item: BigObjectLinkItem) -> Self {
         BigObjectLink(AtomicCell::new(item))
     }
     #[inline]
-    fn item(&self) -> BigObjectLink {
+    fn item(&self) -> BigObjectLinkItem {
         self.0.load()
     }
     #[inline]
@@ -438,14 +351,16 @@ impl BigObjectLink {
         self.0.store(val)
     }
     #[inline]
-    fn append_big_object(&self, big_obj: Box<BigGcObject>) {
+    fn append_item(&self, big_obj: Box<BigGcObject>) {
         // Must use CAS loop in case another thread updates
         let mut expected_prev = big_obj.prev.item();
         let mut updated_item = unsafe {
-            NonNull::new_unchecked(Box::into_raw(obj))
+            NonNull::new_unchecked(Box::into_raw(big_obj))
         };
         loop {
-            match self.0.compare_exchange(expected_prev, updated_item) {
+            match self.0.compare_exchange(
+                expected_prev, Some(updated_item)
+            ) {
                 Ok(_) => break,
                 Err(actual_prev) => {
                     unsafe {
@@ -464,72 +379,26 @@ impl BigObjectLink {
     }
 }
 
-/// The single-threaded implementation of an allocator
-#[cfg(not(feature = "sync"))]
+/// The thread-safe implementation of an allocator
+///
+/// Most allocations should avoid locking.
 pub(crate) struct SimpleAlloc {
-    // NOTE: We lazy init this...
     collector_ptr: *mut RawSimpleCollector,
-    allocated_size: Cell<usize>,
     small_arenas: SmallArenaList,
     big_object_link: BigObjectLink,
     /// Whether the meaning of the mark bit is currently inverted.
     ///
     /// This flips every collection
-    mark_inverted: Cell<bool>,
+    mark_inverted: AtomicBool,
+    allocated_size: AtomicUsize
 }
-
-#[cfg(not(feature = "sync"))]
-impl SimpleAlloc {
-    fn new() -> SimpleAlloc {
-        SimpleAlloc {
-            collector_ptr: std::ptr::null_mut(),
-            allocated_size: Cell::new(0),
-            small_arenas: SmallArenaList::new(),
-            big_object_link: Default::default(),
-            mark_inverted: Cell::new(false)
-        }
-    }
-    #[inline]
-    fn allocated_size(&self) -> usize {
-        self.allocated_size.get()
-    }
-    #[inline]
-    fn add_allocated_size(&self, amount: usize) {
-        let old = self.allocated_size.get();
-        self.allocated_size.set(old + amount);
-    }
-    #[inline]
-    fn set_allocated_size(&self, amount: usize) {
-        self.allocated_size.set(amount)
-    }
-    #[inline]
-    fn mark_inverted(&self) -> bool {
-        self.mark_inverted.get()
-    }
-    #[inline]
-    fn set_mark_inverted(&self, b: bool) {
-        self.mark_inverted.set(b)
-    }
-}
-
-/// The thread-safe implementation of an allocator
-///
-/// Most allocations should avoid locking.
-#[cfg(feature = "sync")]
-pub(crate) struct SimpleAlloc {
-    collector_ptr: *mut RawSimpleCollector,
-    small_arenas: SmallArenaList,
-    big_object_link: BigObjectLink,
-    mark_inverted: AtomicBool
-}
-#[cfg(feature = "sync")]
 impl SimpleAlloc {
     fn new() -> SimpleAlloc {
         SimpleAlloc {
             collector_ptr: std::ptr::null_mut(),
             allocated_size: AtomicUsize::new(0),
             small_arenas: SmallArenaList::new(),
-            big_object_link: AtomicCell::new(None),
+            big_object_link: BigObjectLink::new(None),
             mark_inverted: AtomicBool::new(false)
         }
     }
@@ -553,17 +422,7 @@ impl SimpleAlloc {
     fn set_mark_inverted(&self, b: bool) {
         self.mark_inverted.store(b, Ordering::Release)
     }
-}
-#[cfg(feature = "sync")]
-unsafe impl Send for SimpleAlloc {}
-/// We're careful to be thread safe here
-///
-/// This isn't auto implemented because of the
-/// raw pointer to the collector (we only use it as an id)
-#[cfg(feature = "sync")]
-unsafe impl Sync for SimpleAlloc {}
-/// Code shared between single-threaded and multi-threaded implementations
-impl SimpleAlloc {
+
     #[inline]
     fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
         if let Some(arena) = self.small_arenas.find::<T>() {
@@ -614,6 +473,7 @@ impl SimpleAlloc {
         #[cfg(feature = "small-object-arenas")]
         for arena in self.small_arenas.iter() {
             let mut last_free = arena.free.next_free();
+            let mark_inverted = self.mark_inverted.load(Ordering::SeqCst);
             arena.for_each(|slot| {
                 if (*slot).is_free() {
                     /*
@@ -621,7 +481,7 @@ impl SimpleAlloc {
                      * of allocated objects.
                      */
                 } else {
-                    match (*slot).header.raw_state().resolve(self.mark_inverted.get()) {
+                    match (*slot).header.raw_state().resolve(mark_inverted) {
                         MarkState::White => {
                             // Free the object, dropping if necessary
                             expected_size -= (*slot).header.type_info.total_size();
@@ -684,6 +544,12 @@ impl SimpleAlloc {
         self.set_allocated_size(actual_size);
     }
 }
+unsafe impl Send for SimpleAlloc {}
+/// We're careful to be thread safe here
+///
+/// This isn't auto implemented because of the
+/// raw pointer to the collector (we only use it as an id)
+unsafe impl Sync for SimpleAlloc {}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -696,46 +562,71 @@ enum PendingState {
     InProgress
 }
 /// Keeps track of a pending collection (if any)
-#[cfg(not(feature = "sync"))]
 struct PendingCollectionTracker {
     persistent_roots: PersistentRoots,
-    state: Cell<PendingState>,
+    state: AtomicCell<PendingState>,
     /// The currently pending collection (if any)
     ///
     /// Once the number of the known roots in the pending collection
     /// is equal to the number of `total_contexts`,
     /// collection can safely begin.
-    pending: RefCell<Option<PendingCollection>>,
+    pending: Mutex<Option<PendingCollection>>,
+    /// The condition variable other threads wait on
+    /// at a safepoint.
+    wait: Condvar,
     /// The number of active contexts
     ///
     /// Leaking a context is "safe" in the sense
     /// it wont cause undefined behavior,
     /// but it will cause deadlock,
-    total_contexts: Cell<usize>
+    total_contexts: AtomicUsize
 }
-#[cfg(not(feature = "sync"))]
 impl PendingCollectionTracker {
-    fn new() -> PendingCollectionTracker {
+    fn new() -> Self {
         PendingCollectionTracker {
             persistent_roots: PersistentRoots::new(),
-            state: Cell::new(PendingState::NotCollecting),
-            total_contexts: Cell::new(0),
-            pending: RefCell::new(None)
+            state: AtomicCell::new(PendingState::NotCollecting),
+            total_contexts: AtomicUsize::new(0),
+            pending: Mutex::new(None),
+            wait: Condvar::new()
         }
     }
     #[inline]
     pub fn is_waiting(&self) -> bool {
-        self.state.get() == PendingState::Waiting
+        // NOTE: This implicitly has Acquire ordering
+        self.state.load() == PendingState::Waiting
     }
     unsafe fn add_context(&self) {
-        let old = self.total_contexts.get();
-        let updated = old.checked_add(1).unwrap();
-        self.total_contexts.set(updated);
+        let mut old = self.total_contexts.load(Ordering::Acquire);
+        loop {
+            let updated = old.checked_add(1).unwrap();
+            match self.total_contexts.compare_exchange_weak(
+                old, updated,
+                Ordering::AcqRel,
+                Ordering::Acquire, // This is what crossbeam does
+            ) {
+                Ok(_) => break,
+                Err(new_total) => {
+                    old = new_total;
+                }
+            }
+        }
     }
     unsafe fn free_context(&self) {
-        let old = self.total_contexts.get();
-        assert_ne!(old, 0);
-        self.total_contexts.set(old - 1);
+        let mut total = self.total_contexts.load(Ordering::Acquire);
+        loop {
+            assert_ne!(total, 0);
+            match self.total_contexts.compare_exchange(
+                total, total - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire, // This is what crossbeam does
+            ) {
+                Ok(_) => break,
+                Err(new_total) => {
+                    total = new_total;
+                }
+            }
+        }
     }
     /// Push a context that's pending collection
     ///
@@ -744,12 +635,12 @@ impl PendingCollectionTracker {
     ///
     /// Undefined behavior if the context roots are invalid in any way.
     unsafe fn push_pending_context(&self, shadow_stack: &ShadowStack, should_begin: bool) -> PendingStatus {
-        let mut roots = self.pending.borrow_mut();
+        let mut roots = self.pending.lock();
         if should_begin {
-            match self.state.get() {
+            match self.state.load() {
                 PendingState::InProgress => unreachable!(),
                 PendingState::NotCollecting => {
-                    self.state.set(PendingState::Waiting);
+                    self.state.store(PendingState::Waiting);
                     assert!(roots.is_none());
                     *roots = Some(PendingCollection::new());
                 },
@@ -758,13 +649,13 @@ impl PendingCollectionTracker {
         }
         let temp_shadow_stacks: usize = match *roots {
             None => {
-                assert_eq!(self.state.get(), PendingState::NotCollecting);
+                assert_eq!(self.state.load(), PendingState::NotCollecting);
                 assert!(!should_begin);
                 // We didn't have anything pending
                 return PendingStatus::AlreadyFinished
             },
             Some(ref mut roots) => {
-                assert_eq!(self.state.get(), PendingState::Waiting);
+                assert_eq!(self.state.load(), PendingState::Waiting);
                 roots.shadow_stacks.push(NonNull::from(shadow_stack));
                 roots.shadow_stacks.len()
             }
@@ -773,10 +664,10 @@ impl PendingCollectionTracker {
         let known_shadow_stacks = temp_shadow_stacks
             + self.persistent_roots.num_frozen_stacks();
         use std::cmp::Ordering;
-        match known_shadow_stacks.cmp(&self.total_contexts.get()) {
+        match known_shadow_stacks.cmp(&known_shadow_stacks) {
             Ordering::Less => {
                 // We should already be waiting
-                assert_eq!(self.state.get(), PendingState::Waiting);
+                assert_eq!(self.state.load(), PendingState::Waiting);
                 /*
                  * We're still waiting on some other contexts
                  * Not really sure what it means to 'wait' in
@@ -794,10 +685,10 @@ impl PendingCollectionTracker {
                  * We also assume that the shadow stacks correspond to
                  * the program's roots.
                  */
-                assert_eq!(
-                    self.state.replace(PendingState::InProgress),
+                assert_eq!(self.state.compare_and_swap(
                     PendingState::Waiting,
-                );
+                    PendingState::InProgress
+                ), PendingState::Waiting);
                 PendingStatus::ShouldCollect {
                     pending: roots.take().unwrap(),
                     frozen_stacks: self.persistent_roots.frozen_stacks()
@@ -814,140 +705,11 @@ impl PendingCollectionTracker {
         }
     }
     unsafe fn await_collection(&self) {
-        unreachable!("Awaiting is meaningless in a single-threaded context")
-    }
-    unsafe fn finish_collection(&self) {
-        assert_eq!(
-            self.state.replace(PendingState::NotCollecting),
-            PendingState::InProgress
-        );
-        assert!(self.pending.borrow().is_none());
-    }
-}
-enum PendingStatus {
-    AlreadyFinished,
-    ShouldCollect {
-        pending: PendingCollection,
-        frozen_stacks: Vec<NonNull<ShadowStack>>
-    },
-    NeedToWait
-}
-
-#[cfg(feature = "sync")]
-struct PendingCollectionTracker {
-    persistent_roots: PersistentRoots,
-    state: AtomicCell<PendingState>,
-    pending: Mutex<Option<PendingCollection>>,
-    wait: Condvar,
-    total_contexts: AtomicUsize,
-}
-#[cfg(feature = "sync")]
-impl PendingCollectionTracker {
-    fn new() -> PendingCollectionTracker {
-        PendingCollectionTracker {
-            persistent_roots: PersistentRoots::new(),
-            state: AtomicCell::new(PendingState::NotCollecting),
-            pending: Mutex::new(None),
-            wait: Condvar::new(),
-            total_contexts: AtomicUsize::new(0)
-        }
-    }
-    #[inline]
-    pub fn is_waiting(&self) -> bool {
-        // NOTE: This implicitly has Acquire ordering
-        self.state.get() == PendingState::Waiting
-    }
-    unsafe fn add_context(&self) {
-        let mut old = self.total_contexts.load(Ordering::Acquire);
         loop {
-            let updated = old.checked_add(1).unwrap();
-            match self.total_contexts.compare_exchange(old, updated, Ordering::AcqRel) {
-                Ok(_) => break,
-                Err(new_total) => {
-                    old = new_total;
-                }
-            }
-        }
-    }
-    unsafe fn free_context(&self) {
-        let mut total = self.total_contexts.load(Ordering::Acquire);
-        loop {
-            assert_ne!(total, 0);
-            match self.total_contexts.compare_exchange(total, total - 1, Ordering::AcqRel) {
-                Ok(_) => break,
-                Err(new_total) => {
-                    total = new_total;
-                }
-            }
-        }
-    }
-    unsafe fn push_pending_context(&self, shadow_stack: &ShadowStack, should_begin: bool) -> PendingStatus {
-        // NOTE: See single-threaded impl
-        let mut roots = self.roots.lock();
-        if should_begin {
-            match self.state.compare_and_swap(
-                PendingState::NotCollecting,
-                PendingState::Waiting
-            ) {
-                PendingState::InProgress => unreachable!(),
-                PendingState::NotCollecting => {
-                    assert!(roots.is_none());
-                    *roots = Some(PendingCollection::new());
-                },
-                PendingState::Waiting => {}, // We were already waiting
-            }
-        }
-        // Now that we've acquired the lock, these should be consistent
-        assert_eq!(self.is_pending(), roots.is_some());
-        let known_shadow_stacks: usize = match roots {
-            None => {
-                // We didn't have anything pending
-                assert!(!should_begin);
-                return PendingStatus::AlreadyFinished
-            },
-            Some(ref mut roots) => {
-                roots.shadow_stacks.push(NonNull::from(shadow_stack));
-                roots.shadow_stacks.len()
-            }
-        };
-        let total_contexts = self.total_contexts
-            .load(std::sync::atomic::Ordering::Acquire);
-        use std::cmp::Ordering;
-        match known_shadow_stacks.cmp(&total_contexts) {
-            Ordering::Less => {
-                /*
-                 * We're still waiting on some other contexts
-                 */
-                PendingStatus::NeedToWait
-            },
-            Ordering::Equal => {
-                /*
-                 * We have all the roots. Trigger a collection
-                 * Here we're assuming all the shadow stacks we've
-                 * accumulated actually correspond to the shadow stacks
-                 * of all the live contexts.
-                 * We also assume that the shadow stacks correspond to
-                 * the program's roots.
-                 */
-                assert!(self.is_pending.compare_and_set(true, false, Ordering::SeqCst));
-                PendingStatus::ShouldCollect(roots.take())
-            },
-            Ordering::Greater => {
-                /*
-                 * len(shadow_stacks) => len(total_contexts)
-                 * This is nonsense in highly unsafe code.
-                 * We'll just panic
-                 */
-                unreachable!()
-            }
-        }
-    }
-    unsafe fn await_collection(&self) {
-        loop {
-            let mut lock = self.roots.lock();
+            let mut lock = self.pending.lock();
             // State should always be consistent
             let state = self.state.load();
-            match lock {
+            match *lock {
                 Some(_) => {
                     assert_eq!(state, PendingState::Waiting);
                 },
@@ -975,10 +737,10 @@ impl PendingCollectionTracker {
         }
     }
     unsafe fn finish_collection(&self) {
-        let mut guard = self.roots.lock();
+        let guard = self.pending.lock();
         assert!(guard.is_none());
         assert_eq!(
-            self.state.compare_and_set(
+            self.state.compare_and_swap(
                 PendingState::InProgress,
                 PendingState::NotCollecting
             ),
@@ -988,6 +750,23 @@ impl PendingCollectionTracker {
         // Notify all blocked threads
         self.wait.notify_all();
     }
+}
+enum PendingStatus {
+    AlreadyFinished,
+    ShouldCollect {
+        pending: PendingCollection,
+        frozen_stacks: Vec<NonNull<ShadowStack>>
+    },
+    NeedToWait
+}
+
+#[cfg(feature = "sync")]
+struct PendingCollectionTracker {
+    persistent_roots: PersistentRoots,
+    state: AtomicCell<PendingState>,
+    pending: Mutex<Option<PendingCollection>>,
+    wait: Condvar,
+    total_contexts: AtomicUsize,
 }
 
 /// The internal data for a simple collector
@@ -1036,8 +815,7 @@ impl<'a> CollectionTask<'a> {
             let mut visitor = MarkVisitor {
                 expected_collector: self.expected_collector,
                 grey_stack: &mut self.grey_stack,
-                inverted_mark: self.heap.allocator
-                    .mark_inverted.get()
+                inverted_mark: self.heap.allocator.mark_inverted()
             };
             // Dynamically dispatched
             unsafe { (*root).trace(&mut visitor); }
@@ -1066,7 +844,10 @@ impl<'a> CollectionTask<'a> {
         unsafe { self.heap.allocator.sweep() };
         let updated_size = self.heap.allocator.allocated_size();
         // Update the threshold to be 150% of currently used size
-        self.heap.threshold.set(updated_size + (updated_size / 2));
+        self.heap.threshold.store(
+            updated_size + (updated_size / 2),
+            Ordering::SeqCst
+        );
     }
 }
 
@@ -1141,7 +922,8 @@ impl GcVisit for MarkVisitor<'_> {
 }
 
 struct RawContext {
-    collector: InternalRc<RawSimpleCollector>,
+    collector: Arc<RawSimpleCollector>,
+    // NOTE: We are Send, not Sync
     shadow_stack: RefCell<ShadowStack>,
     frozen_ptr: Cell<Option<*mut dyn DynTrace>>
 }
@@ -1173,7 +955,7 @@ impl Drop for RawContext {
         unsafe { self.collector.pending.free_context() }
     }
 }
-pub struct SimpleCollectorContext(InternalRc<RawContext>);
+pub struct SimpleCollectorContext(Arc<RawContext>);
 unsafe impl GcContext for SimpleCollectorContext {
     type System = SimpleCollector;
 
@@ -1241,13 +1023,11 @@ unsafe impl<'gc, T: GcSafe + 'gc> GcSimpleAlloc<'gc, T> for &'gc SimpleCollector
         self.0.collector.heap.allocator.alloc(value)
     }
 }
-/// If we're built with threading support,
-/// a collector context can technically be sent across threads.
+/// A collector context can technically be sent across threads.
 ///
 /// It's usually not a good idea
-// NOTE: Manual derive is nessicarry because of `frozen_ptr`
-#[cfg(feature = "sync")]
-unsafe impl Send for SimpleCollectorContext {}
+/// NOTE: Manual derive is nessicarry because of `frozen_ptr`
+unsafe impl Send for RawSimpleCollector {}
 
 struct GcType {
     value_size: usize,
@@ -1303,19 +1083,12 @@ struct GcHeader {
      * NOTE: State byte should come last
      * If the value is small `(u32)`, we could reduce
      * the padding to a 3 bytes and fit everything in a word.
+     *
+     * Do we really need to use atomic stores?
      */
-    #[cfg(not(feature = "sync"))]
-    raw_state: Cell<RawMarkState>,
-    #[cfg(feature = "sync")] // Atomic stores needed for safety
     raw_state: AtomicCell<RawMarkState>,
 }
 impl GcHeader {
-    #[cfg(not(feature = "sync"))]
-    #[inline]
-    pub fn new(type_info: &'static GcType, raw_state: RawMarkState) -> Self {
-        GcHeader { type_info, raw_state: Cell::new(raw_state) }
-    }
-    #[cfg(feature = "sync")]
     #[inline]
     pub fn new(type_info: &'static GcType, raw_state: RawMarkState) -> Self {
         GcHeader { type_info, raw_state: AtomicCell::new(raw_state) }
@@ -1333,20 +1106,6 @@ impl GcHeader {
     pub unsafe fn from_value_ptr<T: GcSafe>(ptr: *mut T) -> *mut GcHeader {
         (ptr as *mut u8).sub(T::STATIC_TYPE.value_offset) as *mut GcHeader
     }
-}
-#[cfg(not(feature = "sync"))]
-impl GcHeader {
-    #[inline]
-    fn raw_state(&self) -> RawMarkState {
-        self.raw_state.get()
-    }
-    #[inline]
-    fn update_raw_state(&self, raw_state: RawMarkState) {
-        self.raw_state.set(raw_state);
-    }
-}
-#[cfg(feature = "sync")]
-impl GcHeader {
     #[inline]
     fn raw_state(&self) -> RawMarkState {
         self.raw_state.load()
