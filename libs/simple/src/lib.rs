@@ -1023,11 +1023,14 @@ unsafe impl<'gc, T: GcSafe + 'gc> GcSimpleAlloc<'gc, T> for &'gc SimpleCollector
         self.0.collector.heap.allocator.alloc(value)
     }
 }
-/// A collector context can technically be sent across threads.
+/// It's not safe for a context to be sent across threads.
 ///
-/// It's usually not a good idea
-/// NOTE: Manual derive is nessicarry because of `frozen_ptr`
-unsafe impl Send for RawSimpleCollector {}
+/// We use (thread-unsafe) interior mutability to maintain the
+/// shadow stack. Since we could potentially be cloned via `safepoint_recurse!`,
+/// implementing `Send` would allow another thread to obtain a
+/// reference to our internal `&RefCell`. Further mutation/access
+/// would be undefined.....
+impl !Send for SimpleCollectorContext {}
 
 struct GcType {
     value_size: usize,
