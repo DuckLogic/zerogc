@@ -237,7 +237,7 @@ impl PendingCollection {
     #[inline]
     unsafe fn iter(&self) -> impl Iterator<Item=*mut dyn DynTrace> + '_ {
         self.shadow_stacks.iter()
-            .flat_map(|s| (&*s.as_ptr()).0.iter().cloned())
+            .flat_map(|s| (&*s.as_ptr()).elements.iter().cloned())
     }
 }
 
@@ -259,12 +259,11 @@ impl SimpleCollector {
     ///
     /// Warning: Only one collector should be created per thread.
     /// Doing otherwise can cause deadlocks/panics.
-    #[inline]
     pub fn create_context(&self) -> SimpleCollectorContext {
-        let shadow_stack = RefCell::new(ShadowStack(
-            Vec::with_capacity(4)
-        ));
-        unsafe { self.0.pending.add_context(); }
+        let id = unsafe { self.0.pending.add_context() };
+        let shadow_stack = RefCell::new(ShadowStack {
+            elements: Vec::with_capacity(4), id
+        });
         SimpleCollectorContext(Arc::new(RawContext {
             shadow_stack, collector: self.0.clone(),
             frozen_ptr: Cell::new(None)
@@ -283,7 +282,10 @@ impl<T: Trace + ?Sized> DynTrace for T {
     }
 }
 #[derive(Clone)]
-struct ShadowStack(Vec<*mut dyn DynTrace>);
+struct ShadowStack {
+    id: usize,
+    elements: Vec<*mut dyn DynTrace>
+}
 impl ShadowStack {
     #[inline]
     pub unsafe fn push<'a, T: Trace + 'a>(&mut self, value: &'a mut T) -> *mut dyn DynTrace {
@@ -293,12 +295,12 @@ impl ShadowStack {
             *mut (dyn DynTrace + 'a),
             *mut (dyn DynTrace + 'static)
         >(short_ptr);
-        self.0.push(long_ptr);
+        self.elements.push(long_ptr);
         long_ptr
     }
     #[inline]
     pub fn pop(&mut self) -> Option<*mut dyn DynTrace> {
-        self.0.pop()
+        self.elements.pop()
     }
 }
 
@@ -598,7 +600,7 @@ impl PendingCollectionTracker {
         // NOTE: This implicitly has Acquire ordering
         self.state.load() == PendingState::Waiting
     }
-    unsafe fn add_context(&self) {
+    unsafe fn add_context(&self) -> usize {
         /*
          * NOTE: We need to lock to ensure no collection is
          * happening at this time. It's unsafe to create a context
@@ -622,6 +624,7 @@ impl PendingCollectionTracker {
                 }
             }
         }
+        old
     }
     unsafe fn free_context(&self) {
         /*
@@ -689,7 +692,9 @@ impl PendingCollectionTracker {
         let known_shadow_stacks = temp_shadow_stacks
             + self.persistent_roots.num_frozen_stacks();
         use std::cmp::Ordering;
-        match known_shadow_stacks.cmp(&known_shadow_stacks) {
+        let total_contexts = self.total_contexts
+            .load(std::sync::atomic::Ordering::SeqCst);
+        match known_shadow_stacks.cmp(&total_contexts) {
             Ordering::Less => {
                 // We should already be waiting
                 assert_eq!(self.state.load(), PendingState::Waiting);
@@ -785,15 +790,6 @@ enum PendingStatus {
     NeedToWait
 }
 
-#[cfg(feature = "sync")]
-struct PendingCollectionTracker {
-    persistent_roots: PersistentRoots,
-    state: AtomicCell<PendingState>,
-    pending: Mutex<Option<PendingCollection>>,
-    wait: Condvar,
-    total_contexts: AtomicUsize,
-}
-
 /// We're careful - I swear :D
 unsafe impl Send for RawSimpleCollector {}
 unsafe impl Sync for RawSimpleCollector {}
@@ -816,7 +812,7 @@ impl RawSimpleCollector {
     ) {
         let mut roots: Vec<*mut dyn DynTrace> = pending.iter().collect();
         roots.extend(frozen_stacks.iter()
-            .flat_map(|stack| (*stack.as_ptr()).0.iter()));
+            .flat_map(|stack| (*stack.as_ptr()).elements.iter()));
         let mut task = CollectionTask {
             expected_collector: self as *const Self as *mut Self,
             roots, heap: &self.heap,
