@@ -573,6 +573,8 @@ struct PendingCollectionTracker {
     pending: Mutex<Option<PendingCollection>>,
     /// The condition variable other threads wait on
     /// at a safepoint.
+    ///
+    /// This is also used to notify threads when a collection is over.
     wait: Condvar,
     /// The number of active contexts
     ///
@@ -597,6 +599,15 @@ impl PendingCollectionTracker {
         self.state.load() == PendingState::Waiting
     }
     unsafe fn add_context(&self) {
+        /*
+         * NOTE: We need to lock to ensure no collection is
+         * happening at this time. It's unsafe to create a context
+         * while a collection is in progress.
+         */
+        let mut guard = self.pending.lock();
+        while self.state.load() == PendingState::InProgress {
+            self.wait.wait(&mut guard);
+        }
         let mut old = self.total_contexts.load(Ordering::Acquire);
         loop {
             let updated = old.checked_add(1).unwrap();
@@ -613,6 +624,13 @@ impl PendingCollectionTracker {
         }
     }
     unsafe fn free_context(&self) {
+        /*
+         * Ensure we don't have a collection in progress
+         */
+        let mut guard = self.pending.lock();
+        while self.state.load() == PendingState::InProgress {
+            self.wait.wait(&mut guard);
+        }
         let mut total = self.total_contexts.load(Ordering::Acquire);
         loop {
             assert_ne!(total, 0);
@@ -627,6 +645,13 @@ impl PendingCollectionTracker {
                 }
             }
         }
+        /*
+         * It's possible that other threads are waiting for a pending
+         * collection. Freeing this context could possibly allow them
+         * to start collecting. Thus we need to notify them to avoid
+         * deadlock.
+         */
+        self.wait.notify_all();
     }
     /// Push a context that's pending collection
     ///
