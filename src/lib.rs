@@ -153,8 +153,8 @@ macro_rules! freeze_safepoint {
     ($collector:ident, $value:expr) => {unsafe {
         use $crate::{GcContext};
         // See also `safepoint!` macro
-        let mut erased = $collector.frozen_safepoint($value);
-        let frozen = $collector.basic_safepoint(&mut &mut erased);
+        let mut erased = $collector.rebrand_static($value);
+        let frozen = $collector.frozen_safepoint(&mut &mut erased);
         // NOTE: This is branded to `frozen` now
         let new_root = frozen.rebrand_self(erased);
         // TODO: Undefined behavior if we don't unfreeze -_-
@@ -163,16 +163,20 @@ macro_rules! freeze_safepoint {
 }
 
 /// Unfreeze the context, allowing it to be used again
+///
+/// This macro is a little weird, since it automatically
+/// declares a `let` binding to the new context's name.
 #[macro_export]
 macro_rules! unfreeze {
-    ($frozen:ident, $value:expr) => {unsafe {
-        use $crate::{GcContext, FrozenContext};
-        let erased = frozen.rebrand_static($value);
-        let context = FrozenContext::unfreeze($frozen);
-        let new_value = context.rebrand_self(erased);
-        // See also `safepoint!` macro
-        ($context, new_value)
-    }};
+    ($frozen:ident => $new_context:ident, $value:expr) => {
+        let $new_context;
+        unsafe {
+            use $crate::{GcContext, FrozenContext};
+            let erased = $frozen.rebrand_static($value);
+            $new_context = FrozenContext::unfreeze($frozen);
+            $new_context.rebrand_self(erased)
+        }
+    };
 }
 
 /// A garbage collector implementation.
@@ -222,7 +226,7 @@ pub unsafe trait GcContext: Sized {
     /// Must be a valid context!
     ///
     /// Don't invoke this directly
-    unsafe fn unfreeze(frozen: FrozenContext<Self>);
+    unsafe fn unfreeze(frozen: FrozenContext<'_, Self>) -> &'_ mut Self;
 
     #[inline(always)]
     #[doc(hidden)]
@@ -320,7 +324,7 @@ impl<'a, C: GcContext> FrozenContext<'a, C> {
     ///
     /// This is an implementation detail
     #[inline]
-    pub unsafe fn unfreeze(ctx: Self) {
+    pub unsafe fn unfreeze(ctx: Self) -> &'a mut C {
         C::unfreeze(ctx)
     }
     #[inline(always)]

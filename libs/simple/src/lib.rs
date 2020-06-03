@@ -769,6 +769,10 @@ struct PendingCollectionTracker {
     total_contexts: AtomicUsize,
 }
 
+/// We're careful - I swear :D
+unsafe impl Send for RawSimpleCollector {}
+unsafe impl Sync for RawSimpleCollector {}
+
 /// The internal data for a simple collector
 struct RawSimpleCollector {
     pending: PendingCollectionTracker,
@@ -990,7 +994,7 @@ unsafe impl GcContext for SimpleCollectorContext {
         FrozenContext::new(self)
     }
 
-    unsafe fn unfreeze(frozen: FrozenContext<Self>) {
+    unsafe fn unfreeze(frozen: FrozenContext<'_, Self>) -> &'_ mut Self {
         let ctx = FrozenContext::into_inner(frozen);
         let dyn_ptr = ctx.0.frozen_ptr.replace(None).unwrap();
         ctx.0.collector.pending.persistent_roots
@@ -999,6 +1003,7 @@ unsafe impl GcContext for SimpleCollectorContext {
             ctx.0.shadow_stack.borrow_mut().pop(),
             Some(dyn_ptr)
         );
+        ctx
     }
 
 

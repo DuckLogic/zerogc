@@ -36,5 +36,3 @@ implicit-grey-stack = []
 zerogc-derive = { path = "../derive" }
 # Used for binary_trees parallel examle
 rayon = "^1.3"
-# Used for thread local contexts
-thread_local = "^1"

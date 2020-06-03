@@ -1,13 +1,15 @@
 #![feature(
     arbitrary_self_types, // Unfortunately this is required for methods on Gc refs
 )]
-use zerogc::{safepoint, safepoint_recurse, GcSimpleAlloc, GcCell, GcSafe};
+use zerogc::{
+    safepoint, safepoint_recurse, freeze_safepoint, unfreeze,
+    GcSimpleAlloc, GcCell, GcSafe
+};
 
 use zerogc_simple::{SimpleCollector, SimpleCollectorContext, Gc};
 use zerogc_derive::Trace;
 
-use thread_local::ThreadLocal;
-use rayon::prelude::IntoParallelIterator;
+use rayon::prelude::*;
 use std::cell::RefCell;
 
 #[derive(Trace)]
@@ -37,19 +39,28 @@ fn bottom_up_tree<'gc>(collector: &'gc SimpleCollectorContext, depth: i32)
 
 fn inner(
     collector: &SimpleCollector,
-    gc: &mut ThreadLocal<RefCell<SimpleCollectorContext>>,
     depth: i32, iterations: u32
 ) -> String {
+    /*
+     * Technically these are never dropped,
+     * so after we're done working we can't GC again.
+     *
+     * This is pretty horrible
+     */
+    thread_local! {
+        static GC: RefCell<Option<SimpleCollectorContext>> = RefCell::new(None);
+    }
     let chk: i32 = (0 .. iterations).into_par_iter().map(|_| {
-        let gc = gc
-            .get_or(|| RefCell::new(collector.create_context()));
-        // This is sad
-        let gc = gc.borrow_mut();
-        let gc = &mut *gc;
-        safepoint_recurse!(gc, |gc, new_root| {
-            let () = new_root;
-            let a = bottom_up_tree(&gc, depth);
-            item_check(&a)
+        GC.with(|r| {
+            let mut r = r.borrow_mut();
+            let gc = r.get_or_insert_with(|| {
+                collector.create_context()
+            });
+            safepoint_recurse!(gc, |gc, new_root| {
+                let () = new_root;
+                let a = bottom_up_tree(&gc, depth);
+                item_check(&a)
+            })
         })
     }).sum();
     format!("{}\t trees of depth {}\t check: {}", iterations, depth, chk)
@@ -74,19 +85,14 @@ fn main() {
     let long_lived_tree = bottom_up_tree(&gc, max_depth);
     let (frozen, long_lived_tree) = freeze_safepoint!(gc, long_lived_tree);
 
-    let local_contexts = ThreadLocal::new();
-
     (min_depth / 2..max_depth / 2 + 1).into_par_iter().for_each(|half_depth| {
         let depth = half_depth * 2;
         let iterations = 1 << ((max_depth - depth + min_depth) as u32);
         // NOTE: We're relying on inner to do safe points internally
-        let message = inner(&collector, &mut new_gc, depth, iterations);
+        let message = inner(&collector, depth, iterations);
         println!("{}", message);
     });
-
-    drop(local_contexts);
-
-    let (_, long_lived_tree) = unfreeze!(gc);
+    unfreeze!(frozen => new_context, long_lived_tree);
 
     println!("long lived tree of depth {}\t check: {}", max_depth, item_check(&long_lived_tree));
 }
