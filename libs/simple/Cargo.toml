@@ -31,7 +31,7 @@ small-object-arenas = ["once_cell"]
 implicit-grey-stack = []
 # Support thread safety
 #
-# This slows down allocation
+# This slows down allocation slightly
 # It also waits for all mutator threads to reach a safepoint
 # before collection can begin. This is bacially copperative
 # threading.....
@@ -43,3 +43,7 @@ sync = [
 [dev-dependencies]
 # Used for examples :)
 zerogc-derive = { path = "../derive" }
+# Used for binary_trees parallel examle
+rayon = "^1.3"
+# Used for thread local contexts
+thread_local = "^1"
