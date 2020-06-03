@@ -1241,10 +1241,13 @@ unsafe impl<'gc, T: GcSafe + 'gc> GcSimpleAlloc<'gc, T> for &'gc SimpleCollector
         self.0.collector.heap.allocator.alloc(value)
     }
 }
-/// A collector context can only be used on a single thread
+/// If we're built with threading support,
+/// a collector context can technically be sent across threads.
 ///
-/// This is true even if were operating in thread-safe mode
-impl !Send for SimpleCollectorContext {}
+/// It's usually not a good idea
+// NOTE: Manual derive is nessicarry because of `frozen_ptr`
+#[cfg(feature = "sync")]
+unsafe impl Send for SimpleCollectorContext {}
 
 struct GcType {
     value_size: usize,
