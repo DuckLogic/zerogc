@@ -10,7 +10,6 @@ use zerogc_simple::{SimpleCollector, SimpleCollectorContext, Gc};
 use zerogc_derive::Trace;
 
 use rayon::prelude::*;
-use std::cell::RefCell;
 
 #[derive(Trace)]
 struct Tree<'gc> {
@@ -41,26 +40,12 @@ fn inner(
     collector: &SimpleCollector,
     depth: i32, iterations: u32
 ) -> String {
-    /*
-     * Technically these are never dropped,
-     * so after we're done working we can't GC again.
-     *
-     * This is pretty horrible
-     */
-    thread_local! {
-        static GC: RefCell<Option<SimpleCollectorContext>> = RefCell::new(None);
-    }
     let chk: i32 = (0 .. iterations).into_par_iter().map(|_| {
-        GC.with(|r| {
-            let mut r = r.borrow_mut();
-            let gc = r.get_or_insert_with(|| {
-                collector.create_context()
-            });
-            safepoint_recurse!(gc, |gc, new_root| {
-                let () = new_root;
-                let a = bottom_up_tree(&gc, depth);
-                item_check(&a)
-            })
+        let mut gc = collector.create_context();
+        safepoint_recurse!(gc, |gc, new_root| {
+            let () = new_root;
+            let a = bottom_up_tree(&gc, depth);
+            item_check(&a)
         })
     }).sum();
     format!("{}\t trees of depth {}\t check: {}", iterations, depth, chk)
