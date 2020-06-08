@@ -31,6 +31,44 @@ use crossbeam::atomic::AtomicCell;
 use parking_lot::{Mutex, Condvar};
 use std::collections::HashSet;
 
+use slog::{Logger, FnValue, o, debug, trace};
+
+#[derive(Clone)]
+struct ThreadId {
+    id: std::thread::ThreadId,
+    name: Option<String>
+}
+impl ThreadId {
+    fn current() -> ThreadId {
+        let thread = std::thread::current();
+        ThreadId {
+            id: thread.id(),
+            name: thread.name().map(String::from)
+        }
+    }
+}
+impl slog::Value for ThreadId {
+    fn serialize(
+        &self, _record: &slog::Record,
+        key: &'static str,
+        serializer: &mut dyn slog::Serializer
+    ) -> slog::Result<()> {
+        let id = self.id;
+        match self.name {
+            Some(ref name) => {
+                serializer.emit_arguments(key, &format_args!(
+                    "{}: {:?}", *name, id
+                ))
+            },
+            None => {
+                serializer.emit_arguments(key, &format_args!(
+                    "{:?}", id
+                ))
+            },
+        }
+    }
+}
+
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
 #[cfg(not(feature = "small-object-arenas"))]
@@ -244,7 +282,14 @@ impl PendingCollection {
 pub struct SimpleCollector(Arc<RawSimpleCollector>);
 impl SimpleCollector {
     pub fn create() -> Self {
+        SimpleCollector::with_logger(Logger::root(
+            slog::Discard,
+            o!()
+        ))
+    }
+    pub fn with_logger(logger: Logger) -> Self {
         let mut collector = Arc::new(RawSimpleCollector {
+            logger,
             pending: PendingCollectionTracker::new(),
             heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD)
         });
@@ -261,10 +306,20 @@ impl SimpleCollector {
     /// Doing otherwise can cause deadlocks/panics.
     pub fn create_context(&self) -> SimpleCollectorContext {
         let id = unsafe { self.0.pending.add_context() };
+        // TODO: Avoid calling if logger isn't being used
+        let original_thread = ThreadId::current();
+        trace!(
+            self.0.logger, "Creating new context";
+            "id" => id, "current_thread" => &original_thread
+        );
         let shadow_stack = RefCell::new(ShadowStack {
             elements: Vec::with_capacity(4), id
         });
         SimpleCollectorContext(Arc::new(RawContext {
+            logger: self.0.logger.new(o!(
+                "original_id" => id,
+                "original_thread" => original_thread
+            )),
             shadow_stack, collector: self.0.clone(),
             frozen_ptr: Cell::new(None)
         }))
@@ -656,6 +711,16 @@ impl PendingCollectionTracker {
          */
         self.wait.notify_all();
     }
+    fn known_shadow_stacks(&self) -> usize {
+        let pending = self.pending.lock();
+        pending.as_ref().map_or(0, |pending| {
+            pending.shadow_stacks.len()
+        }) + self.persistent_roots.num_frozen_stacks()
+    }
+    fn num_total_contexts(&self) -> usize {
+        self.total_contexts
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
     /// Push a context that's pending collection
     ///
     /// If `should_collect == true`, this will implicitly begin a collection
@@ -692,8 +757,7 @@ impl PendingCollectionTracker {
         let known_shadow_stacks = temp_shadow_stacks
             + self.persistent_roots.num_frozen_stacks();
         use std::cmp::Ordering;
-        let total_contexts = self.total_contexts
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let total_contexts = self.num_total_contexts();
         match known_shadow_stacks.cmp(&total_contexts) {
             Ordering::Less => {
                 // We should already be waiting
@@ -796,6 +860,7 @@ unsafe impl Sync for RawSimpleCollector {}
 
 /// The internal data for a simple collector
 struct RawSimpleCollector {
+    logger: Logger,
     pending: PendingCollectionTracker,
     heap: GcHeap,
 }
@@ -810,9 +875,29 @@ impl RawSimpleCollector {
         &self, pending: PendingCollection,
         frozen_stacks: &[NonNull<ShadowStack>]
     ) {
+        // NOTE: We keep this trace since it actually dumps contets of stacks
+        trace!(
+            self.logger, "Beginning simple collection";
+            "current_thread" => FnValue(|_| ThreadId::current()),
+            "original_size" => self.heap.allocator.allocated_size(),
+            "pending_stacks" => FnValue(|_| {
+                format!("{:?}", pending.shadow_stacks.iter()
+                    .map(|ptr| (*ptr.as_ptr()).elements.clone())
+                    .collect::<Vec<_>>())
+            }),
+            "frozen_stacks" => FnValue(|_| {
+                format!("{:?}", frozen_stacks.iter()
+                    .map(|ptr| (*ptr.as_ptr()).elements.clone())
+                    .collect::<Vec<_>>())
+            }),
+            "total_contexts" => FnValue(|_| self.pending.num_total_contexts()),
+            "known_shadow_stacks" => FnValue(|_| self.pending.known_shadow_stacks()),
+            "state" => FnValue(|_| format!("{:?}", self.pending.state.load())),
+        );
         let mut roots: Vec<*mut dyn DynTrace> = pending.iter().collect();
         roots.extend(frozen_stacks.iter()
             .flat_map(|stack| (*stack.as_ptr()).elements.iter()));
+        let num_roots = roots.len();
         let mut task = CollectionTask {
             expected_collector: self as *const Self as *mut Self,
             roots, heap: &self.heap,
@@ -822,7 +907,16 @@ impl RawSimpleCollector {
                 Vec::with_capacity(64)
             }
         };
+        let original_size = self.heap.allocator.allocated_size();
         task.run();
+        let updated_size = self.heap.allocator.allocated_size();
+        debug!(
+            self.logger, "Finished simple GC";
+            "current_thread" => FnValue(|_| ThreadId::current()),
+            "num_roots" => num_roots,
+            "original_size" => original_size,
+            "memory_freed" => original_size - updated_size
+        );
         self.pending.finish_collection();
     }
 }
@@ -950,7 +1044,8 @@ struct RawContext {
     collector: Arc<RawSimpleCollector>,
     // NOTE: We are Send, not Sync
     shadow_stack: RefCell<ShadowStack>,
-    frozen_ptr: Cell<Option<*mut dyn DynTrace>>
+    frozen_ptr: Cell<Option<*mut dyn DynTrace>>,
+    logger: Logger
 }
 impl RawContext {
     /// Attempt a collection,
@@ -966,6 +1061,15 @@ impl RawContext {
                 self.collector.perform_raw_collection(pending, &frozen_stacks)
             },
             PendingStatus::NeedToWait => {
+                trace!(
+                    self.logger, "Awaiting collection";
+                    "current_thread" => FnValue(|_| ThreadId::current()),
+                    "stack_id" => shadow_stack.id,
+                    "shadow_stack" => ?shadow_stack.elements,
+                    "total_contexts" => FnValue(|_| self.collector.pending.num_total_contexts()),
+                    "known_shadow_stacks" => FnValue(|_| self.collector.pending.known_shadow_stacks()),
+                    "state" => FnValue(|_| format!("{:?}", self.collector.pending.state.load()))
+               );
                 self.collector.pending.await_collection();
             }
             PendingStatus::AlreadyFinished => {} // Done :)
@@ -977,6 +1081,8 @@ impl Drop for RawContext {
         if self.frozen_ptr.get().is_some() {
             todo!("Undefined behavior to leak/drop frozen collector")
         }
+        // TODO: Is it a good idea to log in Drop?
+        trace!(self.logger, "Freeing context");
         unsafe { self.collector.pending.free_context() }
     }
 }
