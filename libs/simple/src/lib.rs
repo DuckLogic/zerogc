@@ -28,7 +28,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use crossbeam::atomic::AtomicCell;
-use parking_lot::{Mutex, Condvar};
+use parking_lot::{Mutex, Condvar, MutexGuard, MappedMutexGuard};
 use std::collections::HashSet;
 
 use slog::{Logger, FnValue, o, debug, trace};
@@ -255,29 +255,6 @@ impl PersistentRoots {
 unsafe impl Send for PersistentRoots {}
 /// This is only safe since we use a mutex
 unsafe impl Sync for PersistentRoots {}
-
-/// The state of a collector waiting for all its contexts
-/// to reach a safepoint
-struct PendingCollection {
-    /// The shadow stacks for all of the collectors that
-    /// are currently waiting.
-    ///
-    /// This does not contain any of the frozen context stacks.
-    /// Those are handled by [PersistentRoots].
-    shadow_stacks: Vec<NonNull<ShadowStack>>
-}
-impl PendingCollection {
-    fn new() -> Self {
-        PendingCollection {
-            shadow_stacks: Vec::new()
-        }
-    }
-    #[inline]
-    unsafe fn iter(&self) -> impl Iterator<Item=*mut dyn DynTrace> + '_ {
-        self.shadow_stacks.iter()
-            .flat_map(|s| (&*s.as_ptr()).elements.iter().cloned())
-    }
-}
 
 pub struct SimpleCollector(Arc<RawSimpleCollector>);
 impl SimpleCollector {
@@ -608,21 +585,16 @@ unsafe impl Send for SimpleAlloc {}
 /// raw pointer to the collector (we only use it as an id)
 unsafe impl Sync for SimpleAlloc {}
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-#[repr(u8)]
-enum PendingState {
-    /// We aren't collecting anything
-    NotCollecting,
-    /// We are waiting for a collection
-    Waiting,
-    /// A collection is in progress
-    InProgress
-}
 /// Keeps track of a pending collection (if any)
 struct PendingCollectionTracker {
     persistent_roots: PersistentRoots,
-    state: AtomicCell<PendingState>,
-    /// The currently pending collection (if any)
+    /// Simple flag on whether we're currently collecting
+    ///
+    /// This should be true whenever `self.pending` is `Some`.
+    /// However if you don't hold the lock you may not always
+    /// see a fully consistent state.
+    collecting: AtomicBool,
+    /// A pointer to the currently pending collection (if any)
     ///
     /// Once the number of the known roots in the pending collection
     /// is equal to the number of `total_contexts`,
@@ -632,28 +604,37 @@ struct PendingCollectionTracker {
     /// at a safepoint.
     ///
     /// This is also used to notify threads when a collection is over.
-    wait: Condvar,
+    safepoint_wait: Condvar,
     /// The number of active contexts
     ///
     /// Leaking a context is "safe" in the sense
     /// it wont cause undefined behavior,
     /// but it will cause deadlock,
-    total_contexts: AtomicUsize
+    total_contexts: AtomicUsize,
+    next_pending_id: AtomicCell<u64>
 }
 impl PendingCollectionTracker {
     fn new() -> Self {
         PendingCollectionTracker {
             persistent_roots: PersistentRoots::new(),
-            state: AtomicCell::new(PendingState::NotCollecting),
             total_contexts: AtomicUsize::new(0),
+            collecting: AtomicBool::new(false),
             pending: Mutex::new(None),
-            wait: Condvar::new()
+            safepoint_wait: Condvar::new(),
+            next_pending_id: AtomicCell::new(0)
         }
     }
-    #[inline]
-    pub fn is_waiting(&self) -> bool {
-        // NOTE: This implicitly has Acquire ordering
-        self.state.load() == PendingState::Waiting
+    fn next_pending_id(&self) -> u64 {
+        let mut id = self.next_pending_id.load();
+        loop {
+            let next = id.checked_add(1).expect("Overflow");
+            match self.next_pending_id.compare_exchange(id, next) {
+                Ok(_) => return id,
+                Err(actual) => {
+                    id = actual;
+                }
+            }
+        }
     }
     unsafe fn add_context(&self) -> usize {
         /*
@@ -661,9 +642,9 @@ impl PendingCollectionTracker {
          * happening at this time. It's unsafe to create a context
          * while a collection is in progress.
          */
-        let mut guard = self.pending.lock();
-        while self.state.load() == PendingState::InProgress {
-            self.wait.wait(&mut guard);
+        let mut pending = self.pending.lock();
+        while pending.is_some() {
+            self.safepoint_wait.wait(&mut pending);
         }
         let mut old = self.total_contexts.load(Ordering::Acquire);
         loop {
@@ -685,9 +666,9 @@ impl PendingCollectionTracker {
         /*
          * Ensure we don't have a collection in progress
          */
-        let mut guard = self.pending.lock();
-        while self.state.load() == PendingState::InProgress {
-            self.wait.wait(&mut guard);
+        let mut pending = self.pending.lock();
+        while pending.is_some() {
+            self.safepoint_wait.wait(&mut pending);
         }
         let mut total = self.total_contexts.load(Ordering::Acquire);
         loop {
@@ -709,59 +690,152 @@ impl PendingCollectionTracker {
          * to start collecting. Thus we need to notify them to avoid
          * deadlock.
          */
-        self.wait.notify_all();
-    }
-    fn known_shadow_stacks(&self) -> usize {
-        let pending = self.pending.lock();
-        pending.as_ref().map_or(0, |pending| {
-            pending.shadow_stacks.len()
-        }) + self.persistent_roots.num_frozen_stacks()
+        self.safepoint_wait.notify_all();
     }
     fn num_total_contexts(&self) -> usize {
         self.total_contexts
             .load(std::sync::atomic::Ordering::SeqCst)
     }
+    /// Wait until the specified collection is finished
+    unsafe fn await_collection(
+        &self, mut expected_collection: MappedMutexGuard<PendingCollection>
+    ) {
+        let expected_id = expected_collection.id;
+        expected_collection.num_waiters += 1;
+        drop(expected_collection);
+        loop {
+            let mut lock = self.pending.lock();
+            match *lock {
+                Some(ref mut pending) => {
+                    /*
+                     * We should never move onto a new collection
+                     * till we're finished waiting....
+                     */
+                    assert_eq!(expected_id, pending.id);
+                    // Since we're Some, this should be true
+                    debug_assert!(self.collecting.load(Ordering::SeqCst));
+                    match pending.state {
+                        PendingState::Finished => {
+                            dbg!(std::thread::current(), expected_id, pending.num_waiters);
+                            pending.num_waiters -= 1;
+                            if pending.num_waiters == 0 {
+                                // We're done :)
+                                dbg!("Finished all waiting", pending.id, std::thread::current());
+                                *lock = None;
+                                assert!(self.collecting.compare_and_swap(
+                                    true, false,
+                                    Ordering::SeqCst
+                                ));
+                            }
+                            return
+                        },
+                        PendingState::InProgress | PendingState::Waiting => {
+                            /* still need to wait */
+                        }
+                    }
+                }
+                None => {
+                    dbg!(std::thread::current());
+                    panic!(
+                        "Unexpectedly finished collection: {}",
+                        expected_id
+                    )
+                }
+            }
+            /*
+             * Block until collection finishes
+             * Parking lot says there shouldn't be any "spurious"
+             * (accidental) wakeups. However I guess it's possible
+             * we're woken up somehow in the middle of collection.
+             * I'm going to loop just in case :)
+             */
+            self.safepoint_wait.wait(&mut lock);
+        }
+    }
+    unsafe fn finish_collection(&self, mut guard: MutexGuard<Option<PendingCollection>>) {
+        let waiting = {
+            let pending = guard.as_mut().unwrap();
+            assert_eq!(pending.state, PendingState::InProgress);
+            pending.state = PendingState::Finished;
+            pending.num_waiters
+        };
+        if waiting == 0 {
+            dbg!("Freeing collection", guard.as_ref().unwrap().id, std::thread::current());
+            *guard = None;
+            assert!(self.collecting.compare_and_swap(
+                true, false,
+                Ordering::SeqCst
+            ));
+        }
+        drop(guard);
+        // Notify all blocked threads
+        self.safepoint_wait.notify_all();
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PendingState {
+    /// The desired collection was finished
+    Finished,
+    /// The collection is in progress
+    InProgress,
+    /// Waiting for all the threads to stop at a safepoint
+    ///
+    /// We need every thread's shadow stack to safely proceed.
+    Waiting
+}
+
+/// The state of a collector waiting for all its contexts
+/// to reach a safepoint
+struct PendingCollection {
+    /// The state of the current collection
+    state: PendingState,
+    /// The shadow stacks for all of the collectors that
+    /// are currently waiting.
+    ///
+    /// This does not contain any of the frozen context stacks.
+    /// Those are handled by [PersistentRoots].
+    shadow_stacks: Vec<NonNull<ShadowStack>>,
+    /// Number of threads currently waiting for completion
+    ///
+    /// Once this reaches zero we can free this collection
+    num_waiters: usize,
+    /// The unique id of this safepoint
+    ///
+    /// 64-bit integers pretty much never overflow (for like 100 years)
+    id: u64
+}
+impl PendingCollection {
+    fn new(id: u64) -> Self {
+        PendingCollection {
+            state: PendingState::Waiting,
+            shadow_stacks: Vec::new(),
+            num_waiters: 0,
+            id
+        }
+    }
+
     /// Push a context that's pending collection
     ///
-    /// If `should_collect == true`, this will implicitly begin a collection
-    /// if we're not already collecting.
-    ///
     /// Undefined behavior if the context roots are invalid in any way.
-    unsafe fn push_pending_context(&self, shadow_stack: &ShadowStack, should_begin: bool) -> PendingStatus {
-        let mut roots = self.pending.lock();
-        if should_begin {
-            match self.state.load() {
-                PendingState::InProgress => unreachable!(),
-                PendingState::NotCollecting => {
-                    self.state.store(PendingState::Waiting);
-                    assert!(roots.is_none());
-                    *roots = Some(PendingCollection::new());
-                },
-                PendingState::Waiting => {}, // Already waiting
-            }
-        }
-        let temp_shadow_stacks: usize = match *roots {
-            None => {
-                assert_eq!(self.state.load(), PendingState::NotCollecting);
-                assert!(!should_begin);
-                // We didn't have anything pending
-                return PendingStatus::AlreadyFinished
-            },
-            Some(ref mut roots) => {
-                assert_eq!(self.state.load(), PendingState::Waiting);
-                roots.shadow_stacks.push(NonNull::from(shadow_stack));
-                roots.shadow_stacks.len()
-            }
-        };
+    unsafe fn push_pending_context(
+        &mut self, shadow_stack: &ShadowStack,
+        persistent_roots: &PersistentRoots,
+        total_contexts: usize
+    ) -> PendingStatus {
+        assert_eq!(self.state, PendingState::Waiting);
+        self.shadow_stacks.push(
+            NonNull::from(shadow_stack)
+        );
+        let temp_shadow_stacks = self.shadow_stacks.len();
         // Add in shadow stacks from frozen collectors
         let known_shadow_stacks = temp_shadow_stacks
-            + self.persistent_roots.num_frozen_stacks();
+            + persistent_roots.num_frozen_stacks();
         use std::cmp::Ordering;
-        let total_contexts = self.num_total_contexts();
         match known_shadow_stacks.cmp(&total_contexts) {
             Ordering::Less => {
                 // We should already be waiting
-                assert_eq!(self.state.load(), PendingState::Waiting);
+                assert_eq!(self.state, PendingState::Waiting);
                 /*
                  * We're still waiting on some other contexts
                  * Not really sure what it means to 'wait' in
@@ -779,13 +853,19 @@ impl PendingCollectionTracker {
                  * We also assume that the shadow stacks correspond to
                  * the program's roots.
                  */
-                assert_eq!(self.state.compare_and_swap(
-                    PendingState::Waiting,
-                    PendingState::InProgress
-                ), PendingState::Waiting);
+                assert_eq!(
+                    std::mem::replace(
+                        &mut self.state,
+                        PendingState::InProgress
+                    ),
+                    PendingState::Waiting
+                );
                 PendingStatus::ShouldCollect {
-                    pending: roots.take().unwrap(),
-                    frozen_stacks: self.persistent_roots.frozen_stacks()
+                    temp_stacks: std::mem::replace(
+                        &mut self.shadow_stacks,
+                        Vec::new()
+                    ),
+                    frozen_stacks: persistent_roots.frozen_stacks()
                 }
             },
             Ordering::Greater => {
@@ -798,57 +878,10 @@ impl PendingCollectionTracker {
             }
         }
     }
-    unsafe fn await_collection(&self) {
-        loop {
-            let mut lock = self.pending.lock();
-            // State should always be consistent
-            let state = self.state.load();
-            match *lock {
-                Some(_) => {
-                    assert_eq!(state, PendingState::Waiting);
-                },
-                None => {
-                    match state {
-                        PendingState::Waiting => unreachable!(),
-                        PendingState::NotCollecting => {
-                            // We're done :)
-                            return
-                        },
-                        PendingState::InProgress => {
-                            // Keep waiting
-                        }
-                    }
-                }
-            }
-            /*
-             * Block until collection finishes
-             * Parking lot says there shouldn't be any "spurious"
-             * (accidental) wakeups. However I guess it's possible
-             * we're woken up somehow in the middle of collection.
-             * I'm going to loop just in case :)
-             */
-            self.wait.wait(&mut lock);
-        }
-    }
-    unsafe fn finish_collection(&self) {
-        let guard = self.pending.lock();
-        assert!(guard.is_none());
-        assert_eq!(
-            self.state.compare_and_swap(
-                PendingState::InProgress,
-                PendingState::NotCollecting
-            ),
-            PendingState::InProgress
-        );
-        drop(guard);
-        // Notify all blocked threads
-        self.wait.notify_all();
-    }
 }
 enum PendingStatus {
-    AlreadyFinished,
     ShouldCollect {
-        pending: PendingCollection,
+        temp_stacks: Vec<NonNull<ShadowStack>>,
         frozen_stacks: Vec<NonNull<ShadowStack>>
     },
     NeedToWait
@@ -867,36 +900,29 @@ struct RawSimpleCollector {
 impl RawSimpleCollector {
     #[inline]
     fn should_collect(&self) -> bool {
-        self.heap.should_collect() || self.pending.is_waiting()
+        /*
+         * All these loads are relaxed. Its okay if we see
+         * delayed updates as long as we see them eventually.
+         * This is based on the assumption that safepoints are
+         * frequent but need to be cheap.
+         *
+         * If this is false, we should be using `Acquire`
+         * ordering.
+         */
+        self.heap.should_collect() || self.pending
+            .collecting.load(Ordering::Relaxed)
     }
     #[cold]
     #[inline(never)]
     unsafe fn perform_raw_collection(
-        &self, pending: PendingCollection,
+        &self, temp_stacks: &[NonNull<ShadowStack>],
         frozen_stacks: &[NonNull<ShadowStack>]
     ) {
-        // NOTE: We keep this trace since it actually dumps contets of stacks
-        trace!(
-            self.logger, "Beginning simple collection";
-            "current_thread" => FnValue(|_| ThreadId::current()),
-            "original_size" => self.heap.allocator.allocated_size(),
-            "pending_stacks" => FnValue(|_| {
-                format!("{:?}", pending.shadow_stacks.iter()
-                    .map(|ptr| (*ptr.as_ptr()).elements.clone())
-                    .collect::<Vec<_>>())
-            }),
-            "frozen_stacks" => FnValue(|_| {
-                format!("{:?}", frozen_stacks.iter()
-                    .map(|ptr| (*ptr.as_ptr()).elements.clone())
-                    .collect::<Vec<_>>())
-            }),
-            "total_contexts" => FnValue(|_| self.pending.num_total_contexts()),
-            "known_shadow_stacks" => FnValue(|_| self.pending.known_shadow_stacks()),
-            "state" => FnValue(|_| format!("{:?}", self.pending.state.load())),
-        );
-        let mut roots: Vec<*mut dyn DynTrace> = pending.iter().collect();
-        roots.extend(frozen_stacks.iter()
-            .flat_map(|stack| (*stack.as_ptr()).elements.iter()));
+        let roots: Vec<*mut dyn DynTrace> = frozen_stacks.iter()
+            .chain(&*temp_stacks)
+            .flat_map(|stack| (*stack.as_ptr()).elements.iter())
+            .cloned()
+            .collect();
         let num_roots = roots.len();
         let mut task = CollectionTask {
             expected_collector: self as *const Self as *mut Self,
@@ -917,7 +943,6 @@ impl RawSimpleCollector {
             "original_size" => original_size,
             "memory_freed" => original_size - updated_size
         );
-        self.pending.finish_collection();
     }
 }
 struct CollectionTask<'a> {
@@ -1055,24 +1080,67 @@ impl RawContext {
     #[cold]
     #[inline(never)]
     unsafe fn maybe_collect(&self) {
+        let mut pending = self.collector.pending.pending.lock();
+        if pending.is_none() {
+            assert!(!self.collector.pending.collecting.compare_and_swap(
+                false, true, Ordering::SeqCst
+            ));
+            let id = self.collector.pending.next_pending_id();
+            *pending = Some(PendingCollection::new(id));
+        }
         let shadow_stack = self.shadow_stack.borrow();
-        match self.collector.pending.push_pending_context(&*shadow_stack, true) {
-            PendingStatus::ShouldCollect { pending, frozen_stacks } => {
-                self.collector.perform_raw_collection(pending, &frozen_stacks)
+        let status = pending.as_mut().unwrap().push_pending_context(
+            &*shadow_stack, &self.collector.pending.persistent_roots,
+            self.collector.pending.num_total_contexts()
+        );
+        match status {
+            PendingStatus::ShouldCollect { temp_stacks, frozen_stacks } => {
+                // NOTE: We keep this trace since it actually dumps contets of stacks
+                trace!(
+                    self.logger, "Beginning simple collection";
+                    "current_thread" => FnValue(|_| ThreadId::current()),
+                    "original_size" => self.collector.heap.allocator.allocated_size(),
+                    "temp_stacks" => FnValue(|_| {
+                        format!("{:?}", temp_stacks.iter()
+                            .map(|ptr| (*ptr.as_ptr()).elements.clone())
+                            .collect::<Vec<_>>())
+                    }),
+                    "frozen_stacks" => FnValue(|_| {
+                        format!("{:?}", frozen_stacks.iter()
+                            .map(|ptr| (*ptr.as_ptr()).elements.clone())
+                            .collect::<Vec<_>>())
+                    }),
+                    "total_contexts" => FnValue(|_| self.collector.pending.num_total_contexts()),
+                    "state" => ?pending.as_ref().map(|pending| pending.state),
+                    "collector_id" => ?pending.as_ref().map(|pending| pending.id),
+                );
+                self.collector.perform_raw_collection(
+                    &temp_stacks, &frozen_stacks
+                );
+                self.collector.pending.finish_collection(pending);
             },
             PendingStatus::NeedToWait => {
+                let pending = MutexGuard::map(pending, |p| p.as_mut().unwrap());
                 trace!(
                     self.logger, "Awaiting collection";
                     "current_thread" => FnValue(|_| ThreadId::current()),
                     "stack_id" => shadow_stack.id,
                     "shadow_stack" => ?shadow_stack.elements,
                     "total_contexts" => FnValue(|_| self.collector.pending.num_total_contexts()),
-                    "known_shadow_stacks" => FnValue(|_| self.collector.pending.known_shadow_stacks()),
-                    "state" => FnValue(|_| format!("{:?}", self.collector.pending.state.load()))
-               );
-                self.collector.pending.await_collection();
+                    "known_temp_stacks" => FnValue(|_| pending.shadow_stacks.len()),
+                    "known_frozen_stacks" => FnValue(|_| self.collector.pending.persistent_roots.num_frozen_stacks()),
+                    "state" => ?pending.state,
+                    "collector_id" => pending.id
+                );
+                let expected_id = pending.id;
+                self.collector.pending.await_collection(pending);
+                trace!(
+                    self.logger, "Finished waiting for collection";
+                    "current_thread" => FnValue(|_| ThreadId::current()),
+                    "stack_id" => shadow_stack.id,
+                    "collector_id" => expected_id
+                );
             }
-            PendingStatus::AlreadyFinished => {} // Done :)
         }
     }
 }
