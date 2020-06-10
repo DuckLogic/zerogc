@@ -384,11 +384,9 @@ impl PendingCollectionTracker {
                     debug_assert!(self.collecting.load(Ordering::SeqCst));
                     match pending.state {
                         PendingState::Finished => {
-                            dbg!(std::thread::current(), expected_id, pending.num_waiters);
                             pending.num_waiters -= 1;
                             if pending.num_waiters == 0 {
                                 // We're done :)
-                                dbg!("Finished all waiting", pending.id, std::thread::current());
                                 *lock = None;
                                 assert!(self.collecting.compare_and_swap(
                                     true, false,
@@ -403,7 +401,6 @@ impl PendingCollectionTracker {
                     }
                 }
                 None => {
-                    dbg!(std::thread::current());
                     panic!(
                         "Unexpectedly finished collection: {}",
                         expected_id
@@ -428,7 +425,6 @@ impl PendingCollectionTracker {
             pending.num_waiters
         };
         if waiting == 0 {
-            dbg!("Freeing collection", guard.as_ref().unwrap().id, std::thread::current());
             *guard = None;
             assert!(self.collecting.compare_and_swap(
                 true, false,
