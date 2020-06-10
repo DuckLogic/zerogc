@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use crossbeam::atomic::AtomicCell;
 
 use slog::{Logger, FnValue, o, debug, trace};
-use crate::context::{cRawContext, ShadowStack, PendingCollectionTracker};
+use crate::context::{RawContext, ShadowStack, PendingCollectionTracker};
 use crate::utils::ThreadId;
 
 pub use crate::context::SimpleCollectorContext;
@@ -219,10 +219,10 @@ impl SimpleCollector {
         let original_thread = ThreadId::current();
         trace!(
             self.0.logger, "Creating new context";
-            "id" => id, "current_thread" => &original_thread
+            "old_num_total" => id, "current_thread" => &original_thread
         );
         let shadow_stack = RefCell::new(ShadowStack {
-            elements: Vec::with_capacity(4), id
+            elements: Vec::with_capacity(4)
         });
         SimpleCollectorContext(Arc::new(RawContext {
             logger: self.0.logger.new(o!(

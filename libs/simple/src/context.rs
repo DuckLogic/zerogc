@@ -75,7 +75,6 @@ impl RawContext {
                 trace!(
                     self.logger, "Awaiting collection";
                     "current_thread" => FnValue(|_| ThreadId::current()),
-                    "stack_id" => shadow_stack.id,
                     "shadow_stack" => ?shadow_stack.elements,
                     "total_contexts" => FnValue(|_| self.collector.pending.num_total_contexts()),
                     "known_temp_stacks" => FnValue(|_| pending.shadow_stacks.len()),
@@ -88,8 +87,7 @@ impl RawContext {
                 trace!(
                     self.logger, "Finished waiting for collection";
                     "current_thread" => FnValue(|_| ThreadId::current()),
-                    "stack_id" => shadow_stack.id,
-                    "collector_id" => expected_id
+                    "collector_id" => expected_id,
                 );
             }
         }
@@ -189,8 +187,6 @@ impl !Send for SimpleCollectorContext {}
 
 #[derive(Clone)]
 pub struct ShadowStack {
-    #[deprecated] // Not actually unique
-    pub(crate) id: usize,
     pub(crate) elements: Vec<*mut dyn DynTrace>
 }
 impl ShadowStack {
@@ -315,21 +311,24 @@ impl PendingCollectionTracker {
         while pending.is_some() {
             self.safepoint_wait.wait(&mut pending);
         }
-        let mut old = self.total_contexts.load(Ordering::Acquire);
+        let mut total = self.total_contexts.load(Ordering::Acquire);
         loop {
-            let updated = old.checked_add(1).unwrap();
+            let updated = total.checked_add(1).unwrap();
             match self.total_contexts.compare_exchange_weak(
-                old, updated,
+                total, updated,
                 Ordering::AcqRel,
                 Ordering::Acquire, // This is what crossbeam does
             ) {
-                Ok(_) => break,
+                Ok(new_total) => {
+                    total = new_total;
+                    break
+                },
                 Err(new_total) => {
-                    old = new_total;
+                    total = new_total;
                 }
             }
         }
-        old
+        total
     }
     pub unsafe fn free_context(&self) {
         /*
