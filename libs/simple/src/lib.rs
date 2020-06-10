@@ -15,7 +15,6 @@
 )]
 use zerogc::{GcSystem, GcSafe, Trace, GcVisitor, GcSimpleAlloc, GcRef, GcBrand, GcDirectBarrier};
 use std::alloc::Layout;
-use std::cell::{RefCell, Cell};
 use std::ptr::NonNull;
 use std::os::raw::c_void;
 use std::mem::{transmute, ManuallyDrop};
@@ -29,8 +28,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use crossbeam::atomic::AtomicCell;
 
-use slog::{Logger, FnValue, o, debug, trace};
-use crate::context::{RawContext, ShadowStack, PendingCollectionTracker};
+use slog::{Logger, FnValue, o, debug};
+use crate::context::{ShadowStack, PendingCollectionTracker};
 use crate::utils::ThreadId;
 
 pub use crate::context::SimpleCollectorContext;
@@ -214,24 +213,7 @@ impl SimpleCollector {
     /// Warning: Only one collector should be created per thread.
     /// Doing otherwise can cause deadlocks/panics.
     pub fn create_context(&self) -> SimpleCollectorContext {
-        let id = unsafe { self.0.pending.add_context() };
-        // TODO: Avoid calling if logger isn't being used
-        let original_thread = ThreadId::current();
-        trace!(
-            self.0.logger, "Creating new context";
-            "old_num_total" => id, "current_thread" => &original_thread
-        );
-        let shadow_stack = RefCell::new(ShadowStack {
-            elements: Vec::with_capacity(4)
-        });
-        SimpleCollectorContext(Arc::new(RawContext {
-            logger: self.0.logger.new(o!(
-                "original_id" => id,
-                "original_thread" => original_thread
-            )),
-            shadow_stack, collector: self.0.clone(),
-            frozen_ptr: Cell::new(None)
-        }))
+        unsafe { SimpleCollectorContext::create_root(self) }
     }
 }
 
@@ -518,10 +500,9 @@ impl RawSimpleCollector {
     #[inline]
     fn should_collect(&self) -> bool {
         /*
-         * All these loads are relaxed. Its okay if we see
-         * delayed updates as long as we see them eventually.
-         * This is based on the assumption that safepoints are
-         * frequent but need to be cheap.
+         * TODO: Consider relaxed ordering
+         * It'd be cheaper on ARM but potentially
+         * delay collection.....
          */
         self.heap.should_collect() || self.pending
             .collecting.load(Ordering::Acquire)
