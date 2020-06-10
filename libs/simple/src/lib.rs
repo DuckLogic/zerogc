@@ -278,8 +278,8 @@ impl GcHeap {
          * Eventual consistency should be enough to eventually
          * trigger a collection.
          */
-        self.allocator.allocated_size.load(Ordering::Relaxed)
-            >= self.threshold.load(Ordering::Relaxed)
+        self.allocator.allocated_size.load(Ordering::Acquire)
+            >= self.threshold.load(Ordering::Acquire)
     }
 }
 
@@ -522,12 +522,9 @@ impl RawSimpleCollector {
          * delayed updates as long as we see them eventually.
          * This is based on the assumption that safepoints are
          * frequent but need to be cheap.
-         *
-         * If this is false, we should be using `Acquire`
-         * ordering.
          */
         self.heap.should_collect() || self.pending
-            .collecting.load(Ordering::Relaxed)
+            .collecting.load(Ordering::Acquire)
     }
     #[cold]
     #[inline(never)]
