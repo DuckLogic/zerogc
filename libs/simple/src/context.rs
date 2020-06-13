@@ -1,8 +1,7 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak as WeakArc};
 use std::cell::{Cell, UnsafeCell};
-use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
+use std::sync::atomic::{Ordering, AtomicBool};
 use std::ptr::NonNull;
-use std::collections::HashSet;
 
 use slog::{Logger, FnValue, trace, Drain, o};
 use parking_lot::{MutexGuard, Mutex, Condvar, MappedMutexGuard};
@@ -12,6 +11,8 @@ use zerogc::{GcContext, Trace, FrozenContext};
 use crate::{SimpleCollector, RawSimpleCollector, DynTrace};
 use crate::utils::ThreadId;
 use std::mem::ManuallyDrop;
+use std::fmt::{Debug, Formatter};
+use std::fmt;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ContextState {
@@ -56,15 +57,27 @@ enum ContextState {
 }
 
 pub struct RawContext {
-    /*
-     * TODO: Encapsulate construction (create_context),
-     * making these fields private
-     */
     pub(crate) collector: Arc<RawSimpleCollector>,
     // NOTE: We are Send, not Sync
     shadow_stack: UnsafeCell<ShadowStack>,
     state: Cell<ContextState>,
     logger: Logger
+}
+impl Debug for RawContext {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.debug_struct("RawContext")
+            .field(
+                "collector",
+                &format_args!("{:p}", &self.collector)
+            )
+            .field(
+                "shadow_stacks",
+                // We're assuming this is valid....
+                unsafe { &*self.shadow_stack.get() }
+            )
+            .field("state", &self.state.get())
+            .finish()
+    }
 }
 impl RawContext {
     pub(crate) fn create(collector: Arc<RawSimpleCollector>) -> Arc<Self> {
@@ -208,9 +221,28 @@ impl Drop for SimpleCollectorContext {
     #[inline]
     fn drop(&mut self) {
         if self.root {
+            let collector = self.collector();
+            /*
+             * We expect the context is freed after
+             * this destructor since we should be the
+             * only reference.
+             * Essentially a freed context is implicitly
+             * in a separate state. The collector relies
+             * on this to know the context no longer
+             * needs to be valid and shouldn't block
+             * any pending collections.
+             */
+            debug_assert_eq!(Arc::strong_count(&*self.raw), 1);
             unsafe {
                 ManuallyDrop::drop(&mut self.raw)
             }
+            /*
+             * It's possible that other threads are waiting for a pending
+             * collection. Freeing this context could possibly allow them
+             * to start collecting. Thus we need to notify them to avoid
+             * deadlock.
+             */
+            collector.pending.notify_waiting_safepoints()
         }
     }
 }
@@ -220,55 +252,48 @@ unsafe impl GcContext for SimpleCollectorContext {
     #[inline]
     unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T) {
         debug_assert_eq!(self.raw.state.get(), ContextState::Active);
-        let dyn_ptr = unsafe { (*self.raw.shadow_stack.get()).push(value) };
+        let dyn_ptr = (*self.raw.shadow_stack.get())
+            .push(value);
         if self.raw.collector.should_collect() {
             self.raw.maybe_collect();
         }
         debug_assert_eq!(self.raw.state.get(), ContextState::Active);
-        let popped = unsafe {
-            (*self.raw.shadow_stack.get()).pop_unchecked()
-        };
+        let popped = (*self.raw.shadow_stack.get())
+            .pop_unchecked();
         debug_assert_eq!(popped, dyn_ptr);
     }
 
     unsafe fn frozen_safepoint<T: Trace>(&mut self, value: &mut &mut T)
                                          -> FrozenContext<'_, Self> {
         assert_eq!(self.raw.state.get(), ContextState::Active);
-        let dyn_ptr = unsafe { (*self.raw.shadow_stack.get()).push(value) };
+        let dyn_ptr = (*self.raw.shadow_stack.get())
+            .push(value);
+        assert_eq!(self.raw.state.get(), ContextState::Active);
+        self.raw.state.set(ContextState::Frozen {
+            last_ptr: dyn_ptr
+        });
         if self.raw.collector.should_collect() {
+            /*
+             * NOTE: This should implicitly notify threads
+             * in case someone was waiting on us.
+             */
             self.raw.maybe_collect();
         }
-        assert_eq!(self.raw.state.replace(ContextState::Frozen {
-            last_ptr: dyn_ptr
-        }), ContextState::Active);
-        /*
-         * The guard (FrozenContext) ensures that we wont be mutated.
-         * This is still extremely unsafe since we're assuming the pointer
-         * will remain valid.
-         * TODO: This is use after free if the user **doesn't** call unfreeze
-         * We should probably fix that.....
-         */
-        self.raw.collector.pending.persistent_roots.add_frozen_stack(unsafe {
-            NonNull::new_unchecked(self.raw.shadow_stack.get())
-        });
         FrozenContext::new(self)
     }
 
     unsafe fn unfreeze(frozen: FrozenContext<'_, Self>) -> &'_ mut Self {
         let ctx = FrozenContext::into_inner(frozen);
+        /*
+         * TODO: Ensure there is no collection in progess.
+         * A pending collection might be relying in the validity of this
+         * context's shadow stack, so unfreezing it while in progress
+         * could trigger undefined behavior!!!!!
+         */
         let dyn_ptr = match ctx.raw.state.get() {
             ContextState::Frozen { last_ptr } => last_ptr,
             state => unreachable!("{:?}", state)
         };
-        /*
-         * TODO: Persistent roots should not track this reference!
-         * This could lead to use after free!
-         * See coments in freeze
-         */
-        ctx.raw.collector.pending.persistent_roots
-            .remove_frozen_stack(unsafe {
-                NonNull::new_unchecked(ctx.raw.shadow_stack.get())
-            });
         let actual_ptr = unsafe { (*ctx.raw.shadow_stack.get()).pop() };
         debug_assert_eq!(actual_ptr, Some(dyn_ptr));
         ctx.raw.state.set(ContextState::Active);
@@ -279,16 +304,15 @@ unsafe impl GcContext for SimpleCollectorContext {
     unsafe fn recurse_context<T, F, R>(&self, value: &mut &mut T, func: F) -> R
         where T: Trace, F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R {
         debug_assert_eq!(self.raw.state.get(), ContextState::Active);
-        let dyn_ptr = unsafe { (*self.raw.shadow_stack.get()).push(value) };
+        let dyn_ptr = (*self.raw.shadow_stack.get())
+            .push(value);
         let mut sub_context = SimpleCollectorContext {
-            raw: unsafe {
-                /*
-                 * safe to copy because we wont drop it
-                 * Lifetime is guarenteed to be restricted to
-                 * the closure.
-                 */
-                std::ptr::read(&self.raw)
-            },
+            /*
+             * safe to copy because we wont drop it
+             * Lifetime is guarenteed to be restricted to
+             * the closure.
+             */
+            raw: std::ptr::read(&self.raw),
             root: false /* don't drop our pointer!!! */
         };
         let result = func(&mut sub_context, value);
@@ -296,9 +320,8 @@ unsafe impl GcContext for SimpleCollectorContext {
         // Since we're not the root, no need to run drop code!
         std::mem::forget(sub_context);
         debug_assert_eq!(self.raw.state.get(), ContextState::Active);
-        let actual_ptr = unsafe {
-            (*self.raw.shadow_stack.get()).pop_unchecked()
-        };
+        let actual_ptr = (*self.raw.shadow_stack.get())
+            .pop_unchecked();
         debug_assert_eq!(actual_ptr, dyn_ptr);
         result
     }
@@ -317,7 +340,7 @@ impl !Send for SimpleCollectorContext {}
 // Root tracking
 //
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ShadowStack {
     pub(crate) elements: Vec<*mut dyn DynTrace>
 }
@@ -360,49 +383,10 @@ impl ShadowStack {
 
 // Frozen contexts
 
-/// Persistent roots of the collector,
-/// that are known to be valid longer than the lifetime
-/// of a single call to `safepoint!`
-///
-/// These are not nessicarrily eternal.
-pub struct PersistentRoots {
-    /// Pointers to the currently used shadow stacks
-    ///
-    /// I guess we could use a faster hash function but
-    /// I don't really think freezing collectors is performance
-    /// critical.
-    // TODO: This could lead to use after free
-    frozen_shadow_stacks: Mutex<HashSet<NonNull<ShadowStack>>>
-}
-impl PersistentRoots {
-    pub fn new() -> Self {
-        PersistentRoots {
-            frozen_shadow_stacks: Mutex::new(HashSet::new())
-        }
-    }
-    unsafe fn add_frozen_stack(&self, ptr: NonNull<ShadowStack>) {
-        assert!(self.frozen_shadow_stacks.lock().insert(ptr));
-    }
-    unsafe fn remove_frozen_stack(&self, ptr: NonNull<ShadowStack>) {
-        assert!(self.frozen_shadow_stacks.lock().remove(&ptr));
-    }
-    fn num_frozen_stacks(&self) -> usize {
-        self.frozen_shadow_stacks.lock().len()
-    }
-    fn frozen_stacks(&self) -> Vec<NonNull<ShadowStack>> {
-        self.frozen_shadow_stacks.lock().iter().cloned().collect()
-    }
-}
-/// We're careful with our pointers
-unsafe impl Send for PersistentRoots {}
-/// This is only safe since we use a mutex
-unsafe impl Sync for PersistentRoots {}
-
 // Pending collections
 
 /// Keeps track of a pending collection (if any)
 pub struct PendingCollectionTracker {
-    persistent_roots: PersistentRoots,
     /// Simple flag on whether we're currently collecting
     ///
     /// This should be true whenever `self.pending` is `Some`.
@@ -421,22 +405,20 @@ pub struct PendingCollectionTracker {
     ///
     /// This is also used to notify threads when a collection is over.
     safepoint_wait: Condvar,
-    /// The number of active contexts
+    /// A list of all the known contexts
     ///
-    /// Leaking a context is "safe" in the sense
-    /// it wont cause undefined behavior,
-    /// but it will cause deadlock,
-    total_contexts: AtomicUsize,
+    /// This persists across collections. Once a context
+    /// is freed it's assumed to be unused.
+    known_contexts: Mutex<Vec<WeakArc<RawContext>>>,
     next_pending_id: AtomicCell<u64>
 }
 impl PendingCollectionTracker {
     pub fn new() -> Self {
         PendingCollectionTracker {
-            persistent_roots: PersistentRoots::new(),
-            total_contexts: AtomicUsize::new(0),
             collecting: AtomicBool::new(false),
             pending: Mutex::new(None),
             safepoint_wait: Condvar::new(),
+            known_contexts: Mutex::new(Vec::new()),
             next_pending_id: AtomicCell::new(0)
         }
     }
@@ -452,7 +434,7 @@ impl PendingCollectionTracker {
             }
         }
     }
-    pub unsafe fn add_context(&self) -> usize {
+    pub unsafe fn add_context(&self, raw: Arc<RawContext>) {
         /*
          * NOTE: We need to lock to ensure no collection is
          * happening at this time. It's unsafe to create a context
@@ -462,58 +444,15 @@ impl PendingCollectionTracker {
         while pending.is_some() {
             self.safepoint_wait.wait(&mut pending);
         }
-        let mut total = self.total_contexts.load(Ordering::Acquire);
-        loop {
-            let updated = total.checked_add(1).unwrap();
-            match self.total_contexts.compare_exchange_weak(
-                total, updated,
-                Ordering::AcqRel,
-                Ordering::Acquire, // This is what crossbeam does
-            ) {
-                Ok(new_total) => {
-                    total = new_total;
-                    break
-                },
-                Err(new_total) => {
-                    total = new_total;
-                }
-            }
-        }
-        total
+        let weak = Arc::downgrade(&raw);
+        // Now we have to lock the actual collection :p
+        let mut known_contexts = self.known_contexts.lock();
+        debug_assert!(!known_contexts.iter()
+            .any(|ctx| WeakArc::ptr_eq(ctx, &weak)));
+        known_contexts.push(weak);
     }
-    pub unsafe fn free_context(&self) {
-        /*
-         * Ensure we don't have a collection in progress
-         */
-        let mut pending = self.pending.lock();
-        while pending.is_some() {
-            self.safepoint_wait.wait(&mut pending);
-        }
-        let mut total = self.total_contexts.load(Ordering::Acquire);
-        loop {
-            assert_ne!(total, 0);
-            match self.total_contexts.compare_exchange(
-                total, total - 1,
-                Ordering::AcqRel,
-                Ordering::Acquire, // This is what crossbeam does
-            ) {
-                Ok(_) => break,
-                Err(new_total) => {
-                    total = new_total;
-                }
-            }
-        }
-        /*
-         * It's possible that other threads are waiting for a pending
-         * collection. Freeing this context could possibly allow them
-         * to start collecting. Thus we need to notify them to avoid
-         * deadlock.
-         */
+    pub fn notify_waiting_safepoints(&self) {
         self.safepoint_wait.notify_all();
-    }
-    pub fn num_total_contexts(&self) -> usize {
-        self.total_contexts
-            .load(std::sync::atomic::Ordering::SeqCst)
     }
     /// Wait until the specified collection is finished
     unsafe fn await_collection(
@@ -535,7 +474,6 @@ impl PendingCollectionTracker {
                     debug_assert!(self.collecting.load(Ordering::SeqCst));
                     match pending.state {
                         PendingState::Finished => {
-                            pending.num_waiters -= 1;
                             if pending.num_waiters == 0 {
                                 // We're done :)
                                 *lock = None;
@@ -585,49 +523,6 @@ impl PendingCollectionTracker {
         drop(guard);
         // Notify all blocked threads
         self.safepoint_wait.notify_all();
-    }
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum PendingState {
-    /// The desired collection was finished
-    Finished,
-    /// The collection is in progress
-    InProgress,
-    /// Waiting for all the threads to stop at a safepoint
-    ///
-    /// We need every thread's shadow stack to safely proceed.
-    Waiting
-}
-
-/// The state of a collector waiting for all its contexts
-/// to reach a safepoint
-struct PendingCollection {
-    /// The state of the current collection
-    state: PendingState,
-    /// The shadow stacks for all of the collectors that
-    /// are currently waiting.
-    ///
-    /// This does not contain any of the frozen context stacks.
-    /// Those are handled by [PersistentRoots].
-    shadow_stacks: Vec<NonNull<ShadowStack>>,
-    /// Number of threads currently waiting for completion
-    ///
-    /// Once this reaches zero we can free this collection
-    num_waiters: usize,
-    /// The unique id of this safepoint
-    ///
-    /// 64-bit integers pretty much never overflow (for like 100 years)
-    id: u64
-}
-impl PendingCollection {
-    pub fn new(id: u64) -> Self {
-        PendingCollection {
-            state: PendingState::Waiting,
-            shadow_stacks: Vec::new(),
-            num_waiters: 0,
-            id
-        }
     }
 
     /// Push a context that's pending collection
@@ -694,10 +589,50 @@ impl PendingCollection {
         }
     }
 }
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PendingState {
+    /// The desired collection was finished
+    Finished,
+    /// The collection is in progress
+    InProgress,
+    /// Waiting for all the threads to stop at a safepoint
+    ///
+    /// We need every thread's shadow stack to safely proceed.
+    Waiting
+}
+
+/// The state of a collector waiting for all its contexts
+/// to reach a safepoint
+struct PendingCollection {
+    /// The state of the current collection
+    state: PendingState,
+    /// The shadow stacks for all of the collectors that
+    /// still active and haven't been paused at a safepoint.
+    ///
+    /// We're waiting on this to be empty before we can
+    /// begin our collection....
+    pending_contexts: Vec<WeakArc<RawContext>>,
+    /// The contexts that are ready to be collected.
+    valid_contexts: Vec<Arc<RawContext>>,
+    /// The unique id of this safepoint
+    ///
+    /// 64-bit integers pretty much never overflow (for like 100 years)
+    id: u64
+}
+impl PendingCollection {
+    pub fn new(id: u64, pending_contexts: Vec<WeakArc<RawContext>>) -> Self {
+        PendingCollection {
+            state: PendingState::Waiting,
+            pending_contexts,
+            valid_contexts: Vec::new(),
+            id
+        }
+    }
+}
 pub enum PendingStatus {
     ShouldCollect {
-        temp_stacks: Vec<NonNull<ShadowStack>>,
-        frozen_stacks: Vec<NonNull<ShadowStack>>
+        contexts: Vec<Arc<RawContext>>
     },
     NeedToWait
 }
