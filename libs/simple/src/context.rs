@@ -13,6 +13,7 @@ use crate::utils::ThreadId;
 use std::mem::ManuallyDrop;
 use std::fmt::{Debug, Formatter};
 use std::fmt;
+use std::collections::HashSet;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ContextState {
@@ -80,19 +81,13 @@ impl Debug for RawContext {
     }
 }
 impl RawContext {
-    pub(crate) fn create(collector: Arc<RawSimpleCollector>) -> Arc<Self> {
-        let old_num_total = unsafe { collector.pending.add_context() };
+    pub unsafe fn register_new(collector: &Arc<RawSimpleCollector>) -> ManuallyDrop<Box<Self>> {
         let original_thread = if collector.logger.is_trace_enabled() {
             ThreadId::current()
         } else {
             ThreadId::Nop
         };
-        trace!(
-            collector.logger, "Creating new context";
-            "old_num_total" => old_num_total,
-            "current_thread" => &original_thread
-        );
-        Arc::new(RawContext {
+        let mut context = ManuallyDrop::new(Box::new(RawContext {
             collector: collector.clone(),
             logger: collector.logger.new(o!(
                 "original_thread" => original_thread
@@ -101,7 +96,14 @@ impl RawContext {
                 elements: Vec::with_capacity(4)
             }),
             state: Cell::new(ContextState::Active)
-        })
+        }));
+        let old_num_total = collector.pending.add_context(&mut **context);
+        trace!(
+            collector.logger, "Creating new context";
+            "old_num_total" => old_num_total,
+            "current_thread" => &original_thread
+        );
+        context
     }
     /// Attempt a collection,
     /// potentially blocking on other threads
@@ -198,7 +200,7 @@ impl RawContext {
  * inside of RawContext that is not thread-safe.
  */
 pub struct SimpleCollectorContext {
-    raw: ManuallyDrop<Arc<RawContext>>,
+    raw: ManuallyDrop<Box<RawContext>>,
     /// Whether we are the root context
     ///
     /// Only the root actually owns the `Arc`
@@ -206,10 +208,10 @@ pub struct SimpleCollectorContext {
     root: bool
 }
 impl SimpleCollectorContext {
-    pub(crate) unsafe fn create_root(collector: &SimpleCollector) -> Self {
+    pub(crate) unsafe fn register_root(collector: &SimpleCollector) -> Self {
         SimpleCollectorContext {
-            raw: ManuallyDrop::new(RawContext::create(collector.0.clone())),
-            root: true, // We are responsible for dropping
+            raw: RawContext::register(collector.0.clone()),
+            root: true, // We are responsible for unregistering
         }
     }
     #[inline]
@@ -222,27 +224,7 @@ impl Drop for SimpleCollectorContext {
     fn drop(&mut self) {
         if self.root {
             let collector = self.collector();
-            /*
-             * We expect the context is freed after
-             * this destructor since we should be the
-             * only reference.
-             * Essentially a freed context is implicitly
-             * in a separate state. The collector relies
-             * on this to know the context no longer
-             * needs to be valid and shouldn't block
-             * any pending collections.
-             */
-            debug_assert_eq!(Arc::strong_count(&*self.raw), 1);
-            unsafe {
-                ManuallyDrop::drop(&mut self.raw)
-            }
-            /*
-             * It's possible that other threads are waiting for a pending
-             * collection. Freeing this context could possibly allow them
-             * to start collecting. Thus we need to notify them to avoid
-             * deadlock.
-             */
-            collector.pending.notify_waiting_safepoints()
+            collector.pending.add_context()
         }
     }
 }
@@ -409,7 +391,8 @@ pub struct PendingCollectionTracker {
     ///
     /// This persists across collections. Once a context
     /// is freed it's assumed to be unused.
-    known_contexts: Mutex<Vec<WeakArc<RawContext>>>,
+    // TODO: Use a faster hash function like fxhasher?
+    known_contexts: Mutex<HashSet<*mut RawContext>>,
     next_pending_id: AtomicCell<u64>
 }
 impl PendingCollectionTracker {
@@ -434,22 +417,48 @@ impl PendingCollectionTracker {
             }
         }
     }
-    pub unsafe fn add_context(&self, raw: Arc<RawContext>) {
-        /*
-         * NOTE: We need to lock to ensure no collection is
-         * happening at this time. It's unsafe to create a context
-         * while a collection is in progress.
-         */
+    pub fn prevent_collection<R, F>(&self, func: F) -> R
+        where F: FnOnce() -> R {
+        // Acquire the lock to ensure there's no collection in progress
         let mut pending = self.pending.lock();
         while pending.is_some() {
             self.safepoint_wait.wait(&mut pending);
         }
-        let weak = Arc::downgrade(&raw);
-        // Now we have to lock the actual collection :p
-        let mut known_contexts = self.known_contexts.lock();
-        debug_assert!(!known_contexts.iter()
-            .any(|ctx| WeakArc::ptr_eq(ctx, &weak)));
-        known_contexts.push(weak);
+        assert!(!self.collecting.load(Ordering::SeqCst));
+        func() // NOTE: Lock will be released by RAII
+    }
+    pub unsafe fn add_context(&self, raw: *mut RawContext) -> usize {
+        /*
+         * It's unsafe to create a context
+         * while a collection is in progress.
+         */
+        self.prevent_collection(|| {
+            // Lock the list of contexts :p
+            let mut known_contexts = self.known_contexts.lock();
+            let old_num_known = known_contexts.len();
+            assert!(known_contexts.insert(raw));
+            old_num_known
+        })
+    }
+    pub unsafe fn free_context(&self, raw: ManuallyDrop<Box<RawContext>>) {
+        let mut pending = self.pending.lock();
+        match pending.map(|pending| pending.state) {
+            None | Some(PendingState::Finished) => {}, // No collection -> no problem
+            Some(PendingState::Waiting) => {
+                /*
+                 * Freeing a context could actually benefit
+                 * a waiting collection by allowing it to
+                 * proceed. We notify all waiters at the end
+                 * for that specific reason.
+                 */
+                todo!("Remove from list of pending collections")
+            },
+            Some(PendingState::InProgress) => unreachable!(),
+        }
+        let ptr = &**raw as *const RawContext as *mut RawContext;
+        assert!(self.known_contexts.lock().remove(&ptr));
+        // Now drop the Box
+        drop(ManuallyDrop::into_inner(raw));
     }
     pub fn notify_waiting_safepoints(&self) {
         self.safepoint_wait.notify_all();
@@ -612,9 +621,9 @@ struct PendingCollection {
     ///
     /// We're waiting on this to be empty before we can
     /// begin our collection....
-    pending_contexts: Vec<WeakArc<RawContext>>,
+    pending_contexts: Vec<*mut RawContext>,
     /// The contexts that are ready to be collected.
-    valid_contexts: Vec<Arc<RawContext>>,
+    valid_contexts: Vec<*mut RawContext>,
     /// The unique id of this safepoint
     ///
     /// 64-bit integers pretty much never overflow (for like 100 years)
@@ -630,9 +639,9 @@ impl PendingCollection {
         }
     }
 }
-pub enum PendingStatus {
+pub enum PendingStatus<'a> {
     ShouldCollect {
-        contexts: Vec<Arc<RawContext>>
+        contexts: Vec<&'a RawContext>
     },
     NeedToWait
 }
