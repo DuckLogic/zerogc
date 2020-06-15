@@ -307,16 +307,21 @@ unsafe impl GcContext for SimpleCollectorContext {
         assert_eq!(self.raw.state.get(), ContextState::Active);
         let dyn_ptr = (*self.raw.shadow_stack.get())
             .push(value);
-        assert_eq!(self.raw.state.get(), ContextState::Active);
-        self.raw.state.set(ContextState::Frozen {
-            last_ptr: dyn_ptr
-        });
+        // NOTE: Implicitly trigger safepoint before we freeze ourselves
         if self.raw.collector.should_collect() {
             /*
              * NOTE: This should implicitly notify threads
              * in case someone was waiting on us.
              */
             self.raw.trigger_safepoint();
+        }
+        assert_eq!(self.raw.state.get(), ContextState::Active);
+        self.raw.state.set(ContextState::Frozen {
+            last_ptr: dyn_ptr
+        });
+        // We may need to notify others that we are frozen
+        if self.raw.collector.pending.collecting.load(Ordering::Acquire) {
+            self.raw.collector.pending.notify_waiting_safepoints();
         }
         FrozenContext::new(self)
     }
