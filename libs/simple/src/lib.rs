@@ -12,6 +12,7 @@
     untagged_unions, // Why isn't this stable?
     new_uninit, // Until Rust has const generics, this is how we init arrays..
     specialization, // Used for specialization (effectively required by GcRef)
+    vec_remove_item, // This is just convenient
 )]
 use zerogc::{GcSystem, GcSafe, Trace, GcVisitor, GcSimpleAlloc, GcRef, GcBrand, GcDirectBarrier};
 use std::alloc::Layout;
@@ -29,7 +30,7 @@ use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use crossbeam::atomic::AtomicCell;
 
 use slog::{Logger, FnValue, o, debug};
-use crate::context::{ShadowStack, PendingCollectionTracker};
+use crate::context::{PendingCollectionTracker, RawContext};
 use crate::utils::ThreadId;
 
 pub use crate::context::SimpleCollectorContext;
@@ -213,7 +214,7 @@ impl SimpleCollector {
     /// Warning: Only one collector should be created per thread.
     /// Doing otherwise can cause deadlocks/panics.
     pub fn create_context(&self) -> SimpleCollectorContext {
-        unsafe { SimpleCollectorContext::create_root(self) }
+        unsafe { SimpleCollectorContext::register_root(&self) }
     }
 }
 
@@ -510,13 +511,14 @@ impl RawSimpleCollector {
     #[cold]
     #[inline(never)]
     unsafe fn perform_raw_collection(
-        &self, temp_stacks: &[NonNull<ShadowStack>],
-        frozen_stacks: &[NonNull<ShadowStack>]
+        &self, contexts: &[*mut RawContext]
     ) {
-        let roots: Vec<*mut dyn DynTrace> = frozen_stacks.iter()
-            .chain(&*temp_stacks)
-            .flat_map(|stack| (*stack.as_ptr()).elements.iter())
-            .cloned()
+        debug_assert!(self.pending.collecting.load(Ordering::SeqCst));
+        let roots: Vec<*mut dyn DynTrace> = contexts.iter()
+            .flat_map(|ctx| {
+                (**ctx).assume_valid_shadow_stack()
+                    .elements.iter().cloned()
+            })
             .collect();
         let num_roots = roots.len();
         let mut task = CollectionTask {

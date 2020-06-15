@@ -5,6 +5,7 @@ use zerogc::{safepoint, safepoint_recurse, GcSimpleAlloc, GcCell, GcSafe};
 
 use zerogc_simple::{SimpleCollector, SimpleCollectorContext, Gc};
 use zerogc_derive::Trace;
+use slog::{Logger, Drain, o};
 
 #[derive(Trace)]
 struct Tree<'gc> {
@@ -52,7 +53,12 @@ fn main() {
     let min_depth = 4;
     let max_depth = if min_depth + 2 > n { min_depth + 2 } else { n };
 
-    let collector = SimpleCollector::create();
+    let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+    let logger = Logger::root(
+        slog_term::FullFormat::new(plain).build().fuse(),
+        o!("bench" => file!())
+    );
+    let collector = SimpleCollector::with_logger(logger);
     let mut gc = collector.create_context();
     {
         let depth = max_depth + 1;
