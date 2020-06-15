@@ -108,6 +108,7 @@ impl RawContext {
         let old_num_total = collector.pending.add_context(&mut **context);
         trace!(
             collector.logger, "Creating new context";
+            "ptr" => format_args!("{:p}", &**context),
             "old_num_total" => old_num_total,
             "current_thread" => &original_thread
         );
@@ -196,6 +197,7 @@ impl RawContext {
                 pending.waiting_contexts += 1;
                 trace!(
                     self.logger, "Awaiting collection";
+                    "ptr" => ?ptr,
                     "current_thread" => FnValue(|_| ThreadId::current()),
                     "shadow_stack" => ?shadow_stack.elements,
                     "total_contexts" => pending.total_contexts,
@@ -278,6 +280,11 @@ impl Drop for SimpleCollectorContext {
         if self.root {
             let collector = self.collector();
             unsafe {
+                trace!(
+                    collector.logger, "Freeing context";
+                    "ptr" => format_args!("{:p}", &**self.raw),
+                    "state" => ?self.raw.state.get()
+                );
                 collector.pending.free_context(
                     std::ptr::read(&self.raw)
                 )
@@ -527,7 +534,7 @@ impl PendingCollectionTracker {
                  */
                 assert_eq!(
                     pending.valid_contexts.remove_item(&ptr),
-                    Some(ptr)
+                    Some(ptr), "Expected {:p} in {:?}", ptr, pending
                 );
                 pending.total_contexts -= 1;
             },
@@ -641,6 +648,7 @@ enum PendingState {
 
 /// The state of a collector waiting for all its contexts
 /// to reach a safepoint
+#[derive(Debug)]
 struct PendingCollection {
     /// The state of the current collection
     state: PendingState,
