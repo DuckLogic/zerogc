@@ -516,7 +516,7 @@ impl PendingCollectionTracker {
                  * of `pending_contexts` and has left the safepoint.
                  * Verify this assumption
                  */
-                 assert!(pending.valid_contexts.contains(&ptr));
+                 assert!(!pending.valid_contexts.contains(&ptr));
             },
             Some(pending @ PendingCollection { state: PendingState::Waiting, .. }) => {
                 /*
