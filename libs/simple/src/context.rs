@@ -1,10 +1,8 @@
 use std::sync::{Arc};
 use std::cell::{Cell, UnsafeCell};
-use std::sync::atomic::{Ordering, AtomicBool};
+use std::sync::atomic::{Ordering};
 
 use slog::{Logger, FnValue, trace, Drain, o};
-use parking_lot::{MutexGuard, Mutex, Condvar};
-use crossbeam::atomic::AtomicCell;
 
 use zerogc::{GcContext, Trace, FrozenContext};
 use crate::{SimpleCollector, RawSimpleCollector, DynTrace};
@@ -105,7 +103,7 @@ impl RawContext {
             }),
             state: Cell::new(ContextState::Active)
         }));
-        let old_num_total = collector.pending.add_context(&mut **context);
+        let old_num_total = collector.add_context(&mut **context);
         trace!(
             collector.logger, "Creating new context";
             "ptr" => format_args!("{:p}", &**context),
@@ -123,16 +121,16 @@ impl RawContext {
     #[cold]
     #[inline(never)]
     pub unsafe fn trigger_safepoint(&self) {
-        let mut guard = self.collector.pending.pending.lock();
+        let mut guard = self.collector.state.lock();
+        let state = &mut *guard;
         // If there is not a active `PendingCollection` - create one
-        if guard.is_none() {
-            assert!(!self.collector.pending.collecting.compare_and_swap(
+        if state.pending.is_none() {
+            assert!(!self.collector.collecting.compare_and_swap(
                 false, true, Ordering::SeqCst
             ));
-            let id = self.collector.pending.next_pending_id();
-            let known_contexts = self.collector.pending
-                    .known_contexts.lock();
-            *guard = Some(PendingCollection::new(
+            let id = state.next_pending_id();
+            let known_contexts = &state.known_contexts;
+            state.pending = Some(PendingCollection::new(
                 id,
                 known_contexts.iter()
                     .cloned()
@@ -145,20 +143,21 @@ impl RawContext {
                 "Creating collector";
                 "id" => id,
                 "ctx_ptr" => format_args!("{:?}", self),
-                "initially_valid_contexts" => ?guard.as_ref().unwrap().valid_contexts,
+                "initially_valid_contexts" => ?state.pending.as_ref()
+                    .unwrap().valid_contexts,
                 "known_contexts" => ?*known_contexts
             );
         }
         let shadow_stack = &*self.shadow_stack.get();
         let ptr = self as *const RawContext as *mut RawContext;
-        debug_assert!(self.collector.pending.known_contexts.lock().contains(&ptr));
-        let mut pending = guard.as_mut().unwrap();
+        debug_assert!(state.known_contexts.contains(&ptr));
+        let mut pending = state.pending.as_mut().unwrap();
         // Change our state to mark we are now waiting at a safepoint
         assert_eq!(self.state.replace(ContextState::SafePoint {
             collection_id: pending.id
         }), ContextState::Active);
         debug_assert_eq!(
-            self.collector.pending.known_contexts.lock().len(),
+            state.known_contexts.len(),
             pending.total_contexts
         );
         let status = pending.push_pending_context(ptr);
@@ -187,18 +186,16 @@ impl RawContext {
                 pending.waiting_contexts += 1;
                 pending.state = PendingState::Finished;
                 // Now acknowledge that we're finished
-                self.collector.pending
-                    .acknowledge_finished_collection(
-                        &mut guard,
-                        ptr
-                    );
+                self.collector.acknowledge_finished_collection(
+                &mut state.pending, ptr
+                );
                 drop(guard); // Free lock
                 /*
                  * Notify all blocked threads we're finished.
                  * Then we will just have to wait for
                  * everybody else to finish
                  */
-                self.collector.pending.safepoint_wait.notify_all();
+                self.collector.safepoint_wait.notify_all();
             },
             PendingStatus::NeedToWait => {
                 let expected_id = pending.id;
@@ -214,9 +211,7 @@ impl RawContext {
                     "collector_id" => expected_id
                 );
                 drop(guard);
-                self.collector.pending.await_collection(
-                    expected_id, ptr
-                );
+                self.collector.await_collection(expected_id, ptr);
                 trace!(
                     self.logger, "Finished waiting for collection";
                     "current_thread" => FnValue(|_| ThreadId::current()),
@@ -293,7 +288,7 @@ impl Drop for SimpleCollectorContext {
                     "ptr" => format_args!("{:p}", &**self.raw),
                     "state" => ?self.raw.state.get()
                 );
-                collector.pending.free_context(
+                collector.free_context(
                     std::ptr::read(&self.raw)
                 )
             }
@@ -335,8 +330,8 @@ unsafe impl GcContext for SimpleCollectorContext {
             last_ptr: dyn_ptr
         });
         // We may need to notify others that we are frozen
-        if self.raw.collector.pending.collecting.load(Ordering::Acquire) {
-            self.raw.collector.pending.notify_waiting_safepoints();
+        if self.raw.collector.collecting.load(Ordering::Acquire) {
+            self.raw.collector.notify_waiting_safepoints();
         }
         FrozenContext::new(self)
     }
@@ -445,84 +440,70 @@ impl ShadowStack {
 // Pending collections
 
 /// Keeps track of a pending collection (if any)
-// TODO: Much of this should be moved to RawCollector
-pub struct PendingCollectionTracker {
-    /// Simple flag on whether we're currently collecting
-    ///
-    /// This should be true whenever `self.pending` is `Some`.
-    /// However if you don't hold the lock you may not always
-    /// see a fully consistent state.
-    // TODO: Privacy
-    pub collecting: AtomicBool,
+///
+/// This must be held under a lock for collection to proceed.
+pub struct CollectorState {
     /// A pointer to the currently pending collection (if any)
     ///
     /// Once the number of the known roots in the pending collection
     /// is equal to the number of `total_contexts`,
     /// collection can safely begin.
-    // TODO: Merge this lock with known_contexts
-    pending: Mutex<Option<PendingCollection>>,
-    /// The condition variable other threads wait on
-    /// at a safepoint.
-    ///
-    /// This is also used to notify threads when a collection is over.
-    safepoint_wait: Condvar,
+    pending: Option<PendingCollection>,
     /// A list of all the known contexts
     ///
     /// This persists across collections. Once a context
     /// is freed it's assumed to be unused.
     // TODO: Use a faster hash function like fxhasher?
-    known_contexts: Mutex<HashSet<*mut RawContext>>,
-    next_pending_id: AtomicCell<u64>
+    known_contexts: HashSet<*mut RawContext>,
+    next_pending_id: u64
 }
-impl PendingCollectionTracker {
+impl CollectorState {
     pub fn new() -> Self {
-        PendingCollectionTracker {
-            collecting: AtomicBool::new(false),
-            pending: Mutex::new(None),
-            safepoint_wait: Condvar::new(),
-            known_contexts: Mutex::new(HashSet::new()),
-            next_pending_id: AtomicCell::new(0)
+        CollectorState {
+            pending: None,
+            known_contexts: HashSet::new(),
+            next_pending_id: 0
         }
     }
-    fn next_pending_id(&self) -> u64 {
-        let mut id = self.next_pending_id.load();
-        loop {
-            let next = id.checked_add(1).expect("Overflow");
-            match self.next_pending_id.compare_exchange(id, next) {
-                Ok(_) => return id,
-                Err(actual) => {
-                    id = actual;
-                }
-            }
-        }
+    fn next_pending_id(&mut self) -> u64 {
+        let id = self.next_pending_id;
+        self.next_pending_id = id.checked_add(1).expect("Overflow");
+        id
     }
-    pub fn prevent_collection<R, F>(&self, func: F) -> R
-        where F: FnOnce() -> R {
+}
+/*
+ * Implementing methods to control collector state.
+ *
+ * Because we're defined in the same crate
+ * we can use an inhernent impl instead of an extension trait.
+ */
+impl RawSimpleCollector {
+    pub fn prevent_collection<R>(&self, func: impl FnOnce(&mut CollectorState) -> R) -> R {
         // Acquire the lock to ensure there's no collection in progress
-        let mut pending = self.pending.lock();
-        while pending.is_some() {
-            self.safepoint_wait.wait(&mut pending);
+        let mut state = self.state.lock();
+        while state.pending.is_some() {
+            self.safepoint_wait.wait(&mut state);
         }
         assert!(!self.collecting.load(Ordering::SeqCst));
-        func() // NOTE: Lock will be released by RAII
+        func(&mut *state) // NOTE: Lock will be released by RAII
     }
     pub unsafe fn add_context(&self, raw: *mut RawContext) -> usize {
         /*
          * It's unsafe to create a context
          * while a collection is in progress.
          */
-        self.prevent_collection(|| {
+        self.prevent_collection(|state| {
             // Lock the list of contexts :p
-            let mut known_contexts = self.known_contexts.lock();
+            let known_contexts = &mut state.known_contexts;
             let old_num_known = known_contexts.len();
             assert!(known_contexts.insert(raw));
             old_num_known
         })
     }
     pub unsafe fn free_context(&self, raw: ManuallyDrop<Box<RawContext>>) {
-        let mut pending = self.pending.lock();
+        let mut guard = self.state.lock();
         let ptr = &**raw as *const RawContext as *mut RawContext;
-        match &mut *pending {
+        match &mut guard.pending {
             None => {}, // No collection
             Some(pending @ PendingCollection { state: PendingState::Finished, .. }) => {
                 /*
@@ -531,7 +512,7 @@ impl PendingCollectionTracker {
                  * of `pending_contexts` and has left the safepoint.
                  * Verify this assumption
                  */
-                 assert!(!pending.valid_contexts.contains(&ptr));
+                assert!(!pending.valid_contexts.contains(&ptr));
             },
             Some(pending @ PendingCollection { state: PendingState::Waiting, .. }) => {
                 /*
@@ -540,6 +521,8 @@ impl PendingCollectionTracker {
                  * proceed.
                  * Verify that we're not actually in the `valid_contexts`
                  * list. A context in that list must not be freed.
+                 *
+                 * We need to upgrade the lock before we can mutate the state
                  */
                 assert_eq!(
                     pending.valid_contexts.remove_item(&ptr),
@@ -551,9 +534,10 @@ impl PendingCollectionTracker {
                 unreachable!("cant free while collection is in progress")
             },
         }
-        assert!(self.known_contexts.lock().remove(&ptr));
+        assert!(guard.known_contexts.remove(&ptr));
         // Now drop the Box
         drop(ManuallyDrop::into_inner(raw));
+        drop(guard);
         /*
          * Notify all
          * TODO: I think this is really only useful if we're waiting....
@@ -570,8 +554,8 @@ impl PendingCollectionTracker {
         context: *mut RawContext
     ) {
         loop {
-            let mut lock = self.pending.lock();
-            match *lock {
+            let mut lock = self.state.lock();
+            match &mut lock.pending {
                 Some(ref mut pending) => {
                     /*
                      * We should never move onto a new collection
@@ -583,7 +567,7 @@ impl PendingCollectionTracker {
                     match pending.state {
                         PendingState::Finished => {
                             self.acknowledge_finished_collection(
-                                &mut lock, context
+                                &mut lock.pending, context
                             );
                             drop(lock);
                             return
@@ -612,11 +596,11 @@ impl PendingCollectionTracker {
     }
     unsafe fn acknowledge_finished_collection(
         &self,
-        guard: &mut MutexGuard<Option<PendingCollection>>,
+        pending_ref: &mut Option<PendingCollection>,
         context: *mut RawContext
     ) {
         let waiting_contexts = {
-            let pending = guard.as_mut().unwrap();
+            let pending = pending_ref.as_mut().unwrap();
             assert_eq!(pending.state, PendingState::Finished);
             if cfg!(debug_assertions) {
                 // Remove ourselves to mark the fact we're done
@@ -636,7 +620,7 @@ impl PendingCollectionTracker {
             pending.waiting_contexts
         };
         if waiting_contexts == 0 {
-            **guard = None;
+            *pending_ref = None;
             assert!(self.collecting.compare_and_swap(
                 true, false,
                 Ordering::SeqCst

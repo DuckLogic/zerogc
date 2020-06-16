@@ -30,10 +30,11 @@ use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use crossbeam::atomic::AtomicCell;
 
 use slog::{Logger, FnValue, o, debug};
-use crate::context::{PendingCollectionTracker, RawContext};
+use crate::context::{CollectorState, RawContext};
 use crate::utils::ThreadId;
 
 pub use crate::context::SimpleCollectorContext;
+use parking_lot::{Condvar, Mutex};
 
 mod context;
 mod utils;
@@ -199,7 +200,9 @@ impl SimpleCollector {
     pub fn with_logger(logger: Logger) -> Self {
         let mut collector = Arc::new(RawSimpleCollector {
             logger,
-            pending: PendingCollectionTracker::new(),
+            state: Mutex::new(CollectorState::new()),
+            safepoint_wait: Condvar::new(),
+            collecting: AtomicBool::new(false),
             heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD)
         });
         let collector_ptr = &*collector
@@ -494,8 +497,19 @@ unsafe impl Sync for RawSimpleCollector {}
 /// The internal data for a simple collector
 struct RawSimpleCollector {
     logger: Logger,
-    pending: PendingCollectionTracker,
+    state: Mutex<CollectorState>,
     heap: GcHeap,
+    /// Simple flag on whether we're currently collecting
+    ///
+    /// This should be true whenever `self.state.pending` is `Some`.
+    /// However if you don't hold the lock you may not always
+    /// see a fully consistent state.
+    collecting: AtomicBool,
+    /// The condition variable other threads wait on
+    /// at a safepoint.
+    ///
+    /// This is also used to notify threads when a collection is over.
+    safepoint_wait: Condvar,
 }
 impl RawSimpleCollector {
     #[inline]
@@ -505,15 +519,15 @@ impl RawSimpleCollector {
          * It'd be cheaper on ARM but potentially
          * delay collection.....
          */
-        self.heap.should_collect() || self.pending
-            .collecting.load(Ordering::Acquire)
+        self.heap.should_collect() || self.collecting
+            .load(Ordering::Acquire)
     }
     #[cold]
     #[inline(never)]
     unsafe fn perform_raw_collection(
         &self, contexts: &[*mut RawContext]
     ) {
-        debug_assert!(self.pending.collecting.load(Ordering::SeqCst));
+        debug_assert!(self.collecting.load(Ordering::SeqCst));
         let roots: Vec<*mut dyn DynTrace> = contexts.iter()
             .flat_map(|ctx| {
                 (**ctx).assume_valid_shadow_stack()
