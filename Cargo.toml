@@ -21,7 +21,3 @@ ndarray = { version = "^0.10.12", optional = true }
 
 [workspace]
 members = ["libs/simple", "libs/derive"]
-
-[profile.dev]
-# Needed for testing in a reasonable time frame...
-opt-level = 1
