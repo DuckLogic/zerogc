@@ -11,6 +11,7 @@ use std::mem::ManuallyDrop;
 use std::fmt::{Debug, Formatter};
 use std::{fmt, mem};
 use std::collections::HashSet;
+use parking_lot::{Mutex, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ContextState {
@@ -121,7 +122,14 @@ impl RawContext {
     #[cold]
     #[inline(never)]
     pub unsafe fn trigger_safepoint(&self) {
-        let mut guard = self.collector.state.lock();
+        /*
+         * Collecting requires a *write* lock.
+         * We are higher priority than
+         *
+         * This assumes that parking_lot priorities pending writes
+         * over pending reads. The standard library doesn't guarantee this.
+         */
+        let mut guard = self.collector.state.write();
         let state = &mut *guard;
         // If there is not a active `PendingCollection` - create one
         if state.pending.is_none() {
@@ -129,7 +137,7 @@ impl RawContext {
                 false, true, Ordering::SeqCst
             ));
             let id = state.next_pending_id();
-            let known_contexts = &state.known_contexts;
+            let known_contexts = state.known_contexts.get_mut();
             state.pending = Some(PendingCollection::new(
                 id,
                 known_contexts.iter()
@@ -150,14 +158,14 @@ impl RawContext {
         }
         let shadow_stack = &*self.shadow_stack.get();
         let ptr = self as *const RawContext as *mut RawContext;
-        debug_assert!(state.known_contexts.contains(&ptr));
+        debug_assert!(state.known_contexts.get_mut().contains(&ptr));
         let mut pending = state.pending.as_mut().unwrap();
         // Change our state to mark we are now waiting at a safepoint
         assert_eq!(self.state.replace(ContextState::SafePoint {
             collection_id: pending.id
         }), ContextState::Active);
         debug_assert_eq!(
-            state.known_contexts.len(),
+            state.known_contexts.get_mut().len(),
             pending.total_contexts
         );
         let status = pending.push_pending_context(ptr);
@@ -441,7 +449,8 @@ impl ShadowStack {
 
 /// Keeps track of a pending collection (if any)
 ///
-/// This must be held under a lock for collection to proceed.
+/// This must be held under a write lock for a collection to happen.
+/// This must be held under a read lock to prevent collections.
 pub struct CollectorState {
     /// A pointer to the currently pending collection (if any)
     ///
@@ -453,15 +462,17 @@ pub struct CollectorState {
     ///
     /// This persists across collections. Once a context
     /// is freed it's assumed to be unused.
-    // TODO: Use a faster hash function like fxhasher?
-    known_contexts: HashSet<*mut RawContext>,
+    ///
+    /// NOTE: We need another layer of locking since "readers"
+    /// like add_context may want
+    known_contexts: Mutex<HashSet<*mut RawContext>>,
     next_pending_id: u64
 }
 impl CollectorState {
     pub fn new() -> Self {
         CollectorState {
             pending: None,
-            known_contexts: HashSet::new(),
+            known_contexts: Mutex::new(HashSet::new()),
             next_pending_id: 0
         }
     }
@@ -478,14 +489,17 @@ impl CollectorState {
  * we can use an inhernent impl instead of an extension trait.
  */
 impl RawSimpleCollector {
-    pub fn prevent_collection<R>(&self, func: impl FnOnce(&mut CollectorState) -> R) -> R {
+    pub fn prevent_collection<R>(&self, func: impl FnOnce(&CollectorState) -> R) -> R {
         // Acquire the lock to ensure there's no collection in progress
-        let mut state = self.state.lock();
+        let mut state = self.state.read();
         while state.pending.is_some() {
-            self.safepoint_wait.wait(&mut state);
+            RwLockReadGuard::unlocked(&mut state, || {
+                let mut lock = self.safepoint_lock.lock();
+                self.safepoint_wait.wait(&mut lock);
+            })
         }
         assert!(!self.collecting.load(Ordering::SeqCst));
-        func(&mut *state) // NOTE: Lock will be released by RAII
+        func(&*state) // NOTE: Lock will be released by RAII
     }
     pub unsafe fn add_context(&self, raw: *mut RawContext) -> usize {
         /*
@@ -494,16 +508,21 @@ impl RawSimpleCollector {
          */
         self.prevent_collection(|state| {
             // Lock the list of contexts :p
-            let known_contexts = &mut state.known_contexts;
+            let mut known_contexts = state.known_contexts.lock();
             let old_num_known = known_contexts.len();
-            assert!(known_contexts.insert(raw));
+            assert!(known_contexts.insert(raw), "Already inserted {:p}", raw);
             old_num_known
         })
     }
     pub unsafe fn free_context(&self, raw: ManuallyDrop<Box<RawContext>>) {
-        let mut guard = self.state.lock();
+        /*
+         * TODO: Consider using regular read instead of `read_upgradable`
+         * This is only prevented because of the fact that we may
+         * need to mutate `valid_contexts` and `total_contexts`
+         */
         let ptr = &**raw as *const RawContext as *mut RawContext;
-        match &mut guard.pending {
+        let guard = self.state.upgradable_read();
+        match &guard.pending {
             None => {}, // No collection
             Some(pending @ PendingCollection { state: PendingState::Finished, .. }) => {
                 /*
@@ -513,8 +532,11 @@ impl RawSimpleCollector {
                  * Verify this assumption
                  */
                 assert!(!pending.valid_contexts.contains(&ptr));
+                assert!(guard.known_contexts.lock().remove(&ptr));
+                drop(guard);
             },
-            Some(pending @ PendingCollection { state: PendingState::Waiting, .. }) => {
+            Some(PendingCollection { state: PendingState::Waiting, .. }) => {
+                let mut guard = RwLockUpgradableReadGuard::upgrade(guard);
                 /*
                  * Freeing a context could actually benefit
                  * a waiting collection by allowing it to
@@ -524,20 +546,21 @@ impl RawSimpleCollector {
                  *
                  * We need to upgrade the lock before we can mutate the state
                  */
+                let pending = guard.pending.as_mut().unwrap();
                 assert_eq!(
                     pending.valid_contexts.remove_item(&ptr),
                     None, "state = {:?}", raw.state.get()
                 );
                 pending.total_contexts -= 1;
+                assert!(guard.known_contexts.get_mut().remove(&ptr));
+                drop(guard);
             },
             Some(PendingCollection { state: PendingState::InProgress, .. }) => {
                 unreachable!("cant free while collection is in progress")
             },
         }
-        assert!(guard.known_contexts.remove(&ptr));
         // Now drop the Box
         drop(ManuallyDrop::into_inner(raw));
-        drop(guard);
         /*
          * Notify all
          * TODO: I think this is really only useful if we're waiting....
@@ -554,7 +577,14 @@ impl RawSimpleCollector {
         context: *mut RawContext
     ) {
         loop {
-            let mut lock = self.state.lock();
+            /*
+             * TODO: Allow await_collection to finish using only a read guard
+             * We would need to make `num_waiters` an atomic variable.
+             * Also would require fixing our debug check that does a
+             * `remove_item` in acknowledge_finished.
+             */
+            let mut lock = self.state
+                .write();
             match &mut lock.pending {
                 Some(ref mut pending) => {
                     /*
@@ -584,14 +614,17 @@ impl RawSimpleCollector {
                     )
                 }
             }
-            /*
-             * Block until collection finishes
-             * Parking lot says there shouldn't be any "spurious"
-             * (accidental) wakeups. However I guess it's possible
-             * we're woken up somehow in the middle of collection.
-             * I'm going to loop just in case :)
-             */
-            self.safepoint_wait.wait(&mut lock);
+            RwLockWriteGuard::unlocked(&mut lock, || {
+                let mut lock = self.safepoint_lock.lock();
+                /*
+                 * Block until collection finishes
+                 * Parking lot says there shouldn't be any "spurious"
+                 * (accidental) wakeups. However I guess it's possible
+                 * we're woken up somehow in the middle of collection.
+                 * I'm going to loop just in case :)
+                 */
+                self.safepoint_wait.wait(&mut lock);
+            })
         }
     }
     unsafe fn acknowledge_finished_collection(

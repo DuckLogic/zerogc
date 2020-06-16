@@ -34,7 +34,7 @@ use crate::context::{CollectorState, RawContext};
 use crate::utils::ThreadId;
 
 pub use crate::context::SimpleCollectorContext;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex, RwLock};
 
 mod context;
 mod utils;
@@ -200,8 +200,9 @@ impl SimpleCollector {
     pub fn with_logger(logger: Logger) -> Self {
         let mut collector = Arc::new(RawSimpleCollector {
             logger,
-            state: Mutex::new(CollectorState::new()),
+            state: RwLock::new(CollectorState::new()),
             safepoint_wait: Condvar::new(),
+            safepoint_lock: Mutex::new(()),
             collecting: AtomicBool::new(false),
             heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD)
         });
@@ -497,7 +498,7 @@ unsafe impl Sync for RawSimpleCollector {}
 /// The internal data for a simple collector
 struct RawSimpleCollector {
     logger: Logger,
-    state: Mutex<CollectorState>,
+    state: RwLock<CollectorState>,
     heap: GcHeap,
     /// Simple flag on whether we're currently collecting
     ///
@@ -510,6 +511,12 @@ struct RawSimpleCollector {
     ///
     /// This is also used to notify threads when a collection is over.
     safepoint_wait: Condvar,
+    /// The mutex used alongside `safepoint_wait`
+    ///
+    /// This doesn't actually protect any data. It's just
+    /// used because [parking_lot::RwLock] doesn't support condition vars.
+    /// This is the [officially suggested solution](https://github.com/Amanieu/parking_lot/issues/165)
+    safepoint_lock: Mutex<()>
 }
 impl RawSimpleCollector {
     #[inline]
