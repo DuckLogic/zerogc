@@ -140,6 +140,14 @@ impl RawContext {
                     .collect(),
                 known_contexts.len(),
             ));
+            trace!(
+                self.logger,
+                "Creating collector";
+                "id" => id,
+                "ctx_ptr" => format_args!("{:?}", self),
+                "initially_valid_contexts" => ?guard.as_ref().unwrap().valid_contexts,
+                "known_contexts" => ?*known_contexts
+            );
         }
         let shadow_stack = &*self.shadow_stack.get();
         let ptr = self as *const RawContext as *mut RawContext;
@@ -529,12 +537,13 @@ impl PendingCollectionTracker {
                 /*
                  * Freeing a context could actually benefit
                  * a waiting collection by allowing it to
-                 * proceed. We notify all waiters at the end
-                 * for that specific reason.
+                 * proceed.
+                 * Verify that we're not actually in the `valid_contexts`
+                 * list. A context in that list must not be freed.
                  */
                 assert_eq!(
                     pending.valid_contexts.remove_item(&ptr),
-                    Some(ptr), "Expected {:p} in {:?}", ptr, pending
+                    None, "state = {:?}", raw.state.get()
                 );
                 pending.total_contexts -= 1;
             },
@@ -545,6 +554,10 @@ impl PendingCollectionTracker {
         assert!(self.known_contexts.lock().remove(&ptr));
         // Now drop the Box
         drop(ManuallyDrop::into_inner(raw));
+        /*
+         * Notify all
+         * TODO: I think this is really only useful if we're waiting....
+         */
         self.notify_waiting_safepoints();
     }
     pub fn notify_waiting_safepoints(&self) {
