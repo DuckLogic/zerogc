@@ -294,7 +294,7 @@ unsafe impl GcContext for SimpleCollectorContext {
         debug_assert_eq!(self.raw.state.get(), ContextState::Active);
         let dyn_ptr = (*self.raw.shadow_stack.get())
             .push(value);
-        if self.raw.collector.should_collect() {
+        if self.raw.collector.should_collect_relaxed() {
             self.raw.trigger_safepoint();
         }
         debug_assert_eq!(self.raw.state.get(), ContextState::Active);

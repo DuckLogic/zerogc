@@ -258,15 +258,20 @@ impl GcHeap {
         }
     }
     #[inline]
-    fn should_collect(&self) -> bool {
+    fn should_collect_relaxed(&self) -> bool {
         /*
          * Going with relaxed ordering because it's not essential
          * that we see updates immediately.
          * Eventual consistency should be enough to eventually
          * trigger a collection.
+         *
+         * This is much cheaper on ARM (since it avoids a fence)
+         * and is much easier to use with a JIT.
+         * A JIT will insert these very often, so it's important to make
+         * them fast!
          */
-        self.allocator.allocated_size.load(Ordering::Acquire)
-            >= self.threshold.load(Ordering::Acquire)
+        self.allocator.allocated_size.load(Ordering::Relaxed)
+            >= self.threshold.load(Ordering::Relaxed)
     }
 }
 
@@ -520,14 +525,16 @@ struct RawSimpleCollector {
 }
 impl RawSimpleCollector {
     #[inline]
-    fn should_collect(&self) -> bool {
+    fn should_collect_relaxed(&self) -> bool {
         /*
-         * TODO: Consider relaxed ordering
-         * It'd be cheaper on ARM but potentially
-         * delay collection.....
+         * Use relaxed ordering, just like `should_collect`
+         *
+         * This is faster on ARM since it avoids a memory fence.
+         * More importantly this is easier for a JIT to implement inline!!!
+         * As of this writing cranelift doesn't even seem to support fences :o
          */
-        self.heap.should_collect() || self.collecting
-            .load(Ordering::Acquire)
+        self.heap.should_collect_relaxed() || self.collecting
+            .load(Ordering::Relaxed)
     }
     #[cold]
     #[inline(never)]
