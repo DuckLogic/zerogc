@@ -4,7 +4,7 @@ use std::sync::atomic::{Ordering};
 
 use slog::{Logger, FnValue, trace, Drain, o};
 
-use zerogc::{GcContext, Trace, FrozenContext};
+use zerogc::{GcContext, Trace};
 use crate::{SimpleCollector, RawSimpleCollector, DynTrace};
 use crate::utils::ThreadId;
 use std::mem::ManuallyDrop;
@@ -46,18 +46,12 @@ enum ContextState {
     /// Because no allocation or mutation can happen,
     /// its shadow_stack stack is guarenteed to
     /// accurately reflect the roots of the context.
-    Frozen {
-        /// The pointer to the last element in the
-        /// frozen shadow stack.
-        ///
-        /// Used for internal sanity checking.
-        last_ptr: *mut dyn DynTrace
-    }
+    Frozen,
 }
 impl ContextState {
     fn is_frozen(&self) -> bool {
         match *self {
-            ContextState::Frozen { .. } => true,
+            ContextState::Frozen => true,
             _ => false
         }
     }
@@ -309,46 +303,25 @@ unsafe impl GcContext for SimpleCollectorContext {
         debug_assert_eq!(popped, dyn_ptr);
     }
 
-    unsafe fn frozen_safepoint<T: Trace>(&mut self, value: &mut &mut T)
-                                         -> FrozenContext<'_, Self> {
+    unsafe fn freeze(&mut self) {
         assert_eq!(self.raw.state.get(), ContextState::Active);
-        let dyn_ptr = (*self.raw.shadow_stack.get())
-            .push(value);
-        // NOTE: Implicitly trigger safepoint before we freeze ourselves
-        if self.raw.collector.should_collect() {
-            /*
-             * NOTE: This should implicitly notify threads
-             * in case someone was waiting on us.
-             */
-            self.raw.trigger_safepoint();
-        }
-        assert_eq!(self.raw.state.get(), ContextState::Active);
-        self.raw.state.set(ContextState::Frozen {
-            last_ptr: dyn_ptr
-        });
+        self.raw.state.set(ContextState::Frozen);
         // We may need to notify others that we are frozen
         if self.raw.collector.collecting.load(Ordering::Acquire) {
             self.raw.collector.notify_waiting_safepoints();
         }
-        FrozenContext::new(self)
     }
 
-    unsafe fn unfreeze(frozen: FrozenContext<'_, Self>) -> &'_ mut Self {
-        let ctx = FrozenContext::into_inner(frozen);
+    unsafe fn unfreeze(&mut self) {
         /*
-         * TODO: Ensure there is no collection in progess.
          * A pending collection might be relying in the validity of this
          * context's shadow stack, so unfreezing it while in progress
          * could trigger undefined behavior!!!!!
          */
-        let dyn_ptr = match ctx.raw.state.get() {
-            ContextState::Frozen { last_ptr } => last_ptr,
-            state => unreachable!("{:?}", state)
-        };
-        let actual_ptr = (*ctx.raw.shadow_stack.get()).pop();
-        debug_assert_eq!(actual_ptr, Some(dyn_ptr));
-        ctx.raw.state.set(ContextState::Active);
-        ctx
+        self.collector().prevent_collection(|_| {
+            assert_eq!(self.raw.state.get(), ContextState::Frozen);
+            self.raw.state.set(ContextState::Active);
+        })
     }
 
     #[inline]
@@ -406,10 +379,6 @@ impl ShadowStack {
         >(short_ptr);
         self.elements.push(long_ptr);
         long_ptr
-    }
-    #[inline]
-    pub(crate) fn pop(&mut self) -> Option<*mut dyn DynTrace> {
-        self.elements.pop()
     }
     #[inline]
     pub(crate) unsafe fn pop_unchecked(&mut self) -> *mut dyn DynTrace {

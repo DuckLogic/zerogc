@@ -21,3 +21,6 @@ ndarray = { version = "^0.10.12", optional = true }
 
 [workspace]
 members = ["libs/simple", "libs/derive"]
+
+[profile.dev]
+opt-level = 1

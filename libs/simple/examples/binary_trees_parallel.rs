@@ -2,7 +2,7 @@
     arbitrary_self_types, // Unfortunately this is required for methods on Gc refs
 )]
 use zerogc::{
-    safepoint, safepoint_recurse, freeze_safepoint, unfreeze,
+    safepoint, safepoint_recurse, freeze_context, unfreeze_context,
     GcSimpleAlloc, GcCell, GcSafe
 };
 
@@ -74,7 +74,7 @@ fn main() {
     safepoint!(gc, ());
 
     let long_lived_tree = bottom_up_tree(&gc, max_depth);
-    let (frozen, long_lived_tree) = freeze_safepoint!(gc, long_lived_tree);
+    let frozen = freeze_context!(gc);
 
     (min_depth / 2..max_depth / 2 + 1).into_par_iter().for_each(|half_depth| {
         let depth = half_depth * 2;
@@ -83,7 +83,7 @@ fn main() {
         let message = inner(&collector, depth, iterations);
         println!("{}", message);
     });
-    unfreeze!(frozen => new_context, long_lived_tree);
+    let new_context = unfreeze_context!(frozen);
 
     println!("long lived tree of depth {}\t check: {}", max_depth, item_check(&long_lived_tree));
 }
