@@ -294,6 +294,7 @@ impl Drop for SimpleCollectorContext {
                 trace!(
                     collector.logger, "Freeing context";
                     "ptr" => format_args!("{:p}", &**self.raw),
+                    "current_thread" => FnValue(|_| ThreadId::current()),
                     "state" => ?self.raw.state.get()
                 );
                 collector.free_context(
@@ -523,7 +524,11 @@ impl RawSimpleCollector {
         let ptr = &**raw as *const RawContext as *mut RawContext;
         let guard = self.state.upgradable_read();
         match &guard.pending {
-            None => {}, // No collection
+            None => { // No collection
+                // Still need to remove from list of known_contexts
+                assert!(guard.known_contexts.lock().remove(&ptr));
+                drop(guard);
+            },
             Some(pending @ PendingCollection { state: PendingState::Finished, .. }) => {
                 /*
                  * We're assuming here that the finished collection
