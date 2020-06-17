@@ -40,8 +40,11 @@ pub use self::cell::{GcCell};
 // TODO: Document all forms of this macro
 #[macro_export(local_inner_macros)]
 macro_rules! safepoint_recurse {
-    ($context:ident, |$sub_context:ident, $new_root:ident| $closure:expr) => {{
-        let ((), result) = safepoint_recurse!($context, (), |$sub_context, $new_root| $closure);
+    ($context:ident, |$sub_context:ident| $closure:expr) => {{
+        let ((), result) = safepoint_recurse!($context, (), |$sub_context, new_root| {
+            let () = new_root;
+            $closure
+        });
         result
     }};
     ($context:ident, $root:expr, |$sub_context:ident, $new_root:ident| $closure:expr) => {{
@@ -319,10 +322,13 @@ impl<C: GcContext> FrozenContext<C> {
 /// that this points to a garbage collected object with the correct header,
 /// and not some arbitrary bits that you've decided to heap allocate.
 pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
-    + Deref<Target=&'gc T> {
+    + Deref<Target=&'gc T>
+    where T: GcBrand<'static, Self::System> {
     /// The type of the garbage collection
     /// system that created this pointer
     type System: GcSystem;
+    /// The type of [GcHandle]s to this object.
+    type Handle: GcHandle<<T as GcBrand<'static, Self::System>>::Branded>;
     /// The value of the underlying pointer
     fn value(&self) -> &'gc T;
 
@@ -330,7 +336,58 @@ pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
     unsafe fn as_raw_ptr(&self) -> *mut T {
         self.value() as *const T as *mut T
     }
+
+    /// Create a handle to this object, which can be used without a context
+    fn create_handle(&self) -> Self::Handle;
 }
+
+/// A owned handle which points to a garbage collected object.
+///
+/// This is considered a root by the garbage collector that is independent
+/// of any specific [GcContext]. Safepoints
+/// don't need to be informed of this object for collection to start.
+/// The root is manually managed by user-code, much like a [Box] or
+/// a reference counted pointer.
+///
+/// This can be cloned and stored independently from a context,
+/// bridging the gap between native memory and managed memory.
+/// These are useful to pass to C APIs or any other code
+/// that doesn't cooperate with zerogc.
+/*
+ * TODO: Should we drop the Clone requirement?
+ */
+pub trait GcHandle<T: GcSafe + ?Sized>: Clone + Trace
+    where for<'gc> T: GcBrand<'gc, Self::Context::System> {
+    type Context: GcContext;
+    /// Associate this handle with the specified context,
+    /// allowing its underlying object to be accessed
+    /// as long as the context is valid.
+    ///
+    /// The underlying object can be accessed just like any
+    /// other object that would be allocated from the context.
+    /// It'll be properly collected and can even be used as a root
+    /// at the next safepoint.
+    fn bind_to<'gc>(&self, context: &'gc Self::Context)
+        -> Gc<'gc, <T as GcBrand<'gc, _>>::Branded>;
+    /// Access this handle inside the closure,
+    /// possibly associating it with the specified
+    ///
+    /// This is accesses the object within "critical section"
+    /// that will **block collections**
+    /// for as long as the closure is in use.
+    ///
+    /// These calls cannot be invoked recursively or they
+    /// may cause a deadlock.
+    ///
+    /// This is similar in purpose to JNI's [GetPrimitiveArrayCritical](https://docs.oracle.com/javase/8/docs/technotes/guides/jni/spec/functions.html#GetPrimitiveArrayCritical_ReleasePrimitiveArrayCritical).
+    /// However it never performs a copy, it is just guarenteed to block any collections.
+    /*
+     * TODO: Should we require this of all collectors?
+     * How much does it limit flexibility?
+     */
+    fn use_critical<R>(&self, func: impl FnOnce(Gc<T>) -> R) -> R;
+}
+
 /// Safely trigger a write barrier before
 /// writing to a garbage collected value.
 ///
