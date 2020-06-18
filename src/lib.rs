@@ -24,8 +24,7 @@ use std::fmt::Debug;
 #[macro_use]
 mod manually_traced;
 pub mod cell;
-
-pub use self::cell::GcCell;
+pub mod prelude;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.

@@ -1,10 +1,10 @@
 #![feature(
     arbitrary_self_types, // Unfortunately this is required for methods on Gc refs
 )]
-use zerogc::{safepoint, safepoint_recurse, GcSimpleAlloc, GcCell, GcSafe};
-
+use zerogc::prelude::*;
 use zerogc_simple::{SimpleCollector, SimpleCollectorContext, Gc};
 use zerogc_derive::Trace;
+
 use slog::{Logger, Drain, o};
 
 #[derive(Trace)]
