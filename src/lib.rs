@@ -1,7 +1,9 @@
+// NOTE: Both these features have accepted RFCs
 #![feature(
-    const_if_match, // Used for const asserts
-    const_panic, // Const asserts
+    const_if_match, // RFC 2342 - Used for const asserts
+    const_panic, // RFC 2345 - Const asserts
 )]
+#![deny(missing_docs)]
 //! Zero overhead tracing garbage collection for rust, by abusing the borrow checker.
 //!
 //! ## Planned Features
@@ -188,6 +190,7 @@ pub unsafe trait GcSystem {}
 ///
 /// This context doesn't necessarily support allocation (see [GcSimpleAlloc] for that).
 pub unsafe trait GcContext: Sized {
+    /// The system used with this context
     type System: GcSystem;
     /// Inform the garbage collection system we are at a safepoint
     /// and are ready for a potential garbage collection.
@@ -266,11 +269,12 @@ pub unsafe trait GcContext: Sized {
     unsafe fn recurse_context<T, F, R>(&self, value: &mut &mut T, func: F) -> R
         where T: Trace, F: for <'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R;
 }
-/// A simple interface to allocating
+/// A simple interface to allocating from a [GcContext]. 
 ///
 /// Some garbage collectors implement more complex interfaces,
 /// so implementing this is optional
-pub unsafe trait GcSimpleAlloc<'gc, T: GcSafe + 'gc>: 'gc {
+pub unsafe trait GcSimpleAlloc<'gc, T: GcSafe + 'gc>: GcContext + 'gc {
+    /// The type of references allocated by this context
     type Ref: GcRef<'gc, T>;
     /// Allocate the specified object in this garbage collector,
     /// binding it to the lifetime of this collector.
@@ -327,7 +331,13 @@ pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
     type System: GcSystem;
     /// The value of the underlying pointer
     fn value(&self) -> &'gc T;
-
+    /// Cast this reference to a raw pointer
+    ///
+    /// ## Safety
+    /// It's undefined behavior to mutate the
+    /// value.
+    /// The pointer is only valid as long as
+    /// the reference is.
     #[inline]
     unsafe fn as_raw_ptr(&self) -> *mut T {
         self.value() as *const T as *mut T
@@ -365,6 +375,7 @@ pub trait GcCreateHandle<'gc, T: GcSafe + 'gc>: GcRef<'gc, T>
  * TODO: Should we drop the Clone requirement?
  */
 pub trait GcHandle<T: GcSafe + ?Sized>: Clone + Trace {
+    /// The type of contexts used with this handle's collector
     type Context: GcContext;    
     /// Access this handle inside the closure,
     /// possibly associating it with the specified
@@ -394,7 +405,10 @@ pub trait GcHandle<T: GcSafe + ?Sized>: Clone + Trace {
 pub trait GcBindHandle<'new_gc, T: GcSafe + ?Sized>: GcHandle<T>
     where T: GcBrand<'new_gc, Self::System>,
           <T as GcBrand<'new_gc, Self::System>>::Branded: GcSafe {
+    /// The type of the system used with this handle
     type System: GcSystem;
+    /// A garbage collected reference that has been bound to
+    /// a context with the lifetime `new_gc`
     type Bound: GcRef<'new_gc, <T as GcBrand<'new_gc, Self::System>>::Branded>;
     /// Associate this handle with the specified context,
     /// allowing its underlying object to be accessed
@@ -500,6 +514,7 @@ impl<T> AssumeNotTraced<T> {
     pub unsafe fn new(value: T) -> Self {
         AssumeNotTraced(value)
     }
+    /// Unwrap the inner value of this wrapper
     #[inline]
     pub fn into_inner(self) -> T {
         self.0
@@ -546,6 +561,11 @@ unsafe_gc_brand!(AssumeNotTraced, T);
 /// This indicates that its safe to transmute to the new `Branded` type
 /// and all that will change is the lifetimes.
 pub unsafe trait GcBrand<'new_gc, S: GcSystem>: Trace {
+    /// This type with all garbage collected lifetimes
+    /// changed to `'new_gc`
+    ///
+    /// This must have the same in-memory repr as `Self`,
+    /// so that it's safe to transmute.
     type Branded: Trace + 'new_gc;
 }
 
@@ -631,6 +651,10 @@ pub unsafe trait Trace {
 /// Likewise primitives (with new garbage collected data) can also
 /// implement this (since they have nothing to trace).
 pub unsafe trait TraceImmutable: Trace {
+    /// Visit an immutable reference to this type
+    ///
+    /// The visitor may want to relocate garbage collected pointers,
+    /// which this type must support.
     fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err>;
 }
 
@@ -643,12 +667,15 @@ pub unsafe trait NullTrace: Trace + TraceImmutable {}
 ///
 /// This should only be used by a [GarbageCollectionSystem]
 pub unsafe trait GcVisitor: Sized {
+    /// The type of errors returned by this visitor
     type Err: Debug;
 
+    /// Visit a reference to the specified value
     #[inline(always)]
     fn visit<T: Trace + ?Sized>(&mut self, value: &mut T) -> Result<(), Self::Err> {
         value.visit(self)
     }
+    /// Visit a reference to the specified value
     #[inline(always)]
     fn visit_immutable<T: TraceImmutable + ?Sized>(&mut self, value: &T) -> Result<(), Self::Err> {
         value.visit_immutable(self)
