@@ -19,13 +19,13 @@
  */
 use std::mem;
 use std::ops::{Deref, DerefMut};
-use std::fmt::{Debug};
+use std::fmt::Debug;
 
 #[macro_use]
 mod manually_traced;
 pub mod cell;
 
-pub use self::cell::{GcCell};
+pub use self::cell::GcCell;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.
@@ -322,13 +322,10 @@ impl<C: GcContext> FrozenContext<C> {
 /// that this points to a garbage collected object with the correct header,
 /// and not some arbitrary bits that you've decided to heap allocate.
 pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
-    + Deref<Target=&'gc T>
-    where T: GcBrand<'static, Self::System> {
+    + Deref<Target=&'gc T> {
     /// The type of the garbage collection
     /// system that created this pointer
     type System: GcSystem;
-    /// The type of [GcHandle]s to this object.
-    type Handle: GcHandle<<T as GcBrand<'static, Self::System>>::Branded>;
     /// The value of the underlying pointer
     fn value(&self) -> &'gc T;
 
@@ -336,11 +333,23 @@ pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
     unsafe fn as_raw_ptr(&self) -> *mut T {
         self.value() as *const T as *mut T
     }
+}
+/// The trait to create [GcHandle]s to a [GcRef].
+///
+/// This type-system hackery is needed because
+/// we need to place bounds on `T as GcBrand`
+///
+/// TODO: Remove when we get more powerful types
+pub trait GcCreateHandle<'gc, T: GcSafe + 'gc>: GcRef<'gc, T>
+    where T: GcBrand<'static, Self::System>,
+        <T as GcBrand<'static, Self::System>>::Branded: GcSafe {
+    /// The type of handles to this object.
+    type Handle: GcHandle<<T as GcBrand<'static, Self::System>>::Branded>;
 
     /// Create a handle to this object, which can be used without a context
     fn create_handle(&self) -> Self::Handle;
 }
-
+ 
 /// A owned handle which points to a garbage collected object.
 ///
 /// This is considered a root by the garbage collector that is independent
@@ -356,19 +365,8 @@ pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
 /*
  * TODO: Should we drop the Clone requirement?
  */
-pub trait GcHandle<T: GcSafe + ?Sized>: Clone + Trace
-    where for<'gc> T: GcBrand<'gc, Self::Context::System> {
-    type Context: GcContext;
-    /// Associate this handle with the specified context,
-    /// allowing its underlying object to be accessed
-    /// as long as the context is valid.
-    ///
-    /// The underlying object can be accessed just like any
-    /// other object that would be allocated from the context.
-    /// It'll be properly collected and can even be used as a root
-    /// at the next safepoint.
-    fn bind_to<'gc>(&self, context: &'gc Self::Context)
-        -> Gc<'gc, <T as GcBrand<'gc, _>>::Branded>;
+pub trait GcHandle<T: GcSafe + ?Sized>: Clone + Trace {
+    type Context: GcContext;    
     /// Access this handle inside the closure,
     /// possibly associating it with the specified
     ///
@@ -385,7 +383,29 @@ pub trait GcHandle<T: GcSafe + ?Sized>: Clone + Trace
      * TODO: Should we require this of all collectors?
      * How much does it limit flexibility?
      */
-    fn use_critical<R>(&self, func: impl FnOnce(Gc<T>) -> R) -> R;
+    fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R;
+}
+/// Trait for binding [GcHandle]s to contexts
+/// using [GcBindHandle::bind_to]
+///
+/// This is separate from the [GcHandle] trait
+/// because Rust doesn't have Generic Associated Types
+///
+/// TODO: Remove when we get more powerful types
+pub trait GcBindHandle<'new_gc, T: GcSafe + ?Sized>: GcHandle<T>
+    where T: GcBrand<'new_gc, Self::System>,
+          <T as GcBrand<'new_gc, Self::System>>::Branded: GcSafe {
+    type System: GcSystem;
+    type Bound: GcRef<'new_gc, <T as GcBrand<'new_gc, Self::System>>::Branded>;
+    /// Associate this handle with the specified context,
+    /// allowing its underlying object to be accessed
+    /// as long as the context is valid.
+    ///
+    /// The underlying object can be accessed just like any
+    /// other object that would be allocated from the context.
+    /// It'll be properly collected and can even be used as a root
+    /// at the next safepoint.
+    fn bind_to<'gc>(&self, context: &'gc Self::Context) -> Self::Bound;
 }
 
 /// Safely trigger a write barrier before
