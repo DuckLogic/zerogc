@@ -43,8 +43,7 @@ fn inner(
 ) -> String {
     let chk: i32 = (0 .. iterations).into_par_iter().map(|_| {
         let mut gc = collector.create_context();
-        safepoint_recurse!(gc, |gc, new_root| {
-            let () = new_root;
+        safepoint_recurse!(gc, |gc| {
             let a = bottom_up_tree(&gc, depth);
             item_check(&a)
         })

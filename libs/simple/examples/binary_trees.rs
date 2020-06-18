@@ -37,8 +37,7 @@ fn inner(
     depth: i32, iterations: u32
 ) -> String {
     let chk: i32 = (0 .. iterations).into_iter().map(|_| {
-        safepoint_recurse!(gc, |gc, new_root| {
-            let () = new_root;
+        safepoint_recurse!(gc, |gc| {
             let a = bottom_up_tree(&gc, depth);
             item_check(&a)
         })
@@ -73,7 +72,7 @@ fn main() {
         (min_depth / 2..max_depth / 2 + 1).into_iter().for_each(|half_depth| {
             let depth = half_depth * 2;
             let iterations = 1 << ((max_depth - depth + min_depth) as u32);
-            let message = safepoint_recurse!(gc, |new_gc, new_root| {
+            let message = safepoint_recurse!(gc, |new_gc| {
                 inner(&mut new_gc, depth, iterations)
             });
             println!("{}", message);
