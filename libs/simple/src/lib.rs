@@ -35,6 +35,7 @@ use crate::utils::ThreadId;
 
 pub use crate::context::SimpleCollectorContext;
 use parking_lot::{Condvar, Mutex, RwLock};
+use handles::GcHandleList;
 
 mod handles;
 mod context;
@@ -205,7 +206,8 @@ impl SimpleCollector {
             safepoint_wait: Condvar::new(),
             safepoint_lock: Mutex::new(()),
             collecting: AtomicBool::new(false),
-            heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD)
+            heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD),
+            handle_list: GcHandleList::new(),
         });
         let collector_ptr = &*collector
             as *const _
@@ -522,7 +524,9 @@ struct RawSimpleCollector {
     /// This doesn't actually protect any data. It's just
     /// used because [parking_lot::RwLock] doesn't support condition vars.
     /// This is the [officially suggested solution](https://github.com/Amanieu/parking_lot/issues/165)
-    safepoint_lock: Mutex<()>
+    safepoint_lock: Mutex<()>,
+    /// Tracks object handles
+    handle_list: GcHandleList
 }
 impl RawSimpleCollector {
     #[inline]

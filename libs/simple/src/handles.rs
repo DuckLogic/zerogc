@@ -5,9 +5,10 @@ use std::ptr::NonNull;
 use std::marker::PhantomData;
 use std::ffi::c_void;
 use std::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak as WeakArc};
 
 use zerogc::GcSafe;
-use crate::{DynTrace, GcType};
+use crate::{DynTrace, GcType, RawSimpleCollector};
 
 const INITIAL_HANDLE_CAPACITY: usize = 128;
 
@@ -18,10 +19,52 @@ const INITIAL_HANDLE_CAPACITY: usize = 128;
 ///
 /// The list can not be appended to while a collection
 /// is in progress.
+///
+/// TODO: This list only grows. It never shrinks!!
 pub(crate) struct GcHandleList {
     last_bucket: AtomicPtr<GcHandleBucket>,
+    /// Pointer to the last free slot in the free list
+    ///
+    /// If the list is empty, this is null
+    last_free_slot: AtomicPtr<HandleSlot>
 }
 impl GcHandleList {
+    pub(crate) fn new() -> Self {
+        use std::ptr::null_mut;
+        GcHandleList {
+            last_bucket: AtomicPtr::new(null_mut()),
+            last_free_slot: AtomicPtr::new(null_mut()),
+        }
+    }
+    unsafe fn append_free_slot(&self, slot: *mut HandleSlot) {
+        // Verify it's actually free...
+        debug_assert_eq!(
+            (*slot).valid.value
+                .load(Ordering::SeqCst),
+            std::ptr::null_mut()
+        );
+        let mut last_free = self.last_free_slot
+            .load(Ordering::Acquire);
+        loop {
+            /*
+             * NOTE: Must update `prev_freed_slot`
+             * BFEORE we write to the free-list.
+             * Other threads must see a consistent state
+             * the moment we're present in the free-list
+             */
+            (*slot).freed.prev_free_slot
+                .store(last_free, Ordering::Release);
+            let actual_last_free = self.last_free_slot.compare_and_swap(
+                last_free, slot,
+                Ordering::AcqRel
+            );
+            if actual_last_free == last_free {
+                return // Success
+            } else {
+                last_free = actual_last_free;
+            }
+        }
+    }
     /// Allocate a raw handle that points to the given value.
     ///
     /// ## Safety
@@ -29,18 +72,71 @@ impl GcHandleList {
     ///
     /// The returned handle must be fully initialized
     /// before the next collection begins.
+    #[inline]
     pub(crate) unsafe fn alloc_raw_handle(&self, value: *mut ()) -> &GcRawHandle {
+        // TODO: Should we weaken these orderings?
+        let mut slot = self.last_free_slot.load(Ordering::Acquire);
+        while !slot.is_null() {
+            /*
+             * NOTE: If another thread has raced us and already initialized
+             * this free slot, this pointer could be nonsense.
+             * That's okay - it's still initialized memory.
+             */
+            let prev = (*slot).freed.prev_free_slot.load(Ordering::Acquire);
+            /*
+             * If this CAS succeeds, we have ownership.
+             * Otherwise another thread beat us and
+             * we must try again.
+             */
+            let actual_slot = self.last_free_slot.compare_and_swap(
+                slot, prev,
+                Ordering::AcqRel
+            );
+            if actual_slot == slot {
+                // Verify it's actually free...
+                debug_assert_eq!(
+                    (*slot).valid.value
+                        .load(Ordering::SeqCst),
+                    std::ptr::null_mut()
+                );
+                /*
+                 * We own the slot, initialize it to point to
+                 * the provided pointer. The user is responsible
+                 * for any remaining initialization.
+                 */
+                (*slot).valid.value
+                    .store(value, Ordering::Release);
+                return &(*slot).valid;
+            } else {
+                // Try again
+                slot = actual_slot;
+            }
+        }
+        // Empty free list
+        self.alloc_handle_fallback(value)
+    }
+    /// Fallback to creating more buckets
+    /// if the free-list is empty
+    #[cold]
+    #[inline(never)]
+    unsafe fn alloc_handle_fallback(&self, value: *mut ()) -> &GcRawHandle {
         let mut bucket = self.last_bucket.load(Ordering::Acquire);
         loop {
+            // TODO: Should we be retrying the free-list?
             let new_size: usize;
             if bucket.is_null() {
                 new_size = INITIAL_HANDLE_CAPACITY;
             } else {
-                if let Some(handle) = (*bucket).acquire_raw_handle(value) {
-                    return handle;
+                if let Some(slot) = (*bucket).blindly_alloc_slot(value) {
+                    /*
+                     * NOTE: The caller is responsible
+                     * for finishing up initializing this.
+                     * We've merely set the pointer to `value`
+                     */
+                    return &slot.valid;
                 }
                 // Double capacity for amortized growth
-                new_size = (*bucket).elements.len() * 2;
+                new_size = (*bucket).slots.len() * 2;
             }
             match self.init_bucket(bucket, new_size) {
                 /*
@@ -59,13 +155,13 @@ impl GcHandleList {
         prev_bucket: *mut GcHandleBucket,
         desired_size: usize
     ) -> Result<&GcHandleBucket, &GcHandleBucket> {
-        let mut elements: Vec<GcRawHandle> = Vec::with_capacity(desired_size);
-        // Zero initialize handles - assuming this is safe
-        elements.as_mut_ptr().write_bytes(0, desired_size);
-        elements.set_len(desired_size);
+        let mut slots: Vec<HandleSlot> = Vec::with_capacity(desired_size);
+        // Zero initialize slots - assuming this is safe
+        slots.as_mut_ptr().write_bytes(0, desired_size);
+        slots.set_len(desired_size);
         let allocated_bucket = Box::into_raw(Box::new(GcHandleBucket {
-            elements: elements.into_boxed_slice(),
-            last_used: AtomicUsize::new(0),
+            slots: slots.into_boxed_slice(),
+            last_alloc: AtomicUsize::new(0),
             prev: AtomicPtr::new(prev_bucket),
         }));
         let actual_bucket = self.last_bucket.compare_and_swap(
@@ -84,27 +180,27 @@ impl GcHandleList {
             Err(&*actual_bucket)
         }
     }
-    /// Iterate over all the handles in this list,
-    /// assuming exclusive access
-    unsafe fn for_each_handle_mut(
-        &self, mut func: impl FnMut(&mut GcRawHandle)
-    ) {
-        let mut bucket = self.last_bucket.load(Ordering::Acquire);
-        while !bucket.is_null() {
-            let elements =  &mut *(*bucket).elements;
-            // We should have exclusive access!
-            for element in elements {
-                func(element);
-            }
-            bucket = (*bucket).prev.load(Ordering::Acquire);
-        }
-    }
 }
 impl DynTrace for GcHandleList {
     fn trace(&mut self, visitor: &mut crate::MarkVisitor) {
-        unsafe { self.for_each_handle_mut(|element| {
-            element.trace(visitor)
-        }) }
+        unsafe {
+            /*
+             * TODO: This fence seems unessicarry since we should
+             * already have exclusive access.....
+             */
+            atomic::fence(Ordering::Acquire);
+            let mut bucket = self.last_bucket.load(Ordering::Relaxed);
+            while !bucket.is_null() {
+                // We should have exclusive access!
+                let slots =  &mut *(*bucket).slots;
+                for slot in slots {
+                    if slot.is_valid(Ordering::Relaxed) {
+                        slot.valid.trace(visitor)
+                    }
+                }
+                bucket = (*bucket).prev.load(Ordering::Relaxed);
+            }
+        }
     }
 }
 impl Drop for GcHandleList {
@@ -121,8 +217,13 @@ impl Drop for GcHandleList {
 
 }
 struct GcHandleBucket {
-    elements: Box<[GcRawHandle]>,
-    last_used: AtomicUsize,
+    slots: Box<[HandleSlot]>,
+    /// A pointer to the last allocated slot
+    ///
+    /// This doesn't take into account freed slots,
+    /// so should only be used as a fallback if
+    /// the free-list is empty
+    last_alloc: AtomicUsize,
     /// Pointer to the last bucket in
     /// the linked list
     ///
@@ -135,33 +236,70 @@ impl GcHandleBucket {
     /// Acquire a new raw handle from this bucket,
     /// or `None` if the bucket is believed to be empty
     ///
+    /// This **doesn't reused freed values**, so should
+    /// only be used as a fallback if the free-list is empty.
+    /// 
     /// ## Safety
     /// See docs on [GcHandleList::alloc_raw_bucket]
-    unsafe fn acquire_raw_handle(&self, value: *mut ()) -> Option<&GcRawHandle> {
-        let len = self.elements.len();
-        let last_used = self.last_used.load(Ordering::Relaxed);
-        for (i, raw) in self.elements.iter().enumerate().skip(last_used + 1) {
+    unsafe fn blindly_alloc_slot(&self, value: *mut ()) -> Option<&HandleSlot> {
+        let last_alloc = self.last_alloc.load(Ordering::Relaxed);
+        for (i, slot) in self.slots.iter().enumerate()
+            .skip(last_alloc) {
             // TODO: All these fences must be horrible on ARM
-            if raw.value.compare_and_swap(
+            if slot.valid.value.compare_and_swap(
                 std::ptr::null_mut(), value,
                 Ordering::AcqRel
             ).is_null() {
                 // We acquired ownership!
-                self.last_used.fetch_max(i, Ordering::AcqRel);
-                return Some(&*raw);
+                self.last_alloc.fetch_max(i, Ordering::AcqRel);
+                return Some(&*slot);
             }
         }
         None
     }
 }
-/// The underlying value of a handle,
-/// which may or may not be valid.
+/// A slot in the array of handles
+///
+/// This may or may not be valid,
+/// depending on whether the value pointer is null.
+#[repr(C)]
+pub union HandleSlot {
+    freed: FreedHandleSlot,
+    valid: GcRawHandle
+}
+impl HandleSlot {
+    /// Load the current value of this pointer
+    #[inline]
+    fn is_valid(&self, ord: Ordering) -> bool {
+        /*
+         * Check if the value pointer is null
+         * 
+         * The pointer is present in both variants
+         * of the enum.
+         */
+        unsafe { !self.valid.value.load(ord).is_null() }
+
+    }
+}
+/// A handle that is free
+#[repr(C)]
+pub struct FreedHandleSlot {
+    /// This corresponds to a [GcRawHandle::value]
+    ///
+    /// It must be null for this object to be truly invalid!
+    _invalid_value: AtomicPtr<()>,
+    /// The previous slot in the free list
+    prev_free_slot: AtomicPtr<HandleSlot>
+}
+/// The underlying value of a handle.
 ///
 /// These are reused
+#[repr(C)]
 pub struct GcRawHandle {
     /// Refers to the underlying value of this handle.
     ///
-    /// If it's null, it's invalid and free to be reused.
+    /// If it's null, it's invalid, and is actually
+    /// a [FreedHandle].
     ///
     /// The underlying value can only be safely accessed 
     /// if there isn't a collection in progress
@@ -208,10 +346,14 @@ impl DynTrace for GcRawHandle {
 }
 pub struct GcHandle<T: GcSafe> {
     inner: NonNull<GcRawHandle>,
+    collector: WeakArc<RawSimpleCollector>,
     marker: PhantomData<*mut T>
 }
 impl<T: GcSafe> Clone for GcHandle<T> {
     fn clone(&self) -> Self {
+        // NOTE: Dead collector -> invalid handle
+        let collector = self.collector.upgrade()
+            .expect("Dead collector");
         let inner = unsafe { self.inner.as_ref() };
         debug_assert!(!inner.value
             .load(Ordering::SeqCst)
@@ -231,12 +373,23 @@ impl<T: GcSafe> Clone for GcHandle<T> {
         }
         GcHandle {
             inner: self.inner,
+            collector: Arc::downgrade(&collector),
             marker: PhantomData
         }
     }
 }
 impl<T: GcSafe> Drop for GcHandle<T> {
     fn drop(&mut self) {
+        let collector = match self.collector.upgrade() {
+            None => {
+                /*
+                 * The collector is dead.
+                 * Our memory has already been freed
+                 */
+                return;
+            },
+            Some(collector) => collector,
+        };
         let inner = unsafe { self.inner.as_ref() };
         debug_assert!(!inner.value
             .load(Ordering::SeqCst)
@@ -257,10 +410,15 @@ impl<T: GcSafe> Drop for GcHandle<T> {
             },
             _ => {}, // Other references
         }
-        // Finally free the value
+        // Mark the value as freed
         inner.value.store(
             std::ptr::null_mut(),
             Ordering::Release
         );
+        unsafe {
+            collector.handle_list.append_free_slot(
+                self.inner.as_ptr() as *mut HandleSlot
+            );
+        }
     }
 }
