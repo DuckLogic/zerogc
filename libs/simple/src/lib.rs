@@ -36,6 +36,7 @@ use crate::utils::ThreadId;
 pub use crate::context::SimpleCollectorContext;
 use parking_lot::{Condvar, Mutex, RwLock};
 
+mod handles;
 mod context;
 mod utils;
 #[cfg(feature = "small-object-arenas")]
@@ -224,11 +225,11 @@ impl SimpleCollector {
 
 unsafe impl GcSystem for SimpleCollector {}
 
-unsafe impl<'gc, T: GcSafe + 'gc> GcSimpleAlloc<'gc, T> for &'gc SimpleCollectorContext {
+unsafe impl<'gc, T: GcSafe + 'gc> GcSimpleAlloc<'gc, T> for SimpleCollectorContext {
     type Ref = Gc<'gc, T>;
 
     #[inline]
-    fn alloc(&self, value: T) -> Gc<'gc, T> {
+    fn alloc(&'gc self, value: T) -> Gc<'gc, T> {
         self.collector().heap.allocator.alloc(value)
     }
 }
@@ -693,7 +694,6 @@ impl GcVisit for MarkVisitor<'_> {
 struct GcType {
     value_size: usize,
     value_offset: usize,
-    #[cfg_attr(feature = "implicit-grey-stack", allow(unused))]
     trace_func: unsafe fn(*mut c_void, &mut MarkVisitor),
     drop_func: Option<unsafe fn(*mut c_void)>,
 }

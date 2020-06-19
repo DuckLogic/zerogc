@@ -288,7 +288,7 @@ pub unsafe trait GcSimpleAlloc<'gc, T: GcSafe + 'gc>: GcContext + 'gc {
     ///
     /// This gives a immutable reference to the resulting object.
     /// Once allocated, the object can only be correctly modified with a `GcCell`
-    fn alloc(&self, value: T) -> Self::Ref;
+    fn alloc(&'gc self, value: T) -> Self::Ref;
 }
 /// The internal representation of a frozen context
 ///
