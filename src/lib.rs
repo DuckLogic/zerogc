@@ -324,7 +324,7 @@ impl<C: GcContext> FrozenContext<C> {
 /// The smart pointer is simply a guarantee to the garbage collector
 /// that this points to a garbage collected object with the correct header,
 /// and not some arbitrary bits that you've decided to heap allocate.
-pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
+pub unsafe trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
     + Deref<Target=&'gc T> {
     /// The type of the garbage collection
     /// system that created this pointer
@@ -349,7 +349,7 @@ pub trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: GcSafe + Copy
 /// we need to place bounds on `T as GcBrand`
 ///
 /// TODO: Remove when we get more powerful types
-pub trait GcCreateHandle<'gc, T: GcSafe + 'gc>: GcRef<'gc, T>
+pub unsafe trait GcCreateHandle<'gc, T: GcSafe + 'gc>: GcRef<'gc, T>
     where T: GcBrand<'static, Self::System>,
         <T as GcBrand<'static, Self::System>>::Branded: GcSafe {
     /// The type of handles to this object.
@@ -374,7 +374,7 @@ pub trait GcCreateHandle<'gc, T: GcSafe + 'gc>: GcRef<'gc, T>
 /*
  * TODO: Should we drop the Clone requirement?
  */
-pub trait GcHandle<T: GcSafe + ?Sized>: Clone + Trace {
+pub unsafe trait GcHandle<T: GcSafe + ?Sized>: Clone + Trace {
     /// The type of contexts used with this handle's collector
     type Context: GcContext;    
     /// Access this handle inside the closure,
@@ -402,7 +402,7 @@ pub trait GcHandle<T: GcSafe + ?Sized>: Clone + Trace {
 /// because Rust doesn't have Generic Associated Types
 ///
 /// TODO: Remove when we get more powerful types
-pub trait GcBindHandle<'new_gc, T: GcSafe + ?Sized>: GcHandle<T>
+pub unsafe trait GcBindHandle<'new_gc, T: GcSafe + ?Sized>: GcHandle<T>
     where T: GcBrand<'new_gc, Self::System>,
           <T as GcBrand<'new_gc, Self::System>>::Branded: GcSafe {
     /// The type of the system used with this handle
@@ -418,7 +418,7 @@ pub trait GcBindHandle<'new_gc, T: GcSafe + ?Sized>: GcHandle<T>
     /// other object that would be allocated from the context.
     /// It'll be properly collected and can even be used as a root
     /// at the next safepoint.
-    fn bind_to<'gc>(&self, context: &'gc Self::Context) -> Self::Bound;
+    fn bind_to(&self, context: &'new_gc Self::Context) -> Self::Bound;
 }
 
 /// Safely trigger a write barrier before
