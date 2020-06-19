@@ -159,7 +159,7 @@ macro_rules! freeze_context {
     ($context:ident) => {unsafe {
         use $crate::{GcContext, FrozenContext};
         let mut context = $context;
-        $context.freeze();
+        context.freeze();
         FrozenContext::new(context)
     }};
 }

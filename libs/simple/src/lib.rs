@@ -14,7 +14,7 @@
     specialization, // Used for specialization (effectively required by GcRef)
     vec_remove_item, // This is just convenient
 )]
-use zerogc::{GcSystem, GcSafe, Trace, GcVisitor, GcSimpleAlloc, GcRef, GcBrand, GcDirectBarrier};
+use zerogc::{GcSystem, GcSafe, Trace, GcVisitor, GcSimpleAlloc, GcRef, GcBrand, GcDirectBarrier, GcCreateHandle};
 use std::alloc::Layout;
 use std::ptr::NonNull;
 use std::os::raw::c_void;
@@ -64,6 +64,8 @@ mod alloc {
     }
 }
 
+pub use handles::GcHandle;
+
 /// A garbage collected pointer
 ///
 /// See docs for [zerogc::GcRef]
@@ -73,6 +75,10 @@ pub struct Gc<'gc, T: GcSafe + 'gc> {
     ///
     /// As long as our memory is valid,
     /// it implies this pointer is too..
+    /*
+     * TODO: Store a pointer to the Arc to enable clones
+     * without having to abuse Arc::from_raw
+     */
     collector_ptr: NonNull<RawSimpleCollector>,
     // TODO: Field-ordering wise I feel this should come first
     value: NonNull<T>,
@@ -87,13 +93,50 @@ impl<'gc, T: GcSafe + 'gc> Gc<'gc, T> {
         Gc { collector_ptr, value, marker: PhantomData }
     }
 }
-impl<'gc, T: GcSafe + 'gc> GcRef<'gc, T> for Gc<'gc, T> {
+unsafe impl<'gc, T: GcSafe + 'gc> GcRef<'gc, T> for Gc<'gc, T> {
     type System = SimpleCollector;
 
     #[inline]
     fn value(&self) -> &'gc T {
         unsafe { &mut *self.value.as_ptr() }
     }
+}
+/// We support handles
+unsafe impl<'gc, T> GcCreateHandle<'gc, T> for Gc<'gc, T>
+    where T: GcSafe, T: GcBrand<'static, SimpleCollector>,
+        T::Branded: GcSafe {
+    type Handle = handles::GcHandle<T::Branded>;
+    #[inline]
+    fn create_handle(&self) -> Self::Handle {
+        unsafe {
+            let collector = self.collector_ptr.as_ref();
+            let value = self.value.as_ptr();
+            let raw = collector.handle_list
+                .alloc_raw_handle(value as *mut ());
+            /*
+             * WARN: Undefined Behavior
+             * if we don't finish initializing
+             * the handle!!!
+             *
+             * TODO: Encapsulate
+             */
+            raw.type_info.store(
+                <T as StaticGcType>::STATIC_TYPE
+                    as *const GcType
+                    as *mut GcType,
+                Ordering::Release
+            );
+            raw.refcnt.store(1, Ordering::Release);
+            // TODO: This is a horrible hack
+            let arc = Arc::from_raw(
+                self.collector_ptr.as_ptr()
+            );
+            let weak = Arc::downgrade(&arc);
+            std::mem::forget(arc);
+            GcHandle::new(NonNull::from(raw), weak)
+        }
+    }
+
 }
 /// Double-indirection is completely safe
 unsafe impl<'gc, T: GcSafe + 'gc> GcSafe for Gc<'gc, T> {

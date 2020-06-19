@@ -7,8 +7,8 @@ use std::ffi::c_void;
 use std::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak as WeakArc};
 
-use zerogc::GcSafe;
-use crate::{DynTrace, GcType, RawSimpleCollector};
+use zerogc::{Trace, GcSafe, GcBindHandle, GcBrand};
+use crate::{DynTrace, GcType, RawSimpleCollector, Gc, SimpleCollectorContext, SimpleCollector};
 
 const INITIAL_HANDLE_CAPACITY: usize = 128;
 
@@ -306,12 +306,14 @@ pub struct GcRawHandle {
     value: AtomicPtr<()>,
     /// I think this should be protected by the other atomic
     /// accesses. Regardless, I'll put it in an AtomicPtr anyways.
-    type_info: AtomicPtr<GcType>,
+    // TODO: Encapsulate
+    pub(crate) type_info: AtomicPtr<GcType>,
     /// The reference count to the handle
     ///
     /// If this is zero the value can be freed
     /// and this memory can be used.
-    refcnt: AtomicUsize
+    // TODO: Encapsulate
+    pub(crate) refcnt: AtomicUsize
 }
 impl DynTrace for GcRawHandle {
     #[inline]
@@ -348,6 +350,107 @@ pub struct GcHandle<T: GcSafe> {
     inner: NonNull<GcRawHandle>,
     collector: WeakArc<RawSimpleCollector>,
     marker: PhantomData<*mut T>
+}
+impl<T: GcSafe> GcHandle<T> {
+    pub(crate) unsafe fn new(
+        inner: NonNull<GcRawHandle>,
+        collector: WeakArc<RawSimpleCollector>
+    ) -> Self {
+        GcHandle {
+            inner, collector,
+            marker: PhantomData
+        }
+    }
+    #[inline]
+    unsafe fn assume_valid_collector(&self) -> *const RawSimpleCollector {
+        debug_assert!(
+            self.collector.upgrade().is_some(),
+            "Dead collector"
+        );
+        self.collector.as_ptr()
+    }
+}
+unsafe impl<T: GcSafe> ::zerogc::GcHandle<T> for GcHandle<T> {
+    type Context = SimpleCollectorContext;
+    fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R {
+        let collector = self.collector.upgrade()
+            .expect("Dead collector");
+        /*
+         * This should be sufficient to ensure
+         * the value won't be collected or relocated.
+         *
+         * Note that this is implemented using a read lock,
+         * so recursive calls will deadlock.
+         * This is preferable to using `recursive_read`,
+         * since that could starve writers (collectors).
+         */
+        collector.prevent_collection(|_state| unsafe {
+            let value = self.inner.as_ref().value
+                .load(Ordering::Acquire) as *mut T;
+            func(&*value)
+        })
+    }
+}
+unsafe impl<'new_gc, T> GcBindHandle<'new_gc, T> for GcHandle<T>
+    where T: GcSafe, T: GcBrand<'new_gc, SimpleCollector>,
+        T::Branded: GcSafe {
+    type System = SimpleCollector;
+    type Bound = Gc<'new_gc, T::Branded>;
+    #[inline]
+    fn bind_to(&self, _context: &'new_gc Self::Context) -> Self::Bound {
+        /*
+         * We can safely assume the object will
+         * be as valid as long as the context.
+         * By binding it to the lifetime of the context,
+         * we ensure that the user will have to properly
+         * track it with safepoints from now on.
+         *
+         * Instead of dynamically tracking the root
+         * with runtime-overhead,
+         * its tracked like any other object normally
+         * allocated from a context. It's zero-cost
+         * from now until the next safepoint.
+         */
+        unsafe {
+            let collector = self.assume_valid_collector(); 
+            let inner = self.inner.as_ref();
+            let value = inner.value.load(Ordering::Acquire)
+                as *mut T as *mut T::Branded;
+            debug_assert!(!value.is_null());
+            Gc::from_raw(
+                NonNull::new_unchecked(collector as *mut _),
+                NonNull::new_unchecked(value)
+            )
+        }
+    }
+
+}
+unsafe impl<T: GcSafe> Trace for GcHandle<T> {
+    // We wrap a gc pointer...
+    const NEEDS_TRACE: bool = true;
+    fn visit<V: zerogc::GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+        /*
+         * TODO: Since we're already tracked as a root,
+         * is this actually needed?
+         */
+        unsafe {
+            let collector = self.assume_valid_collector();
+            // NOTE: Assuming exclusive access!
+            let inner = self.inner.as_mut();
+            let value = *inner.value.get_mut() as *mut T;
+            debug_assert!(!value.is_null());
+            let mut gc = Gc::<T>::from_raw(
+                NonNull::from(&*collector),
+                NonNull::new_unchecked(value)
+            );
+            visitor.visit(&mut gc)?;
+            // Upgrade (in case of relocation)
+            *inner.value.get_mut() = gc.value.as_ptr()
+                as *mut ();
+        }
+        Ok(())
+    }
+
 }
 impl<T: GcSafe> Clone for GcHandle<T> {
     fn clone(&self) -> Self {

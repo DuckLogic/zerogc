@@ -69,6 +69,7 @@ fn main() {
     safepoint!(gc, ());
 
     let long_lived_tree = bottom_up_tree(&gc, max_depth);
+    let long_lived_tree = long_lived_tree.create_handle();
     let frozen = freeze_context!(gc);
 
     (min_depth / 2..max_depth / 2 + 1).into_par_iter().for_each(|half_depth| {
@@ -79,6 +80,7 @@ fn main() {
         println!("{}", message);
     });
     let new_context = unfreeze_context!(frozen);
+    let long_lived_tree = long_lived_tree.bind_to(&new_context);
 
     println!("long lived tree of depth {}\t check: {}", max_depth, item_check(&long_lived_tree));
 }
