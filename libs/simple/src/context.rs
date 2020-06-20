@@ -59,6 +59,7 @@ impl ContextState {
 
 pub struct RawContext {
     pub(crate) collector: Arc<RawSimpleCollector>,
+    original_thread: ThreadId,
     // NOTE: We are Send, not Sync
     shadow_stack: UnsafeCell<ShadowStack>,
     // TODO: Does the collector access this async?
@@ -90,6 +91,7 @@ impl RawContext {
         };
         let mut context = ManuallyDrop::new(Box::new(RawContext {
             collector: collector.clone(),
+            original_thread: original_thread.clone(),
             logger: collector.logger.new(o!(
                 "original_thread" => original_thread.clone()
             )),
@@ -147,7 +149,18 @@ impl RawContext {
                 "ctx_ptr" => format_args!("{:?}", self),
                 "initially_valid_contexts" => ?state.pending.as_ref()
                     .unwrap().valid_contexts,
-                "known_contexts" => ?*known_contexts
+                "known_contexts" => FnValue(|_| {
+                    // TODO: Use nested-values/serde?!?!
+                    let mut map = std::collections::HashMap::new();
+                    for &context in &*known_contexts {
+                        map.insert(context, format!("{:?} @ {:?}: {:?}",
+                            (*context).state.get(),
+                            (*context).original_thread,
+                            &*(*context).shadow_stack.get()
+                        ));
+                    }
+                    format!("{:?}", map)
+                })
             );
         }
         let shadow_stack = &*self.shadow_stack.get();
@@ -484,6 +497,7 @@ impl RawSimpleCollector {
             None => { // No collection
                 // Still need to remove from list of known_contexts
                 assert!(guard.known_contexts.lock().remove(&ptr));
+                dbg!("Freeing while no collection");
                 drop(guard);
             },
             Some(pending @ PendingCollection { state: PendingState::Finished, .. }) => {
@@ -495,6 +509,7 @@ impl RawSimpleCollector {
                  */
                 assert!(!pending.valid_contexts.contains(&ptr));
                 assert!(guard.known_contexts.lock().remove(&ptr));
+                dbg!("Freeing finished", ptr);
                 drop(guard);
             },
             Some(PendingCollection { state: PendingState::Waiting, .. }) => {
@@ -509,10 +524,12 @@ impl RawSimpleCollector {
                  * We need to upgrade the lock before we can mutate the state
                  */
                 let pending = guard.pending.as_mut().unwrap();
+                // We shouldn't be in the list of valid contexts!
                 assert_eq!(
                     pending.valid_contexts.remove_item(&ptr),
                     None, "state = {:?}", raw.state.get()
                 );
+                dbg!("Freeing while waiting", pending.total_contexts, ptr);
                 pending.total_contexts -= 1;
                 assert!(guard.known_contexts.get_mut().remove(&ptr));
                 drop(guard);
@@ -602,6 +619,7 @@ impl RawSimpleCollector {
                             return
                         }
                         PendingState::InProgress | PendingState::Waiting => {
+                            dbg!(&pending.valid_contexts, &pending.total_contexts);
                             /* still need to wait */
                         }
                     }

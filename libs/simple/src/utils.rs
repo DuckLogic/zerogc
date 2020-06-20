@@ -1,3 +1,6 @@
+use std::fmt::{Debug, Formatter};
+use std::fmt;
+
 #[derive(Clone)]
 pub enum ThreadId {
     Nop,
@@ -36,6 +39,22 @@ impl slog::Value for ThreadId {
                     "{:?}", id
                 ))
             },
+        }
+    }
+}
+impl Debug for ThreadId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match *self {
+            ThreadId::Nop => f.write_str("ThreadId(??)"),
+            ThreadId::Enabled { id, name: None } => {
+                write!(f, "{:?}", id)
+            },
+            ThreadId::Enabled { id, name: Some(ref name) } => {
+                f.debug_tuple("ThreadId")
+                    .field(&id)
+                    .field(name)
+                    .finish()
+            }
         }
     }
 }
