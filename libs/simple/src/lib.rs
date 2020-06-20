@@ -595,6 +595,10 @@ impl RawSimpleCollector {
                 (**ctx).assume_valid_shadow_stack()
                     .elements.iter().cloned()
             })
+            .chain(std::iter::once(&self.handle_list
+                as *const GcHandleList as *const dyn DynTrace
+                as *mut dyn DynTrace
+            ))
             .collect();
         let num_roots = roots.len();
         let mut task = CollectionTask {

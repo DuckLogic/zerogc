@@ -144,7 +144,7 @@ impl GcHandleList {
                  * allocated the new bucket. We just want
                  * to use it */
                 Ok(new_bucket) | Err(new_bucket) => {
-                    bucket = new_bucket as *const _ 
+                    bucket = new_bucket as *const _
                         as *mut _;
                 }
             }
