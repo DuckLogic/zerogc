@@ -318,11 +318,14 @@ unsafe impl GcContext for SimpleCollectorContext {
 
     unsafe fn freeze(&mut self) {
         assert_eq!(self.raw.state.get(), ContextState::Active);
+        // TODO: Isn't this state read concurrently?
         self.raw.state.set(ContextState::Frozen);
-        // We may need to notify others that we are frozen
-        if self.raw.collector.collecting.load(Ordering::Acquire) {
-            self.raw.collector.notify_waiting_safepoints();
-        }
+        /*
+         * We may need to notify others that we are frozen
+         * This means we are now "valid" for the purposes of
+         * collection ^_^
+         */
+        self.raw.collector.valid_contexts_wait.notify_all();
     }
 
     unsafe fn unfreeze(&mut self) {
@@ -465,8 +468,8 @@ impl RawSimpleCollector {
         let mut state = self.state.read();
         while state.pending.is_some() {
             RwLockReadGuard::unlocked(&mut state, || {
-                let mut lock = self.safepoint_lock.lock();
-                self.safepoint_wait.wait(&mut lock);
+                let mut lock = self.collection_wait_lock.lock();
+                self.collection_wait.wait(&mut lock);
             })
         }
         assert!(!self.collecting.load(Ordering::SeqCst));
@@ -497,7 +500,6 @@ impl RawSimpleCollector {
             None => { // No collection
                 // Still need to remove from list of known_contexts
                 assert!(guard.known_contexts.lock().remove(&ptr));
-                dbg!("Freeing while no collection");
                 drop(guard);
             },
             Some(pending @ PendingCollection { state: PendingState::Finished, .. }) => {
@@ -509,7 +511,6 @@ impl RawSimpleCollector {
                  */
                 assert!(!pending.valid_contexts.contains(&ptr));
                 assert!(guard.known_contexts.lock().remove(&ptr));
-                dbg!("Freeing finished", ptr);
                 drop(guard);
             },
             Some(PendingCollection { state: PendingState::Waiting, .. }) => {
@@ -529,7 +530,6 @@ impl RawSimpleCollector {
                     pending.valid_contexts.remove_item(&ptr),
                     None, "state = {:?}", raw.state.get()
                 );
-                dbg!("Freeing while waiting", pending.total_contexts, ptr);
                 pending.total_contexts -= 1;
                 assert!(guard.known_contexts.get_mut().remove(&ptr));
                 drop(guard);
@@ -541,13 +541,10 @@ impl RawSimpleCollector {
         // Now drop the Box
         drop(ManuallyDrop::into_inner(raw));
         /*
-         * Notify all
+         * Notify all threads waiting for contexts to be valid.
          * TODO: I think this is really only useful if we're waiting....
          */
-        self.notify_waiting_safepoints();
-    }
-    pub fn notify_waiting_safepoints(&self) {
-        self.safepoint_wait.notify_all();
+        self.valid_contexts_wait.notify_all();
     }
     /// Wait until the specified collection is finished
     ///
@@ -615,12 +612,35 @@ impl RawSimpleCollector {
                              * We can proceed immediately and everyone else
                              * will slowly begin to wakeup;
                              */
-                            self.safepoint_wait.notify_all();
+                            self.collection_wait.notify_all();
                             return
                         }
-                        PendingState::InProgress | PendingState::Waiting => {
-                            dbg!(&pending.valid_contexts, &pending.total_contexts);
-                            /* still need to wait */
+                        PendingState::Waiting => {
+                            RwLockWriteGuard::unlocked(&mut lock, || {
+                                let mut lock = self.valid_contexts_lock.lock();
+                                /*
+                                 * Wait for all contexts to be valid.
+                                 *
+                                 * Typically we're waiting for them to reach
+                                 * a safepoint.
+                                 */
+                                self.valid_contexts_wait.wait(&mut lock);
+                            })
+                        }
+                        PendingState::InProgress => {
+                            RwLockWriteGuard::unlocked(&mut lock, || {
+                                let mut lock = self.collection_wait_lock.lock();
+                                /*
+                                 * Another thread has already started collecting.
+                                 * Wait for them to finish.
+                                 *
+                                 * Block until collection finishes
+                                 * Parking lot says there shouldn't be any "spurious"
+                                 * (accidental) wakeups. However I guess it's possible
+                                 * we're woken up somehow in the middle of collection.
+                                 */
+                                self.collection_wait.wait(&mut lock);
+                            })
                         }
                     }
                 }
@@ -631,17 +651,6 @@ impl RawSimpleCollector {
                     )
                 }
             }
-            RwLockWriteGuard::unlocked(&mut lock, || {
-                let mut lock = self.safepoint_lock.lock();
-                /*
-                 * Block until collection finishes
-                 * Parking lot says there shouldn't be any "spurious"
-                 * (accidental) wakeups. However I guess it's possible
-                 * we're woken up somehow in the middle of collection.
-                 * I'm going to loop just in case :)
-                 */
-                self.safepoint_wait.wait(&mut lock);
-            })
         }
     }
     unsafe fn acknowledge_finished_collection(
@@ -676,7 +685,7 @@ impl RawSimpleCollector {
                 Ordering::SeqCst
             ));
             // Someone may be waiting for us to become `None`
-            self.safepoint_wait.notify_all();
+            self.collection_wait.notify_all();
         }
     }
 }

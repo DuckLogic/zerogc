@@ -246,8 +246,10 @@ impl SimpleCollector {
         let mut collector = Arc::new(RawSimpleCollector {
             logger,
             state: RwLock::new(CollectorState::new()),
-            safepoint_wait: Condvar::new(),
-            safepoint_lock: Mutex::new(()),
+            valid_contexts_wait: Condvar::new(),
+            collection_wait: Condvar::new(),
+            valid_contexts_lock: Mutex::new(()),
+            collection_wait_lock: Mutex::new(()),
             collecting: AtomicBool::new(false),
             heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD),
             handle_list: GcHandleList::new(),
@@ -557,17 +559,31 @@ struct RawSimpleCollector {
     /// However if you don't hold the lock you may not always
     /// see a fully consistent state.
     collecting: AtomicBool,
-    /// The condition variable other threads wait on
-    /// at a safepoint.
+    /// The condition variable for all contexts to be valid
     ///
-    /// This is also used to notify threads when a collection is over.
-    safepoint_wait: Condvar,
-    /// The mutex used alongside `safepoint_wait`
+    /// In order to be valid, a context must be either frozen
+    /// or paused at a safepoint.
+    ///
+    /// After a collection is marked as pending, threads must wait until
+    /// all contexts are valid before the actual work can begin.
+    valid_contexts_wait: Condvar,
+    /// Wait until a garbage collection is over.
+    ///
+    /// This must be separate from `valid_contexts_wait`.
+    /// A garbage collection can only begin once all contexts are valid,
+    /// so this condition logically depends on `valid_contexts_wait`.
+    collection_wait: Condvar,
+    /// The mutex used alongside `valid_contexts_wait`
     ///
     /// This doesn't actually protect any data. It's just
     /// used because [parking_lot::RwLock] doesn't support condition vars.
     /// This is the [officially suggested solution](https://github.com/Amanieu/parking_lot/issues/165)
-    safepoint_lock: Mutex<()>,
+    // TODO: Should we replace this with `known_collections`?
+    valid_contexts_lock: Mutex<()>,
+    /// The mutex used alongside `collection_wait`
+    ///
+    /// Like `collection_wait`, his doesn't actually protect any data.
+    collection_wait_lock: Mutex<()>,
     /// Tracks object handles
     handle_list: GcHandleList
 }
