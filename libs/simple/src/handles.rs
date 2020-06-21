@@ -208,9 +208,9 @@ impl Drop for GcHandleList {
         let mut bucket = self.last_bucket.load(Ordering::Acquire);
         while !bucket.is_null() {
             unsafe {
+                drop(Box::from_raw(bucket));
                 bucket = (*bucket).prev
                     .load(Ordering::Acquire);
-                drop(Box::from_raw(bucket));
             }
         }
     }
