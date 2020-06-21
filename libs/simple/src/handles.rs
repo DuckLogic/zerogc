@@ -167,7 +167,7 @@ impl GcHandleList {
         let actual_bucket = self.last_bucket.compare_and_swap(
             prev_bucket, allocated_bucket, Ordering::SeqCst
         );
-        if actual_bucket == allocated_bucket {
+        if actual_bucket == prev_bucket {
             Ok(&*actual_bucket)
         } else {
             /*
