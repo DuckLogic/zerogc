@@ -371,10 +371,17 @@ pub unsafe trait GcCreateHandle<'gc, T: GcSafe + 'gc>: GcRef<'gc, T>
 /// bridging the gap between native memory and managed memory.
 /// These are useful to pass to C APIs or any other code
 /// that doesn't cooperate with zerogc.
+///
+/// ## Tracing
+/// The object behind this handle is already considered a root of the collection.
+/// It should always be considered reachable by the garbage collector.
+///
+/// Validity is tracked by this smart-pointer and not by tracing.
+/// Therefore it is safe to implement [zerogc::NullTrace] for handles.
 /*
  * TODO: Should we drop the Clone requirement?
  */
-pub unsafe trait GcHandle<T: GcSafe + ?Sized>: Clone + Trace {
+pub unsafe trait GcHandle<T: GcSafe + ?Sized>: Clone + NullTrace {
     /// The type of contexts used with this handle's collector
     type Context: GcContext;    
     /// Access this handle inside the closure,
