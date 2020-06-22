@@ -364,4 +364,5 @@ macro_rules! unsafe_gc_brand {
 
 mod core;
 mod stdlib;
-
+#[cfg(feature = "indexmap")]
+mod indexmap;

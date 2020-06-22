@@ -30,6 +30,7 @@ unsafe impl<K: TraceImmutable, V: Trace> Trace for HashMap<K, V> {
     const NEEDS_TRACE: bool = K::NEEDS_TRACE || V::NEEDS_TRACE;
 
     fn visit<Visit: GcVisitor>(&mut self, visitor: &mut Visit) -> Result<(), Visit::Err> {
+        if !Self::NEEDS_TRACE { return Ok(()); };
         for (key, value) in self.iter_mut() {
             visitor.visit_immutable(key)?;
             visitor.visit(value)?;
@@ -55,6 +56,7 @@ unsafe impl<V: TraceImmutable> Trace for HashSet<V> {
     const NEEDS_TRACE: bool = V::NEEDS_TRACE;
 
     fn visit<Visit: GcVisitor>(&mut self, visitor: &mut Visit) -> Result<(), Visit::Err> {
+        if !Self::NEEDS_TRACE { return Ok(()); };
         for value in self.iter() {
             visitor.visit_immutable(value)?;
         }
