@@ -523,3 +523,14 @@ impl<T: GcSafe> Drop for GcHandle<T> {
         }
     }
 }
+/// In order to send *references* between threads,
+/// the underlying type must be sync.
+///
+/// This is the same reason that `Arc<T>: Send` requires `T: Sync`
+unsafe impl<T: GcSafe + Sync> Send for GcHandle<T> {}
+
+/// If the underlying type is Sync,
+/// it's safe to share garbage collected references between threads.
+///
+/// The collector itself is always safe
+unsafe impl<T: GcSafe + Sync> Sync for GcHandle<T> {}
