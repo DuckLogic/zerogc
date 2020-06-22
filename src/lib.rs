@@ -118,7 +118,7 @@ macro_rules! __recurse_context {
 /// while keeping the specified root alive.
 ///
 /// All other garbage collected pointers that aren't reachable from the root are invalidated.
-/// They have a lifetime that references the [GarbageCollectorRef]
+/// They have a lifetime that references the [GcRef]
 /// and the borrow checker considers the safepoint a 'mutation'.
 ///
 /// The root is exempted from the "mutation" and rebound to the new lifetime.
@@ -166,7 +166,7 @@ macro_rules! freeze_context {
 
 /// Unfreeze the context, allowing it to be used again
 ///
-/// Returns a [zerogc::GcContext] struct.
+/// Returns a [GcContext] struct.
 #[macro_export]
 macro_rules! unfreeze_context {
     ($frozen:ident) => {unsafe {
@@ -377,7 +377,7 @@ pub unsafe trait GcCreateHandle<'gc, T: GcSafe + 'gc>: GcRef<'gc, T>
 /// It should always be considered reachable by the garbage collector.
 ///
 /// Validity is tracked by this smart-pointer and not by tracing.
-/// Therefore it is safe to implement [zerogc::NullTrace] for handles.
+/// Therefore it is safe to implement [NullTrace] for handles.
 /*
  * TODO: Should we drop the Clone requirement?
  */
@@ -672,7 +672,7 @@ pub unsafe trait NullTrace: Trace + TraceImmutable {}
 
 /// Visits garbage collected objects
 ///
-/// This should only be used by a [GarbageCollectionSystem]
+/// This should only be used by a [GcSystem]
 pub unsafe trait GcVisitor: Sized {
     /// The type of errors returned by this visitor
     type Err: Debug;
