@@ -11,8 +11,7 @@
     const_transmute, // This can already be acheived with unions...
     untagged_unions, // Why isn't this stable?
     new_uninit, // Until Rust has const generics, this is how we init arrays..
-    specialization, // Used for specialization (effectively required by GcRef)
-    vec_remove_item, // This is just convenient
+    specialization, // Effectively required by GcRef :(
 )]
 use zerogc::{GcSystem, GcSafe, Trace, GcVisitor, GcSimpleAlloc, GcRef, GcBrand, GcDirectBarrier, GcCreateHandle};
 use std::alloc::Layout;

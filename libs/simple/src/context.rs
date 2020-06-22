@@ -527,7 +527,8 @@ impl RawSimpleCollector {
                 let pending = guard.pending.as_mut().unwrap();
                 // We shouldn't be in the list of valid contexts!
                 assert_eq!(
-                    pending.valid_contexts.remove_item(&ptr),
+                    pending.valid_contexts.iter()
+                        .find(|&&ctx| std::ptr::eq(ctx, ptr)),
                     None, "state = {:?}", raw.state.get()
                 );
                 pending.total_contexts -= 1;
@@ -663,10 +664,13 @@ impl RawSimpleCollector {
             assert_eq!(pending.state, PendingState::Finished);
             if cfg!(debug_assertions) {
                 // Remove ourselves to mark the fact we're done
-                assert_eq!(
-                    pending.valid_contexts.remove_item(&context),
-                    Some(context)
-                );
+                match pending.valid_contexts.iter()
+                    .position(|&ptr| std::ptr::eq(ptr, context)) {
+                    Some(index) => {
+                        pending.valid_contexts.remove(index);
+                    },
+                    None => panic!("Unable to find context: {:p}", context)
+                }
             }
             // Mark ourselves as officially finished with the safepoint
             assert_eq!(
