@@ -659,8 +659,8 @@ impl<'a> CollectionTask<'a> {
             // Dynamically dispatched
             unsafe { (*root).trace(&mut visitor); }
         }
-        let was_inverted_mark = self.heap.allocator.mark_inverted();
         #[cfg(not(feature = "implicit-grey-stack"))] unsafe {
+            let was_inverted_mark = self.heap.allocator.mark_inverted();
             while let Some(obj) = self.grey_stack.pop() {
                 debug_assert_eq!(
                     (*obj).raw_state().resolve(was_inverted_mark),
