@@ -281,10 +281,10 @@ unsafe impl<'gc, T: GcSafe + 'gc> GcSimpleAlloc<'gc, T> for SimpleCollectorConte
     }
 }
 
-trait DynTrace {
+unsafe trait DynTrace {
     fn trace(&mut self, visitor: &mut MarkVisitor);
 }
-impl<T: Trace + ?Sized> DynTrace for T {
+unsafe impl<T: Trace + ?Sized> DynTrace for T {
     fn trace(&mut self, visitor: &mut MarkVisitor) {
         let Ok(()) = self.visit(visitor);
     }
@@ -697,6 +697,28 @@ struct MarkVisitor<'a> {
     /// This flips every collection
     inverted_mark: bool
 }
+impl<'a> MarkVisitor<'a> {
+    fn visit_raw_gc(
+        &mut self, obj: &mut GcHeader,
+        trace_func: impl FnOnce(&mut GcHeader, &mut MarkVisitor<'a>)
+    ) {
+        match obj.raw_state().resolve(self.inverted_mark) {
+            MarkState::White => trace_func(obj, self),
+            MarkState::Grey => {
+                /*
+                 * We've already pushed this object onto the gray stack
+                 * It will be traversed eventually, so we don't need to do anything.
+                 */
+            },
+            MarkState::Black => {
+                /*
+                 * We've already traversed this object.
+                 * It's already known to be reachable
+                 */
+            },
+        }
+    }
+}
 unsafe impl GcVisitor for MarkVisitor<'_> {
     type Err = !;
 }
@@ -707,26 +729,30 @@ impl GcVisit for MarkVisitor<'_> {
          * other people's data.
          */
         assert_eq!(gc.collector_ptr.as_ptr(), self.expected_collector);
-        let obj = unsafe { &mut *GcHeader::from_value_ptr(gc.as_raw_ptr()) };
-        match obj.raw_state().resolve(self.inverted_mark) {
-            MarkState::White => {
+        unsafe {
+            let header = GcHeader::from_value_ptr(
+                gc.as_raw_ptr(),
+                T::STATIC_TYPE
+            );
+            self.visit_raw_gc(&mut *header, |obj, visitor| {
+                let inverted_mark = visitor.inverted_mark;
                 if !T::NEEDS_TRACE {
                     /*
                      * We don't need to mark this grey
                      * It has no internals that need to be traced.
                      * We can directly move it directly to the black set
                      */
-                    obj.update_raw_state(MarkState::Black.to_raw(self.inverted_mark));
+                    obj.update_raw_state(MarkState::Black.to_raw(inverted_mark));
                 } else {
                     /*
                      * We need to mark this object grey and push it onto the grey stack.
                      * It will be processed later
                      */
-                    (*obj).update_raw_state(MarkState::Grey.to_raw(self.inverted_mark));
+                    (*obj).update_raw_state(MarkState::Grey.to_raw(inverted_mark));
                     #[cfg(not(feature = "implicit-grey-stack"))] {
-                        self.grey_stack.push(obj as *mut GcHeader);
+                        visitor.grey_stack.push(obj as *mut GcHeader);
                     }
-                    #[cfg(feature = "implicit-grey-stack")] unsafe {
+                    #[cfg(feature = "implicit-grey-stack")] {
                         /*
                          * The user wants an implicit grey stack using
                          * recursion. This risks stack overflow but can
@@ -735,25 +761,18 @@ impl GcVisit for MarkVisitor<'_> {
                          */
                         T::trace(
                             &mut *((*obj).value() as *mut T),
-                            &mut *self
+                            visitor
                         );
                         /*
                          * Mark the object black now it's innards have been traced
                          * NOTE: We do **not** do this with an implicit stack.
                          */
-                        (*obj).update_raw_state(MarkState::Black);
+                        (*obj).update_raw_state(MarkState::Black.to_raw(
+                            inverted_mark
+                        ));
                     }
                 }
-            },
-            MarkState::Grey => {
-                /*
-                 * We've already pushed this object onto the gray stack
-                 * It will be traversed eventually, so we don't need to do anything.
-                 */
-            },
-            MarkState::Black => {
-                // We've already traversed this object. It's already known to be reachable
-            },
+            });
         }
     }
 }
@@ -831,11 +850,12 @@ impl GcHeader {
         }
     }
     #[inline]
-    pub unsafe fn from_value_ptr<T: GcSafe>(ptr: *mut T) -> *mut GcHeader {
-        (ptr as *mut u8).sub(T::STATIC_TYPE.value_offset) as *mut GcHeader
+    pub unsafe fn from_value_ptr<T>(ptr: *mut T, static_type: &GcType) -> *mut GcHeader {
+        (ptr as *mut u8).sub(static_type.value_offset).cast()
     }
     #[inline]
     fn raw_state(&self) -> RawMarkState {
+        // TODO: Is this safe? Couldn't it be accessed concurrently?
         self.raw_state.load()
     }
     #[inline]

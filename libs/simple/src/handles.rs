@@ -3,12 +3,11 @@
 //! Inspired by [Mono's Lock free Gc Handles](https://www.mono-project.com/news/2016/08/16/lock-free-gc-handles/)
 use std::ptr::NonNull;
 use std::marker::PhantomData;
-use std::ffi::c_void;
 use std::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak as WeakArc};
 
-use zerogc::{Trace, GcSafe, GcBindHandle, GcBrand};
-use crate::{DynTrace, GcType, RawSimpleCollector, Gc, SimpleCollectorContext, SimpleCollector};
+use zerogc::{Trace, GcSafe, GcBindHandle, GcBrand, GcVisitor, NullTrace, TraceImmutable};
+use crate::{DynTrace, GcType, RawSimpleCollector, Gc, SimpleCollectorContext, SimpleCollector, MarkVisitor, GcHeader, MarkState};
 
 const INITIAL_HANDLE_CAPACITY: usize = 128;
 
@@ -181,26 +180,31 @@ impl GcHandleList {
         }
     }
 }
-impl DynTrace for GcHandleList {
-    fn trace(&mut self, visitor: &mut crate::MarkVisitor) {
-        unsafe {
-            /*
-             * TODO: This fence seems unessicarry since we should
-             * already have exclusive access.....
-             */
-            atomic::fence(Ordering::Acquire);
-            let mut bucket = self.last_bucket.load(Ordering::Relaxed);
-            while !bucket.is_null() {
+unsafe impl DynTrace for GcHandleList {
+    fn trace(&mut self, visitor: &mut MarkVisitor) {
+        /*
+         * TODO: This fence seems unnecessary since we should
+         * already have exclusive access.....
+         */
+        atomic::fence(Ordering::Acquire);
+        let mut bucket = self.last_bucket.load(Ordering::Relaxed);
+        while !bucket.is_null() {
+            unsafe {
                 // We should have exclusive access!
-                let slots =  &mut *(*bucket).slots;
+                let slots = &mut *(*bucket).slots;
                 for slot in slots {
                     if slot.is_valid(Ordering::Relaxed) {
-                        slot.valid.trace(visitor)
+                        slot.valid.mark_inner(&mut *visitor);
                     }
                 }
                 bucket = (*bucket).prev.load(Ordering::Relaxed);
             }
         }
+        /*
+         * Release any pending writes (for relocated pointers)
+         * TODO: We should have exclusive access, like above!
+         */
+        atomic::fence(Ordering::Release);
     }
 }
 impl Drop for GcHandleList {
@@ -214,7 +218,6 @@ impl Drop for GcHandleList {
             }
         }
     }
-
 }
 struct GcHandleBucket {
     slots: Box<[HandleSlot]>,
@@ -315,15 +318,14 @@ pub struct GcRawHandle {
     // TODO: Encapsulate
     pub(crate) refcnt: AtomicUsize
 }
-impl DynTrace for GcRawHandle {
-    #[inline]
-    fn trace(&mut self, visitor: &mut crate::MarkVisitor) {
-        /*
-         * TODO: Can we somehow hoist this fence?
-         * Shouldn't the collector already have
-         * exclusive access?
-         */
-        atomic::fence(Ordering::Acquire);
+impl GcRawHandle {
+    /// Trace this handle, assuming collection is in progress
+    ///
+    /// ## Safety
+    /// - A collection must currently be in progress
+    /// - It is assumed that the appropriate atomic fences (if any)
+    ///   have already been applied (TODO: Don't we have exclusive access?)
+    unsafe fn mark_inner(&self, visitor: &mut MarkVisitor) {
         let value = self.value.load(Ordering::Relaxed);
         if value.is_null() {
             debug_assert_eq!(
@@ -336,15 +338,21 @@ impl DynTrace for GcRawHandle {
             self.refcnt.load(Ordering::Relaxed),
             0
         );
-        let type_info = self.type_info.load(Ordering::Relaxed); 
-        unsafe {
-            ((*type_info).trace_func)(
-                value as *mut c_void,
-                visitor
-            );
-        }
+        let type_info = &*self.type_info.load(Ordering::Relaxed);
+        visitor.visit_raw_gc(
+            &mut *GcHeader::from_value_ptr(value, type_info),
+            |header, visitor| {
+                // Mark grey
+                header.update_raw_state(MarkState::Grey.
+                    to_raw(visitor.inverted_mark));
+                // Visit innards
+                (type_info.trace_func)(header.value(), visitor);
+                // Mark black
+                header.update_raw_state(MarkState::Black.
+                    to_raw(visitor.inverted_mark));
+            }
+        );
     }
-
 }
 pub struct GcHandle<T: GcSafe> {
     inner: NonNull<GcRawHandle>,
@@ -426,32 +434,22 @@ unsafe impl<'new_gc, T> GcBindHandle<'new_gc, T> for GcHandle<T>
 
 }
 unsafe impl<T: GcSafe> Trace for GcHandle<T> {
-    // We wrap a gc pointer...
-    const NEEDS_TRACE: bool = true;
-    fn visit<V: zerogc::GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
-        /*
-         * TODO: Since we're already tracked as a root,
-         * is this actually needed?
-         */
-        unsafe {
-            let collector = self.assume_valid_collector();
-            // NOTE: Assuming exclusive access!
-            let inner = self.inner.as_mut();
-            let value = *inner.value.get_mut() as *mut T;
-            debug_assert!(!value.is_null());
-            let mut gc = Gc::<T>::from_raw(
-                NonNull::from(&*collector),
-                NonNull::new_unchecked(value)
-            );
-            visitor.visit(&mut gc)?;
-            // Upgrade (in case of relocation)
-            *inner.value.get_mut() = gc.value.as_ptr()
-                as *mut ();
-        }
+    /// See docs on reachability
+    const NEEDS_TRACE: bool = false;
+    #[inline(always)]
+    fn visit<V>(&mut self, _visitor: &mut V) -> Result<(), V::Err>
+        where V: zerogc::GcVisitor {
         Ok(())
     }
-
 }
+unsafe impl<T: GcSafe> TraceImmutable for GcHandle<T> {
+    #[inline(always)]
+    fn visit_immutable<V>(&self, _visitor: &mut V) -> Result<(), V::Err>
+        where V: GcVisitor {
+        Ok(())
+    }
+}
+unsafe impl<T: GcSafe> NullTrace for GcHandle<T> {}
 impl<T: GcSafe> Clone for GcHandle<T> {
     fn clone(&self) -> Self {
         // NOTE: Dead collector -> invalid handle
