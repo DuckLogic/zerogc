@@ -40,6 +40,8 @@ use handles::GcHandleList;
 mod handles;
 mod context;
 mod utils;
+#[cfg(feature = "serde")]
+pub mod serde;
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
 #[cfg(not(feature = "small-object-arenas"))]
