@@ -1,12 +1,15 @@
 [package]
 name = "zerogc-simple"
 description = "Lightweight mark/sweep collector for zerogc."
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 authors = ["Techcable <Techcable@techcable.net>"]
+repository = "https://github.com/DuckLogic/zerogc"
+readme = "../../README.md"
+license = "MIT"
 edition = "2018"
 
 [dependencies]
-zerogc = { path = "../.." }
+zerogc = { path = "../..", version = "0.1.0" }
 once_cell = { version = "1.4.0", optional = true }
 # Concurrency
 parking_lot = { version = "0.10", features = ["nightly"] }
