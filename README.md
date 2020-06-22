@@ -2,16 +2,14 @@ ZeroGc
 =======
 [WIP] Zero overhead tracing garbage collection for rust.
 
-
-## Planned Features
+## Features
 1. Easy to use, since `Gc<T>` is `Copy` and coerces to a reference.
 2. Absolutely zero overhead when modifying pointers, since `Gc<T>` is `Copy`.
-3. Support for important libraries builtin to the collector
-4. Implementation agnostic API
-5. Unsafe code has complete freedom to manipulate garbage collected pointers, and it doesn't need to understand the distinction 
-6. Uses rust's lifetime system to ensure all roots are known at explicit safepoints, without any runtime overhead.
-7. Collection can only happen with an explicit `safepoint` call and has no overhead between these calls,
-8. API supports moving objects (allowing copying/generational GCs)
+3. Implementation agnostic API
+4. Unsafe code has complete freedom to manipulate garbage collected pointers, and it doesn't need to understand the distinction 
+5. Uses rust's lifetime system to ensure all roots are known at explicit safepoints, without any runtime overhead.
+6. Collection can only happen with an explicit `safepoint` call and has no overhead between these calls,
+7. API supports moving objects (allowing copying/generational GCs)
 
 Instead of requiring compiler support to track GC roots (like Java/Go),
 it uses a shadow stack to keep track of GC roots.
@@ -36,7 +34,8 @@ It uses fast arena allocation for small objects (optional; on by default) and
 falls back to the system allocator for everything else.
 
 In spite of the mark/sweep collector's simplicity,
-it's reasonably competitive with other languages: b73c9828e4066 774106545cb4d06b
+it's reasonably fast and is able to compete with production-quality
+collectors like Go/Java.
 
 The library is mostly undocumented, since I expect it to change significantly in the future.
 See the [binary-trees](libs/simple/examples/binary_trees.rs) example for a basic sample.
