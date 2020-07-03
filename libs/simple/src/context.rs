@@ -133,6 +133,7 @@ impl RawContext {
                 false, true, Ordering::SeqCst
             ));
             let id = state.next_pending_id();
+            #[allow(clippy::mutable_key_type)] // Used for debugging (see below)
             let known_contexts = state.known_contexts.get_mut();
             state.pending = Some(PendingCollection::new(
                 id,
@@ -151,6 +152,7 @@ impl RawContext {
                     .unwrap().valid_contexts,
                 "known_contexts" => FnValue(|_| {
                     // TODO: Use nested-values/serde?!?!
+                    #[allow(clippy::mutable_key_type)] // We only use this for debugging
                     let mut map = std::collections::HashMap::new();
                     for &context in &*known_contexts {
                         map.insert(context, format!("{:?} @ {:?}: {:?}",
@@ -757,3 +759,4 @@ impl PendingCollection {
         assert_eq!(self.state, PendingState::Waiting);
     }
 }
+

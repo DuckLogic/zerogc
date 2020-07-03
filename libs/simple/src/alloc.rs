@@ -1,3 +1,4 @@
+#![allow(clippy::vec_box)] // We must Box<Chunk> for a stable address
 use once_cell::sync::OnceCell;
 use std::alloc::Layout;
 use crate::{GcHeader};
@@ -144,7 +145,7 @@ struct ArenaState {
 }
 impl ArenaState {
     fn new(chunks: Vec<Box<Chunk>>) -> Self {
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
         let current_chunk = NonNull::from(&**chunks.last().unwrap());
         ArenaState {
             chunks: Mutex::new(chunks),

@@ -6,12 +6,18 @@
     exhaustive_patterns, // Allow exhaustive matching against never
     const_alloc_layout, // Used for StaticType
     const_fn, // We statically create type info
-    const_if_match, // Used for StaticType
     const_panic, // Const panic should be stable
     const_transmute, // This can already be acheived with unions...
     untagged_unions, // Why isn't this stable?
     new_uninit, // Until Rust has const generics, this is how we init arrays..
     specialization, // Effectively required by GcRef :(
+)]
+#![allow(
+    /*
+     * TODO: Should we be relying on vtable address stability?
+     * It seems safe as long as we reuse the same pointer....
+     */
+    clippy::vtable_address_comparisons,
 )]
 use zerogc::{GcSystem, GcSafe, Trace, GcVisitor, GcSimpleAlloc, GcRef, GcBrand, GcDirectBarrier, GcCreateHandle};
 use std::alloc::Layout;
@@ -460,7 +466,7 @@ impl SimpleAlloc {
         }
         gc
     }
-    unsafe fn sweep<'a>(&self) {
+    unsafe fn sweep(&self) {
         let mut expected_size = self.allocated_size();
         let mut actual_size = 0;
         // Clear small arenas

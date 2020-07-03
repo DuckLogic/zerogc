@@ -1,6 +1,5 @@
 // NOTE: Both these features have accepted RFCs
 #![feature(
-    const_if_match, // RFC 2342 - Used for const asserts
     const_panic, // RFC 2345 - Const asserts
 )]
 #![deny(missing_docs)]
