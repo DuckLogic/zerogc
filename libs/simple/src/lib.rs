@@ -7,7 +7,6 @@
     const_alloc_layout, // Used for StaticType
     const_fn, // We statically create type info
     const_panic, // Const panic should be stable
-    const_transmute, // This can already be acheived with unions...
     untagged_unions, // Why isn't this stable?
     new_uninit, // Until Rust has const generics, this is how we init arrays..
     specialization, // Effectively required by GcRef :(

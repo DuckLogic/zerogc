@@ -50,10 +50,7 @@ enum ContextState {
 }
 impl ContextState {
     fn is_frozen(&self) -> bool {
-        match *self {
-            ContextState::Frozen => true,
-            _ => false
-        }
+        matches!(*self, ContextState::Frozen)
     }
 }
 

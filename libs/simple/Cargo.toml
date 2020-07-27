@@ -1,7 +1,7 @@
 [package]
 name = "zerogc-simple"
 description = "Lightweight mark/sweep collector for zerogc."
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Techcable <Techcable@techcable.net>"]
 repository = "https://github.com/DuckLogic/zerogc"
 readme = "../../README.md"

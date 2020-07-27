@@ -171,73 +171,70 @@ fn impl_extras(target: &DeriveInput) -> Result<TokenStream, Error> {
         Data::Struct(ref data) => {
             for field in &data.fields {
                 let attrs = GcFieldAttrs::find(&field.attrs)?;
-                match attrs.mutable {
-                    Some(mutable_opts) => {
-                        let original_name = match field.ident {
-                            Some(ref name) => name,
-                            None => {
-                                return Err(Error::new(
-                                    field.span(),
-                                    "zerogc can only mutate named fields"
-                                ))
-                            }
-                        };
-                        // Generate a mutator
-                        let mutator_name = Ident::new(
-                            &format!("set_{}", original_name),
-                            field.ident.span(),
-                        );
-                        let mutator_vis = if mutable_opts.public {
-                            quote!(pub)
-                        } else {
-                            quote!()
-                        };
-                        let value_ref_type = match field.ty {
-                            Type::Path(ref cell_path) if cell_path.path.segments.last()
-                                .map_or(false, |seg| seg.ident == "GcCell") => {
-                                let last_segment = cell_path.path.segments.last().unwrap();
-                                let mut inner_type = None;
-                                if let PathArguments::AngleBracketed(ref bracketed) = last_segment.arguments {
-                                    for arg in &bracketed.args {
-                                        match arg {
-                                            GenericArgument::Type(t) if inner_type.is_none() => {
-                                                inner_type = Some(t.clone()); // Initialize
-                                            },
-                                            _ => {
-                                                inner_type = None; // Unexpected arg
-                                                break
-                                            }
+                if let Some(mutable_opts) = attrs.mutable {
+                    let original_name = match field.ident {
+                        Some(ref name) => name,
+                        None => {
+                            return Err(Error::new(
+                                field.span(),
+                                "zerogc can only mutate named fields"
+                            ))
+                        }
+                    };
+                    // Generate a mutator
+                    let mutator_name = Ident::new(
+                        &format!("set_{}", original_name),
+                        field.ident.span(),
+                    );
+                    let mutator_vis = if mutable_opts.public {
+                        quote!(pub)
+                    } else {
+                        quote!()
+                    };
+                    let value_ref_type = match field.ty {
+                        Type::Path(ref cell_path) if cell_path.path.segments.last()
+                            .map_or(false, |seg| seg.ident == "GcCell") => {
+                            let last_segment = cell_path.path.segments.last().unwrap();
+                            let mut inner_type = None;
+                            if let PathArguments::AngleBracketed(ref bracketed) = last_segment.arguments {
+                                for arg in &bracketed.args {
+                                    match arg {
+                                        GenericArgument::Type(t) if inner_type.is_none() => {
+                                            inner_type = Some(t.clone()); // Initialize
+                                        },
+                                        _ => {
+                                            inner_type = None; // Unexpected arg
+                                            break
                                         }
                                     }
                                 }
-                                inner_type.ok_or_else(|| Error::new(
-                                    field.ty.span(),
-                                    "GcCell should have one (and only one) type param"
-                                ))?
-                            },
-                            _ => return Err(Error::new(
-                                field.ty.span(),
-                                "A mutable field must be wrapped in a `GcCell`"
-                            ))
-                        };
-                        // NOTE: Specially quoted since we want to blame the field for errors
-                        let field_as_ptr = quote_spanned!(field.span() => GcCell::as_ptr(&(*self.value()).#original_name));
-                        let barrier = quote_spanned!(field.span() => ::zerogc::GcDirectBarrier::write_barrier(&value, &self, offset));
-                        extra_items.push(quote! {
-                            #[inline] // TODO: Implement `GcDirectBarrier` ourselves
-                            #mutator_vis fn #mutator_name<OwningRef>(self: OwningRef, value: #value_ref_type)
-                                where OwningRef: ::zerogc::GcRef<'gc, Self>,
-                                       #value_ref_type: ::zerogc::GcDirectBarrier<'gc, OwningRef> {
-                                unsafe {
-                                    let target_ptr = #field_as_ptr;
-                                    let offset = target_ptr as usize - self.as_raw_ptr() as usize;
-                                    #barrier;
-                                    target_ptr.write(value);
-                                }
                             }
-                        })
-                    }
-                    None => {}
+                            inner_type.ok_or_else(|| Error::new(
+                                field.ty.span(),
+                                "GcCell should have one (and only one) type param"
+                            ))?
+                        },
+                        _ => return Err(Error::new(
+                            field.ty.span(),
+                            "A mutable field must be wrapped in a `GcCell`"
+                        ))
+                    };
+                    // NOTE: Specially quoted since we want to blame the field for errors
+                    let field_as_ptr = quote_spanned!(field.span() => GcCell::as_ptr(&(*self.value()).#original_name));
+                    let barrier = quote_spanned!(field.span() => ::zerogc::GcDirectBarrier::write_barrier(&value, &self, offset));
+                    extra_items.push(quote! {
+                        #[inline] // TODO: Implement `GcDirectBarrier` ourselves
+                        #mutator_vis fn #mutator_name<OwningRef>(self: OwningRef, value: #value_ref_type)
+                            where OwningRef: ::zerogc::GcRef<'gc, Self>,
+                                   #value_ref_type: ::zerogc::GcDirectBarrier<'gc, OwningRef> {
+                            unsafe {
+                                let target_ptr = #field_as_ptr;
+                                let offset = target_ptr as usize - self.as_raw_ptr() as usize;
+                                #barrier;
+                                target_ptr.write(value);
+                            }
+                        }
+                    })
                 }
             }
         },
