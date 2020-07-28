@@ -9,7 +9,7 @@
     const_panic, // Const panic should be stable
     untagged_unions, // Why isn't this stable?
     new_uninit, // Until Rust has const generics, this is how we init arrays..
-    specialization, // Effectively required by GcRef :(
+    min_specialization, // Effectively required by GcRef :(
 )]
 #![allow(
     /*
