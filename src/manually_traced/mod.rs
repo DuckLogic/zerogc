@@ -180,7 +180,7 @@ macro_rules! unsafe_trace_deref {
         /// We trust ourselves to not do anything bad as long as our paramaters don't
         unsafe impl<$($param),*> GcSafe for $target<$($param),*>
             where $($param: GcSafe + TraceImmutable),*  {
-            const NEEDS_DROP: bool = std::mem::needs_drop::<Self>();
+            const NEEDS_DROP: bool = core::mem::needs_drop::<Self>();
         }
     };
     ($target:ident, $($param:ident),*; immut = false; |$value:ident| $extract:expr) => {
@@ -202,7 +202,7 @@ macro_rules! unsafe_trace_deref {
         /// We trust ourselves to not do anything bad as long as our paramaters don't
         unsafe impl<$($param),*> GcSafe for $target<$($param),*>
             where $($param: GcSafe),*  {
-            const NEEDS_DROP: bool = std::mem::needs_drop::<Self>();
+            const NEEDS_DROP: bool = core::mem::needs_drop::<Self>();
         }
     };
 }
@@ -304,7 +304,7 @@ macro_rules! unsafe_trace_primitive {
         unsafe impl $crate::NullTrace for $target {}
         /// No drop/custom behavior -> GcSafe
         unsafe impl GcSafe for $target {
-            const NEEDS_DROP: bool = std::mem::needs_drop::<$target>();
+            const NEEDS_DROP: bool = core::mem::needs_drop::<$target>();
         }
         unsafe impl<'gc, OwningRef> $crate::GcDirectBarrier<'gc, OwningRef> for $target {
             #[inline(always)]
@@ -363,6 +363,9 @@ macro_rules! unsafe_gc_brand {
 }
 
 mod core;
+#[cfg(any(feature = "alloc", feature = "std"))]
+mod stdalloc;
+#[cfg(feature = "std")]
 mod stdlib;
 #[cfg(feature = "indexmap")]
 mod indexmap;

@@ -19,3 +19,15 @@ members = ["libs/simple", "libs/derive"]
 
 [profile.dev]
 opt-level = 1
+
+[features]
+default = ["std"]
+# Depend on the standard library (optional)
+#
+# This implements tracing
+std = []
+# Depend on `extern crate alloc` in addition to the Rust `core`
+# This is implied by using the standard library (feature="std")
+#
+# This implements `Trace` for `Box` and collections like `Vec`
+alloc = []

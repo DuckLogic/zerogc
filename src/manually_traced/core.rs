@@ -4,8 +4,10 @@
 //!
 //! `RefCell` and `Cell` are intentionally ignored and do not have implementations.
 //! Some collectors may need write barriers to protect their internals.
+use core::num::Wrapping;
 
-use crate::{Trace, GcSafe, GcVisitor, NullTrace, GcBrand, GcSystem, TraceImmutable};
+use crate::prelude::*;
+use crate::GcDirectBarrier;
 
 macro_rules! trace_tuple {
     { $($param:ident)* } => {
@@ -113,7 +115,7 @@ macro_rules! trace_array {
         }
         unsafe impl<T: $crate::NullTrace> $crate::NullTrace for [T; $size] {}
         unsafe impl<T: GcSafe> GcSafe for [T; $size] {
-            const NEEDS_DROP: bool = std::mem::needs_drop::<T>();
+            const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
         }
         unsafe impl<'new_gc, S: GcSystem, T> $crate::GcBrand<'new_gc, S> for [T; $size]
             where S: GcSystem, T: GcBrand<'new_gc, S>,
@@ -203,5 +205,60 @@ unsafe impl<T: TraceImmutable> TraceImmutable for [T] {
 }
 unsafe impl<T: NullTrace> NullTrace for [T] {}
 unsafe impl<T: GcSafe> GcSafe for [T] {
-    const NEEDS_DROP: bool = std::mem::needs_drop::<T>();
+    const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
+}
+
+unsafe impl<T: Trace> Trace for Option<T> {
+    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
+
+    #[inline]
+    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+        match *self {
+            None => Ok(()),
+            Some(ref mut value) => visitor.visit(value),
+        }
+    }
+}
+unsafe impl<T: TraceImmutable> TraceImmutable for Option<T> {
+    #[inline]
+    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
+        match *self {
+            None => Ok(()),
+            Some(ref value) => visitor.visit_immutable(value),
+        }
+    }
+}
+unsafe impl<T: NullTrace> NullTrace for Option<T> {}
+unsafe impl<T: GcSafe> GcSafe for Option<T> {
+    const NEEDS_DROP: bool = T::NEEDS_DROP;
+}
+unsafe impl<'gc, OwningRef, V> GcDirectBarrier<'gc, OwningRef> for Option<V>
+    where V: GcDirectBarrier<'gc, OwningRef> {
+    #[inline]
+    unsafe fn write_barrier(&self, owner: &OwningRef, start_offset: usize) {
+        // Implementing direct write is safe because we store our value inline
+        match *self {
+            None => { /* Nothing to trigger the barrier for :) */ },
+            Some(ref value) => {
+                /*
+                 * We must manually compute the offset
+                 * Null pointer-optimized types will have offset of zero,
+                 * while other types may not
+                 */
+                let value_offset = (value as *const V as usize) -
+                    (self as *const Self as usize);
+                value.write_barrier(owner, start_offset + value_offset)
+            },
+        }
+    }
+}
+unsafe_gc_brand!(Option, T);
+
+// We can trace `Wrapping` by simply tracing its interior
+unsafe_trace_deref!(Wrapping, T; immut = false; |wrapping| &mut wrapping.0);
+unsafe impl<T: TraceImmutable> TraceImmutable for Wrapping<T> {
+    #[inline]
+    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
+        visitor.visit_immutable(&self.0)
+    }
 }

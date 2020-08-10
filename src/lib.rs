@@ -3,6 +3,7 @@
     const_panic, // RFC 2345 - Const asserts
 )]
 #![deny(missing_docs)]
+#![cfg_attr(not(feature = "std"), no_std)]
 //! Zero overhead tracing garbage collection for rust,
 //! by abusing the borrow checker.
 //!
@@ -15,13 +16,16 @@
 //! 6. Collection can only happen with an explicit `safepoint` call and has no overhead between these calls,
 //! 7. API supports moving objects (allowing copying/generational GCs)
 
+#![cfg(any(feature = "alloc", feature = "std"))]
+extern crate alloc;
+
 /*
  * I want this library to use 'mostly' stable features,
  * unless there's good justification to use an unstable feature.
  */
-use std::mem;
-use std::ops::{Deref, DerefMut};
-use std::fmt::Debug;
+use core::mem;
+use core::ops::{Deref, DerefMut};
+use core::fmt::Debug;
 
 #[macro_use]
 mod manually_traced;
@@ -558,7 +562,7 @@ unsafe impl<T> TraceImmutable for AssumeNotTraced<T> {
 unsafe impl<T> NullTrace for AssumeNotTraced<T> {}
 /// No tracing implies GcSafe
 unsafe impl<T> GcSafe for AssumeNotTraced<T> {
-    const NEEDS_DROP: bool = std::mem::needs_drop::<T>();
+    const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
 }
 unsafe_gc_brand!(AssumeNotTraced, T);
 

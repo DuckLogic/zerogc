@@ -13,7 +13,7 @@
 //! for fields that are wrapped in a [GcCell].
 //! Just mark the field with `#[zerogc(mutable(public))]`
 //! and it'll generate a safe wrapper.
-use std::cell::Cell;
+use core::cell::Cell;
 
 use crate::{GcSafe, Trace, GcVisitor, NullTrace, TraceImmutable, GcDirectBarrier,};
 
