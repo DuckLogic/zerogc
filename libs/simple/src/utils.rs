@@ -3,6 +3,7 @@ use std::fmt;
 
 #[derive(Clone)]
 pub enum ThreadId {
+    #[allow(unused)]
     Nop,
     Enabled {
         id: std::thread::ThreadId,

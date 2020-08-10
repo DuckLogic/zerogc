@@ -1,57 +1,105 @@
 use std::sync::{Arc};
 use std::cell::{Cell, UnsafeCell};
-use std::sync::atomic::{Ordering};
+use std::sync::atomic::{Ordering, AtomicBool};
 
 use slog::{Logger, FnValue, trace, Drain, o};
 
-use zerogc::{GcContext, Trace};
-use crate::{SimpleCollector, RawSimpleCollector, DynTrace};
+use crate::{RawSimpleCollector};
 use crate::utils::ThreadId;
 use std::mem::ManuallyDrop;
 use std::fmt::{Debug, Formatter};
 use std::{fmt, mem};
 use std::collections::HashSet;
-use parking_lot::{Mutex, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
-use std::ptr::NonNull;
+use parking_lot::{Mutex, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard, Condvar, RwLock};
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum ContextState {
-    /// The context is active.
+use super::{ShadowStack};
+use crate::context::ContextState;
+
+/// Manages coordination of garbage collections
+///
+/// This is factored out of the main code mainly due to
+/// differences from single-threaded collection
+pub(crate) struct CollectionManager {
+    /// Lock on the internal state
+    state: RwLock<CollectorState>,
+    /// Simple flag on whether we're currently collecting
     ///
-    /// Its contents are potentially being mutated,
-    /// so the `shadow_stack` doesn't necessarily
-    /// reflect the actual set of thread roots.
+    /// This should be true whenever `self.state.pending` is `Some`.
+    /// However if you don't hold the lock you may not always
+    /// see a fully consistent state.
+    collecting: AtomicBool,
+    /// The condition variable for all contexts to be valid
     ///
-    /// New objects could be allocated that are not
-    /// actually being tracked in the `shadow_stack`.
-    Active,
-    /// The context is waiting at a safepoint
-    /// for a collection to complete.
+    /// In order to be valid, a context must be either frozen
+    /// or paused at a safepoint.
     ///
-    /// The mutating thread is blocked for the
-    /// duration of the safepoint (until collection completes).
+    /// After a collection is marked as pending, threads must wait until
+    /// all contexts are valid before the actual work can begin.
+    valid_contexts_wait: Condvar,
+    /// Wait until a garbage collection is over.
     ///
-    /// Therefore, its `shadow_stack` is guarenteed to reflect
-    /// the actual set of thread roots.
-    SafePoint {
-        /// The id of the collection we are waiting for
-        collection_id: u64
-    },
-    /// The context is frozen.
-    /// Allocation or mutation can't happen
-    /// but the mutator thread isn't actually blocked.
+    /// This must be separate from `valid_contexts_wait`.
+    /// A garbage collection can only begin once all contexts are valid,
+    /// so this condition logically depends on `valid_contexts_wait`.
+    collection_wait: Condvar,
+    /// The mutex used alongside `valid_contexts_wait`
     ///
-    /// Unlike a safepoint, this is explicitly unfrozen at the
-    /// user's discretion.
+    /// This doesn't actually protect any data. It's just
+    /// used because [parking_lot::RwLock] doesn't support condition vars.
+    /// This is the [officially suggested solution](https://github.com/Amanieu/parking_lot/issues/165)
+    // TODO: Should we replace this with `known_collections`?
+    valid_contexts_lock: Mutex<()>,
+    /// The mutex used alongside `collection_wait`
     ///
-    /// Because no allocation or mutation can happen,
-    /// its shadow_stack stack is guarenteed to
-    /// accurately reflect the roots of the context.
-    Frozen,
+    /// Like `collection_wait`, his doesn't actually protect any data.
+    collection_wait_lock: Mutex<()>,
 }
-impl ContextState {
-    fn is_frozen(&self) -> bool {
-        matches!(*self, ContextState::Frozen)
+impl CollectionManager {
+    pub(crate) fn new() -> Self {
+        CollectionManager {
+            state: RwLock::new(CollectorState::new()),
+            valid_contexts_wait: Condvar::new(),
+            collection_wait: Condvar::new(),
+            valid_contexts_lock: Mutex::new(()),
+            collection_wait_lock: Mutex::new(()),
+            collecting: AtomicBool::new(false),
+        }
+    }
+    #[inline]
+    pub fn should_trigger_collection(&self) -> bool {
+        /*
+         * Use relaxed ordering. Eventually consistency is correct
+         * enough for our use cases. It may delay some threads reaching
+         * a safepoint for a little bit, but it avoids an expensive
+         * memory fence on ARM and weakly ordered architectures.
+         */
+        self.collecting.load(Ordering::Relaxed)
+    }
+    #[inline]
+    pub fn is_collecting(&self) -> bool {
+        self.collecting.load(Ordering::SeqCst)
+    }
+    pub(super) unsafe fn freeze_context(&self, context: &RawContext) {
+        assert_eq!(context.state.get(), ContextState::Active);
+        // TODO: Isn't this state read concurrently?
+        context.state.set(ContextState::Frozen);
+        /*
+         * We may need to notify others that we are frozen
+         * This means we are now "valid" for the purposes of
+         * collection ^_^
+         */
+        self.valid_contexts_wait.notify_all();
+    }
+    pub(super) unsafe fn unfreeze_context(&self, context: &RawContext) {
+        /*
+         * A pending collection might be relying in the validity of this
+         * context's shadow stack, so unfreezing it while in progress
+         * could trigger undefined behavior!!!!!
+         */
+        context.collector.prevent_collection(|_| {
+            assert_eq!(context.state.get(), ContextState::Frozen);
+            context.state.set(ContextState::Active);
+        })
     }
 }
 
@@ -59,10 +107,10 @@ pub struct RawContext {
     pub(crate) collector: Arc<RawSimpleCollector>,
     original_thread: ThreadId,
     // NOTE: We are Send, not Sync
-    shadow_stack: UnsafeCell<ShadowStack>,
+    pub(super) shadow_stack: UnsafeCell<ShadowStack>,
     // TODO: Does the collector access this async?
-    state: Cell<ContextState>,
-    logger: Logger
+    pub(super) state: Cell<ContextState>,
+    pub(super) logger: Logger
 }
 impl Debug for RawContext {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
@@ -127,7 +175,7 @@ impl RawContext {
         let state = &mut *guard;
         // If there is not a active `PendingCollection` - create one
         if state.pending.is_none() {
-            assert!(!self.collector.collecting.compare_and_swap(
+            assert!(!self.collector.manager.collecting.compare_and_swap(
                 false, true, Ordering::SeqCst
             ));
             let id = state.next_pending_id();
@@ -236,205 +284,6 @@ impl RawContext {
         &*self.shadow_stack.get()
     }
 }
-/*
- * These form a stack of contexts,
- * which all share owns a pointer to the RawContext,
- * The raw context is implicitly bound to a single thread
- * and manages the state of all the contexts.
- *
- * https://llvm.org/docs/GarbageCollection.html#the-shadow-stack-gc
- * Essentially these objects maintain a shadow stack
- *
- * The pointer to the RawContext must be Arc, since the
- * collector maintains a weak reference to it.
- * I use double indirection with a `Rc` because I want
- * `recurse_context` to avoid the cost of atomic operations.
- *
- * SimpleCollectorContexts mirror the application stack.
- * They can be stack allocated inside `recurse_context`.
- * All we would need to do is internally track ownership of the original
- * context. The sub-collector in `recurse_context` is very clearly
- * restricted to the lifetime of the closure
- * which is a subset of the parent's lifetime.
- *
- * We still couldn't be Send, since we use interior mutablity
- * inside of RawContext that is not thread-safe.
- */
-pub struct SimpleCollectorContext {
-    raw: *mut RawContext,
-    /// Whether we are the root context
-    ///
-    /// Only the root actually owns the `Arc`
-    /// and is responsible for dropping it
-    root: bool
-}
-impl SimpleCollectorContext {
-    pub(crate) unsafe fn register_root(collector: &SimpleCollector) -> Self {
-        SimpleCollectorContext {
-            raw: Box::into_raw(ManuallyDrop::into_inner(
-                RawContext::register_new(&collector.0)
-            )),
-            root: true, // We are responsible for unregistering
-        }
-    }
-    #[inline]
-    pub(crate) fn collector(&self) -> &RawSimpleCollector {
-        unsafe { &(*self.raw).collector }
-    }
-    #[inline(always)]
-    unsafe fn with_shadow_stack<R, T: Trace>(
-        &self, value: *mut &mut T, func: impl FnOnce() -> R
-    ) -> R {
-        let old_link = (*(*self.raw).shadow_stack.get()).last;
-        let new_link = ShadowStackLink {
-            element: NonNull::new_unchecked(
-                std::mem::transmute::<
-                    *mut dyn DynTrace,
-                    *mut (dyn DynTrace + 'static)
-                >(value as *mut dyn DynTrace)
-            ),
-            prev: old_link
-        };
-        (*(*self.raw).shadow_stack.get()).last = &new_link;
-        let result = func();
-        debug_assert_eq!(
-            (*(*self.raw).shadow_stack.get()).last,
-            &new_link
-        );
-        (*(*self.raw).shadow_stack.get()).last = new_link.prev;
-        result
-    }
-    #[cold]
-    unsafe fn trigger_basic_safepoint<T: Trace>(&self, element: &mut &mut T) {
-        self.with_shadow_stack(element, || {
-            (*self.raw).trigger_safepoint();
-        })
-    }
-}
-impl Drop for SimpleCollectorContext {
-    #[inline]
-    fn drop(&mut self) {
-        if self.root {
-            let collector = self.collector();
-            unsafe {
-                trace!(
-                    collector.logger, "Freeing context";
-                    "ptr" => format_args!("{:p}", self.raw),
-                    "current_thread" => FnValue(|_| ThreadId::current()),
-                    "state" => ?(*self.raw).state.get()
-                );
-                collector.free_context(ManuallyDrop::new(
-                    Box::from_raw(self.raw)
-                ));
-            }
-        }
-    }
-}
-unsafe impl GcContext for SimpleCollectorContext {
-    type System = SimpleCollector;
-
-    #[inline]
-    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T) {
-        debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
-        if (*self.raw).collector.should_collect_relaxed() {
-            self.trigger_basic_safepoint(value);
-        }
-        debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
-    }
-
-    unsafe fn freeze(&mut self) {
-        assert_eq!((*self.raw).state.get(), ContextState::Active);
-        // TODO: Isn't this state read concurrently?
-        (*self.raw).state.set(ContextState::Frozen);
-        /*
-         * We may need to notify others that we are frozen
-         * This means we are now "valid" for the purposes of
-         * collection ^_^
-         */
-        (*self.raw).collector.valid_contexts_wait.notify_all();
-    }
-
-    unsafe fn unfreeze(&mut self) {
-        /*
-         * A pending collection might be relying in the validity of this
-         * context's shadow stack, so unfreezing it while in progress
-         * could trigger undefined behavior!!!!!
-         */
-        self.collector().prevent_collection(|_| {
-            assert_eq!((*self.raw).state.get(), ContextState::Frozen);
-            (*self.raw).state.set(ContextState::Active);
-        })
-    }
-
-    #[inline]
-    unsafe fn recurse_context<T, F, R>(&self, value: &mut &mut T, func: F) -> R
-        where T: Trace, F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R {
-        debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
-        self.with_shadow_stack(value, || {
-            let mut sub_context = ManuallyDrop::new(SimpleCollectorContext {
-                /*
-                 * safe to copy because we wont drop it
-                 * Lifetime is guarenteed to be restricted to
-                 * the closure.
-                 */
-                raw: self.raw,
-                root: false /* don't drop our pointer!!! */
-            });
-            let result = func(&mut *sub_context, value);
-            debug_assert!(!sub_context.root);
-            // No need to run drop code on context.....
-            std::mem::forget(sub_context);
-            debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
-            result
-        })
-    }
-}
-
-/// It's not safe for a context to be sent across threads.
-///
-/// We use (thread-unsafe) interior mutability to maintain the
-/// shadow stack. Since we could potentially be cloned via `safepoint_recurse!`,
-/// implementing `Send` would allow another thread to obtain a
-/// reference to our internal `&RefCell`. Further mutation/access
-/// would be undefined.....
-impl !Send for SimpleCollectorContext {}
-
-//
-// Root tracking
-//
-
-#[repr(C)]
-#[derive(Debug)]
-pub(crate) struct ShadowStackLink {
-    pub element: NonNull<dyn DynTrace>,
-    /// The previous link in the chain,
-    /// or NULL if there isn't any
-    pub prev: *const ShadowStackLink
-}
-
-#[derive(Clone, Debug)]
-pub struct ShadowStack {
-    /// The last element in the shadow stack,
-    /// or NULL if it's empty
-    pub(crate) last: *const ShadowStackLink
-}
-impl ShadowStack {
-    unsafe fn as_vec(&self) -> Vec<*mut dyn DynTrace> {
-        let mut result: Vec<_> = self.reverse_iter().collect();
-        result.reverse();
-        result
-    }
-    #[inline]
-    pub(crate) unsafe fn reverse_iter(&self) -> impl Iterator<Item=*mut dyn DynTrace> + '_ {
-        std::iter::successors(
-            self.last.as_ref(),
-            |link| link.prev.as_ref()
-        ).map(|link| link.element.as_ptr())
-    }
-}
-
-// Frozen contexts
-
 // Pending collections
 
 /// Keeps track of a pending collection (if any)
@@ -504,13 +353,18 @@ impl RawSimpleCollector {
             old_num_known
         })
     }
-    pub unsafe fn free_context(&self, raw: ManuallyDrop<Box<RawContext>>) {
+    pub unsafe fn free_context(&self, raw: *mut RawContext) {
+        trace!(
+            self.logger, "Freeing context";
+            "ptr" => format_args!("{:p}", raw),
+            "state" => ?(*raw).state.get()
+        );
         /*
          * TODO: Consider using regular read instead of `read_upgradable`
          * This is only prevented because of the fact that we may
          * need to mutate `valid_contexts` and `total_contexts`
          */
-        let ptr = &**raw as *const RawContext as *mut RawContext;
+        let ptr = raw; // TODO - blegh
         let guard = self.state.upgradable_read();
         match &guard.pending {
             None => { // No collection
@@ -545,7 +399,7 @@ impl RawSimpleCollector {
                 assert_eq!(
                     pending.valid_contexts.iter()
                         .find(|&&ctx| std::ptr::eq(ctx, ptr)),
-                    None, "state = {:?}", raw.state.get()
+                    None, "state = {:?}", (*raw).state.get()
                 );
                 pending.total_contexts -= 1;
                 assert!(guard.known_contexts.get_mut().remove(&ptr));
@@ -556,7 +410,7 @@ impl RawSimpleCollector {
             },
         }
         // Now drop the Box
-        drop(ManuallyDrop::into_inner(raw));
+        drop(Box::from_raw(raw));
         /*
          * Notify all threads waiting for contexts to be valid.
          * TODO: I think this is really only useful if we're waiting....

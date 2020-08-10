@@ -380,6 +380,7 @@ impl<T: GcSafe> GcHandle<T> {
 }
 unsafe impl<T: GcSafe> ::zerogc::GcHandle<T> for GcHandle<T> {
     type Context = SimpleCollectorContext;
+    #[cfg(feature = "sync")]
     fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R {
         let collector = self.collector.upgrade()
             .expect("Dead collector");
@@ -397,6 +398,10 @@ unsafe impl<T: GcSafe> ::zerogc::GcHandle<T> for GcHandle<T> {
                 .load(Ordering::Acquire) as *mut T;
             func(&*value)
         })
+    }
+    #[cfg(not(feature = "sync"))]
+    fn use_critical<R>(&self, _func: impl FnOnce(&T) -> R) -> R {
+        unimplemented!("critical sections for single-collector impl")
     }
 }
 unsafe impl<'new_gc, T> GcBindHandle<'new_gc, T> for GcHandle<T>

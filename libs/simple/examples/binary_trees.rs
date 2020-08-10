@@ -58,7 +58,7 @@ fn main() {
         o!("bench" => file!())
     );
     let collector = SimpleCollector::with_logger(logger);
-    let mut gc = collector.create_context();
+    let mut gc = collector.into_context();
     {
         let depth = max_depth + 1;
         let tree = bottom_up_tree(&gc, depth);

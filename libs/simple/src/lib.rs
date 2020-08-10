@@ -31,15 +31,46 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use crossbeam::atomic::AtomicCell;
+#[cfg(not(feature = "sync"))]
+use std::cell::Cell;
+
 
 use slog::{Logger, FnValue, o, debug};
-use crate::context::{CollectorState, RawContext};
+use crate::context::{RawContext};
 use crate::utils::ThreadId;
 
 pub use crate::context::SimpleCollectorContext;
-use parking_lot::{Condvar, Mutex, RwLock};
 use handles::GcHandleList;
+
+#[cfg(feature = "sync")]
+type AtomicCell<T> = ::crossbeam::atomic::AtomicCell<T>;
+/// Fallback `AtomicCell` implementation when we actually
+/// don't care about thread safety
+#[cfg(not(feature = "sync"))]
+#[derive(Default)]
+struct AtomicCell<T>(Cell<T>);
+#[cfg(not(feature = "sync"))]
+impl<T: Copy> AtomicCell<T> {
+    fn new(value: T) -> Self {
+        AtomicCell(Cell::new(value))
+    }
+    fn store(&self, value: T) {
+        self.0.set(value)
+    }
+    fn load(&self) -> T {
+        self.0.get()
+    }
+    fn compare_exchange(&self, expected: T, updated: T) -> Result<T, T>
+        where T: PartialEq {
+        let existing = self.0.get();
+        if existing == expected {
+            self.0.set(updated);
+            Ok(existing)
+        } else {
+            Err(existing)
+        }
+    }
+}
 
 mod handles;
 mod context;
@@ -251,12 +282,7 @@ impl SimpleCollector {
     pub fn with_logger(logger: Logger) -> Self {
         let mut collector = Arc::new(RawSimpleCollector {
             logger,
-            state: RwLock::new(CollectorState::new()),
-            valid_contexts_wait: Condvar::new(),
-            collection_wait: Condvar::new(),
-            valid_contexts_lock: Mutex::new(()),
-            collection_wait_lock: Mutex::new(()),
-            collecting: AtomicBool::new(false),
+            manager: context::CollectionManager::new(),
             heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD),
             handle_list: GcHandleList::new(),
         });
@@ -271,8 +297,19 @@ impl SimpleCollector {
     ///
     /// Warning: Only one collector should be created per thread.
     /// Doing otherwise can cause deadlocks/panics.
+    #[cfg(feature = "sync")]
     pub fn create_context(&self) -> SimpleCollectorContext {
         unsafe { SimpleCollectorContext::register_root(&self) }
+    }
+    /// Convert this collector into a unique context
+    ///
+    /// The single-threaded implementation only allows a single context,
+    /// so this method is nessicarry to support it.
+    pub fn into_context(self) -> SimpleCollectorContext {
+        #[cfg(feature = "sync")]
+            { self.create_context() }
+        #[cfg(not(feature = "sync"))]
+        unsafe { SimpleCollectorContext::from_collector(&self) }
     }
 }
 
@@ -557,45 +594,14 @@ unsafe impl Sync for RawSimpleCollector {}
 /// The internal data for a simple collector
 struct RawSimpleCollector {
     logger: Logger,
-    state: RwLock<CollectorState>,
     heap: GcHeap,
-    /// Simple flag on whether we're currently collecting
-    ///
-    /// This should be true whenever `self.state.pending` is `Some`.
-    /// However if you don't hold the lock you may not always
-    /// see a fully consistent state.
-    collecting: AtomicBool,
-    /// The condition variable for all contexts to be valid
-    ///
-    /// In order to be valid, a context must be either frozen
-    /// or paused at a safepoint.
-    ///
-    /// After a collection is marked as pending, threads must wait until
-    /// all contexts are valid before the actual work can begin.
-    valid_contexts_wait: Condvar,
-    /// Wait until a garbage collection is over.
-    ///
-    /// This must be separate from `valid_contexts_wait`.
-    /// A garbage collection can only begin once all contexts are valid,
-    /// so this condition logically depends on `valid_contexts_wait`.
-    collection_wait: Condvar,
-    /// The mutex used alongside `valid_contexts_wait`
-    ///
-    /// This doesn't actually protect any data. It's just
-    /// used because [parking_lot::RwLock] doesn't support condition vars.
-    /// This is the [officially suggested solution](https://github.com/Amanieu/parking_lot/issues/165)
-    // TODO: Should we replace this with `known_collections`?
-    valid_contexts_lock: Mutex<()>,
-    /// The mutex used alongside `collection_wait`
-    ///
-    /// Like `collection_wait`, his doesn't actually protect any data.
-    collection_wait_lock: Mutex<()>,
+    manager: self::context::CollectionManager,
     /// Tracks object handles
     handle_list: GcHandleList
 }
 impl RawSimpleCollector {
     #[inline]
-    fn should_collect_relaxed(&self) -> bool {
+    fn should_collect(&self) -> bool {
         /*
          * Use relaxed ordering, just like `should_collect`
          *
@@ -603,15 +609,15 @@ impl RawSimpleCollector {
          * More importantly this is easier for a JIT to implement inline!!!
          * As of this writing cranelift doesn't even seem to support fences :o
          */
-        self.heap.should_collect_relaxed() || self.collecting
-            .load(Ordering::Relaxed)
+        self.heap.should_collect_relaxed() ||
+            self.manager.should_trigger_collection()
     }
     #[cold]
     #[inline(never)]
     unsafe fn perform_raw_collection(
         &self, contexts: &[*mut RawContext]
     ) {
-        debug_assert!(self.collecting.load(Ordering::SeqCst));
+        debug_assert!(self.manager.is_collecting());
         let roots: Vec<*mut dyn DynTrace> = contexts.iter()
             .flat_map(|ctx| {
                 (**ctx).assume_valid_shadow_stack()
@@ -642,6 +648,14 @@ impl RawSimpleCollector {
             "original_size" => original_size,
             "memory_freed" => original_size - updated_size
         );
+    }
+}
+impl Deref for RawSimpleCollector {
+    type Target = context::CollectionManager;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.manager // TODO: Do this explicitly
     }
 }
 struct CollectionTask<'a> {
