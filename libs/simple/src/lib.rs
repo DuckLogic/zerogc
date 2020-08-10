@@ -615,7 +615,7 @@ impl RawSimpleCollector {
         let roots: Vec<*mut dyn DynTrace> = contexts.iter()
             .flat_map(|ctx| {
                 (**ctx).assume_valid_shadow_stack()
-                    .elements.iter().cloned()
+                    .reverse_iter()
             })
             .chain(std::iter::once(&self.handle_list
                 as *const GcHandleList as *const dyn DynTrace

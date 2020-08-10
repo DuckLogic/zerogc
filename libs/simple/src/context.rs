@@ -12,6 +12,7 @@ use std::fmt::{Debug, Formatter};
 use std::{fmt, mem};
 use std::collections::HashSet;
 use parking_lot::{Mutex, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
+use std::ptr::NonNull;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ContextState {
@@ -93,7 +94,7 @@ impl RawContext {
                 "original_thread" => original_thread.clone()
             )),
             shadow_stack: UnsafeCell::new(ShadowStack {
-                elements: Vec::with_capacity(4)
+                last: std::ptr::null_mut(),
             }),
             state: Cell::new(ContextState::Active)
         }));
@@ -181,7 +182,7 @@ impl RawContext {
             self.logger, "Awaiting collection";
             "ptr" => ?ptr,
             "current_thread" => FnValue(|_| ThreadId::current()),
-            "shadow_stack" => ?shadow_stack.elements,
+            "shadow_stack" => FnValue(|_| format!("{:?}", shadow_stack.as_vec())),
             "total_contexts" => pending.total_contexts,
             "waiting_contexts" => pending.waiting_contexts,
             "state" => ?pending.state,
@@ -260,7 +261,7 @@ impl RawContext {
  * inside of RawContext that is not thread-safe.
  */
 pub struct SimpleCollectorContext {
-    raw: ManuallyDrop<Box<RawContext>>,
+    raw: *mut RawContext,
     /// Whether we are the root context
     ///
     /// Only the root actually owns the `Arc`
@@ -270,13 +271,44 @@ pub struct SimpleCollectorContext {
 impl SimpleCollectorContext {
     pub(crate) unsafe fn register_root(collector: &SimpleCollector) -> Self {
         SimpleCollectorContext {
-            raw: RawContext::register_new(&collector.0),
+            raw: Box::into_raw(ManuallyDrop::into_inner(
+                RawContext::register_new(&collector.0)
+            )),
             root: true, // We are responsible for unregistering
         }
     }
     #[inline]
     pub(crate) fn collector(&self) -> &RawSimpleCollector {
-        &*self.raw.collector
+        unsafe { &(*self.raw).collector }
+    }
+    #[inline(always)]
+    unsafe fn with_shadow_stack<R, T: Trace>(
+        &self, value: *mut &mut T, func: impl FnOnce() -> R
+    ) -> R {
+        let old_link = (*(*self.raw).shadow_stack.get()).last;
+        let new_link = ShadowStackLink {
+            element: NonNull::new_unchecked(
+                std::mem::transmute::<
+                    *mut dyn DynTrace,
+                    *mut (dyn DynTrace + 'static)
+                >(value as *mut dyn DynTrace)
+            ),
+            prev: old_link
+        };
+        (*(*self.raw).shadow_stack.get()).last = &new_link;
+        let result = func();
+        debug_assert_eq!(
+            (*(*self.raw).shadow_stack.get()).last,
+            &new_link
+        );
+        (*(*self.raw).shadow_stack.get()).last = new_link.prev;
+        result
+    }
+    #[cold]
+    unsafe fn trigger_basic_safepoint<T: Trace>(&self, element: &mut &mut T) {
+        self.with_shadow_stack(element, || {
+            (*self.raw).trigger_safepoint();
+        })
     }
 }
 impl Drop for SimpleCollectorContext {
@@ -287,13 +319,13 @@ impl Drop for SimpleCollectorContext {
             unsafe {
                 trace!(
                     collector.logger, "Freeing context";
-                    "ptr" => format_args!("{:p}", &**self.raw),
+                    "ptr" => format_args!("{:p}", self.raw),
                     "current_thread" => FnValue(|_| ThreadId::current()),
-                    "state" => ?self.raw.state.get()
+                    "state" => ?(*self.raw).state.get()
                 );
-                collector.free_context(
-                    std::ptr::read(&self.raw)
-                )
+                collector.free_context(ManuallyDrop::new(
+                    Box::from_raw(self.raw)
+                ));
             }
         }
     }
@@ -303,28 +335,23 @@ unsafe impl GcContext for SimpleCollectorContext {
 
     #[inline]
     unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T) {
-        debug_assert_eq!(self.raw.state.get(), ContextState::Active);
-        let dyn_ptr = (*self.raw.shadow_stack.get())
-            .push(value);
-        if self.raw.collector.should_collect_relaxed() {
-            self.raw.trigger_safepoint();
+        debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
+        if (*self.raw).collector.should_collect_relaxed() {
+            self.trigger_basic_safepoint(value);
         }
-        debug_assert_eq!(self.raw.state.get(), ContextState::Active);
-        let popped = (*self.raw.shadow_stack.get())
-            .pop_unchecked();
-        debug_assert_eq!(popped, dyn_ptr);
+        debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
     }
 
     unsafe fn freeze(&mut self) {
-        assert_eq!(self.raw.state.get(), ContextState::Active);
+        assert_eq!((*self.raw).state.get(), ContextState::Active);
         // TODO: Isn't this state read concurrently?
-        self.raw.state.set(ContextState::Frozen);
+        (*self.raw).state.set(ContextState::Frozen);
         /*
          * We may need to notify others that we are frozen
          * This means we are now "valid" for the purposes of
          * collection ^_^
          */
-        self.raw.collector.valid_contexts_wait.notify_all();
+        (*self.raw).collector.valid_contexts_wait.notify_all();
     }
 
     unsafe fn unfreeze(&mut self) {
@@ -334,35 +361,32 @@ unsafe impl GcContext for SimpleCollectorContext {
          * could trigger undefined behavior!!!!!
          */
         self.collector().prevent_collection(|_| {
-            assert_eq!(self.raw.state.get(), ContextState::Frozen);
-            self.raw.state.set(ContextState::Active);
+            assert_eq!((*self.raw).state.get(), ContextState::Frozen);
+            (*self.raw).state.set(ContextState::Active);
         })
     }
 
     #[inline]
     unsafe fn recurse_context<T, F, R>(&self, value: &mut &mut T, func: F) -> R
         where T: Trace, F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R {
-        debug_assert_eq!(self.raw.state.get(), ContextState::Active);
-        let dyn_ptr = (*self.raw.shadow_stack.get())
-            .push(value);
-        let mut sub_context = SimpleCollectorContext {
-            /*
-             * safe to copy because we wont drop it
-             * Lifetime is guarenteed to be restricted to
-             * the closure.
-             */
-            raw: std::ptr::read(&self.raw),
-            root: false /* don't drop our pointer!!! */
-        };
-        let result = func(&mut sub_context, value);
-        debug_assert!(!sub_context.root);
-        // Since we're not the root, no need to run drop code!
-        std::mem::forget(sub_context);
-        debug_assert_eq!(self.raw.state.get(), ContextState::Active);
-        let actual_ptr = (*self.raw.shadow_stack.get())
-            .pop_unchecked();
-        debug_assert_eq!(actual_ptr, dyn_ptr);
-        result
+        debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
+        self.with_shadow_stack(value, || {
+            let mut sub_context = ManuallyDrop::new(SimpleCollectorContext {
+                /*
+                 * safe to copy because we wont drop it
+                 * Lifetime is guarenteed to be restricted to
+                 * the closure.
+                 */
+                raw: self.raw,
+                root: false /* don't drop our pointer!!! */
+            });
+            let result = func(&mut *sub_context, value);
+            debug_assert!(!sub_context.root);
+            // No need to run drop code on context.....
+            std::mem::forget(sub_context);
+            debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
+            result
+        })
     }
 }
 
@@ -379,40 +403,33 @@ impl !Send for SimpleCollectorContext {}
 // Root tracking
 //
 
+#[repr(C)]
+#[derive(Debug)]
+pub(crate) struct ShadowStackLink {
+    pub element: NonNull<dyn DynTrace>,
+    /// The previous link in the chain,
+    /// or NULL if there isn't any
+    pub prev: *const ShadowStackLink
+}
+
 #[derive(Clone, Debug)]
 pub struct ShadowStack {
-    pub(crate) elements: Vec<*mut dyn DynTrace>
+    /// The last element in the shadow stack,
+    /// or NULL if it's empty
+    pub(crate) last: *const ShadowStackLink
 }
 impl ShadowStack {
-    #[inline]
-    pub(crate) unsafe fn push<'a, T: Trace + 'a>(&mut self, value: &'a mut T) -> *mut dyn DynTrace {
-        let short_ptr = value as &mut (dyn DynTrace + 'a)
-            as *mut (dyn DynTrace + 'a);
-        let long_ptr = std::mem::transmute::<
-            *mut (dyn DynTrace + 'a),
-            *mut (dyn DynTrace + 'static)
-        >(short_ptr);
-        self.elements.push(long_ptr);
-        long_ptr
+    unsafe fn as_vec(&self) -> Vec<*mut dyn DynTrace> {
+        let mut result: Vec<_> = self.reverse_iter().collect();
+        result.reverse();
+        result
     }
     #[inline]
-    pub(crate) unsafe fn pop_unchecked(&mut self) -> *mut dyn DynTrace {
-        match self.elements.pop() {
-            Some(value) => value,
-            None => {
-                #[cfg(debug_assertions)] {
-                    /*
-                     * In debug mode we'd rather panic than
-                     * trigger undefined behavior.
-                     */
-                    unreachable!()
-                }
-                #[cfg(not(debug_assertions))] {
-                    // Hint to optimizer we consider this impossible
-                    std::hint::unreachable_unchecked()
-                }
-            }
-        }
+    pub(crate) unsafe fn reverse_iter(&self) -> impl Iterator<Item=*mut dyn DynTrace> + '_ {
+        std::iter::successors(
+            self.last.as_ref(),
+            |link| link.prev.as_ref()
+        ).map(|link| link.element.as_ptr())
     }
 }
 
