@@ -96,7 +96,7 @@ impl SimpleCollectorContext {
     pub(crate) unsafe fn from_collector(collector: &SimpleCollector) -> Self {
         SimpleCollectorContext {
             raw: Box::into_raw(ManuallyDrop::into_inner(
-                RawContext::from_collector(collector.0.clone())
+                RawContext::from_collector(collector.internal_clone())
             )),
             root: true // We are the exclusive owner
         }
@@ -105,14 +105,14 @@ impl SimpleCollectorContext {
     pub(crate) unsafe fn register_root(collector: &SimpleCollector) -> Self {
         SimpleCollectorContext {
             raw: Box::into_raw(ManuallyDrop::into_inner(
-                RawContext::register_new(&collector.0)
+                RawContext::register_new(&collector)
             )),
             root: true, // We are responsible for unregistering
         }
     }
     #[inline]
     pub(crate) fn collector(&self) -> &RawSimpleCollector {
-        unsafe { &(*self.raw).collector }
+        unsafe { &(*self.raw).collector.as_raw() }
     }
     #[inline(always)]
     unsafe fn with_shadow_stack<R, T: Trace>(
@@ -160,18 +160,18 @@ unsafe impl GcContext for SimpleCollectorContext {
     #[inline]
     unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T) {
         debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
-        if (*self.raw).collector.should_collect() {
+        if (*self.raw).collector.as_raw().should_collect() {
             self.trigger_basic_safepoint(value);
         }
         debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
     }
 
     unsafe fn freeze(&mut self) {
-        (*self.raw).collector.manager.freeze_context(&*self.raw);
+        (*self.raw).collector.as_raw().manager.freeze_context(&*self.raw);
     }
 
     unsafe fn unfreeze(&mut self) {
-        (*self.raw).collector.manager.unfreeze_context(&*self.raw);
+        (*self.raw).collector.as_raw().manager.unfreeze_context(&*self.raw);
     }
 
     #[inline]

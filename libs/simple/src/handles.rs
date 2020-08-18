@@ -4,10 +4,9 @@
 use std::ptr::NonNull;
 use std::marker::PhantomData;
 use std::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak as WeakArc};
 
 use zerogc::{Trace, GcSafe, GcBindHandle, GcBrand, GcVisitor, NullTrace, TraceImmutable};
-use crate::{DynTrace, GcType, RawSimpleCollector, Gc, SimpleCollectorContext, SimpleCollector, MarkVisitor, GcHeader, MarkState};
+use crate::{DynTrace, GcType, Gc, SimpleCollectorContext, SimpleCollector, MarkVisitor, GcHeader, MarkState, WeakCollectorRef};
 
 const INITIAL_HANDLE_CAPACITY: usize = 128;
 
@@ -356,47 +355,39 @@ impl GcRawHandle {
 }
 pub struct GcHandle<T: GcSafe> {
     inner: NonNull<GcRawHandle>,
-    collector: WeakArc<RawSimpleCollector>,
+    collector: WeakCollectorRef,
     marker: PhantomData<*mut T>
 }
 impl<T: GcSafe> GcHandle<T> {
     pub(crate) unsafe fn new(
         inner: NonNull<GcRawHandle>,
-        collector: WeakArc<RawSimpleCollector>
+        collector: WeakCollectorRef
     ) -> Self {
         GcHandle {
             inner, collector,
             marker: PhantomData
         }
     }
-    #[inline]
-    unsafe fn assume_valid_collector(&self) -> *const RawSimpleCollector {
-        debug_assert!(
-            self.collector.upgrade().is_some(),
-            "Dead collector"
-        );
-        self.collector.as_ptr()
-    }
 }
 unsafe impl<T: GcSafe> ::zerogc::GcHandle<T> for GcHandle<T> {
     type Context = SimpleCollectorContext;
     #[cfg(feature = "sync")]
     fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R {
-        let collector = self.collector.upgrade()
-            .expect("Dead collector");
-        /*
-         * This should be sufficient to ensure
-         * the value won't be collected or relocated.
-         *
-         * Note that this is implemented using a read lock,
-         * so recursive calls will deadlock.
-         * This is preferable to using `recursive_read`,
-         * since that could starve writers (collectors).
-         */
-        collector.prevent_collection(|_state| unsafe {
-            let value = self.inner.as_ref().value
-                .load(Ordering::Acquire) as *mut T;
-            func(&*value)
+        self.collector.ensure_valid(|collector| unsafe {
+            /*
+             * This should be sufficient to ensure
+             * the value won't be collected or relocated.
+             *
+             * Note that this is implemented using a read lock,
+             * so recursive calls will deadlock.
+             * This is preferable to using `recursive_read`,
+             * since that could starve writers (collectors).
+             */
+            collector.as_ref().prevent_collection(|_state| {
+                let value = self.inner.as_ref().value
+                    .load(Ordering::Acquire) as *mut T;
+                func(&*value)
+            })
         })
     }
     #[cfg(not(feature = "sync"))]
@@ -425,13 +416,13 @@ unsafe impl<'new_gc, T> GcBindHandle<'new_gc, T> for GcHandle<T>
          * from now until the next safepoint.
          */
         unsafe {
-            let collector = self.assume_valid_collector(); 
+            let collector = self.collector.assume_valid();
             let inner = self.inner.as_ref();
             let value = inner.value.load(Ordering::Acquire)
                 as *mut T as *mut T::Branded;
             debug_assert!(!value.is_null());
             Gc::from_raw(
-                NonNull::new_unchecked(collector as *mut _),
+                collector,
                 NonNull::new_unchecked(value)
             )
         }
@@ -458,8 +449,8 @@ unsafe impl<T: GcSafe> NullTrace for GcHandle<T> {}
 impl<T: GcSafe> Clone for GcHandle<T> {
     fn clone(&self) -> Self {
         // NOTE: Dead collector -> invalid handle
-        let collector = self.collector.upgrade()
-            .expect("Dead collector");
+        let collector = self.collector
+            .ensure_valid(|id| unsafe { id.weak_ref() });
         let inner = unsafe { self.inner.as_ref() };
         debug_assert!(!inner.value
             .load(Ordering::SeqCst)
@@ -479,53 +470,53 @@ impl<T: GcSafe> Clone for GcHandle<T> {
         }
         GcHandle {
             inner: self.inner,
-            collector: Arc::downgrade(&collector),
-            marker: PhantomData
+            collector, marker: PhantomData
         }
     }
 }
 impl<T: GcSafe> Drop for GcHandle<T> {
     fn drop(&mut self) {
-        let collector = match self.collector.upgrade() {
-            None => {
-                /*
-                 * The collector is dead.
-                 * Our memory has already been freed
-                 */
-                return;
-            },
-            Some(collector) => collector,
-        };
-        let inner = unsafe { self.inner.as_ref() };
-        debug_assert!(!inner.value
-            .load(Ordering::SeqCst)
-            .is_null(),
-            "Pointer already invalid"
-        );
-        let prev = inner.refcnt
-            .fetch_sub(1, Ordering::AcqRel);
-        match prev {
-            0 => {
-                // This should be impossible.
-                eprintln!("GcHandle refcnt Underflow");
-                std::process::abort();
-            },
-            1 => {
-                // Free underlying memory
-
-            },
-            _ => {}, // Other references
-        }
-        // Mark the value as freed
-        inner.value.store(
-            std::ptr::null_mut(),
-            Ordering::Release
-        );
-        unsafe {
-            collector.handle_list.append_free_slot(
-                self.inner.as_ptr() as *mut HandleSlot
+        self.collector.try_ensure_valid(|id| {
+            let collector = match id {
+                None => {
+                    /*
+                     * The collector is dead.
+                     * Our memory has already been freed
+                     */
+                    return;
+                },
+                Some(ref id) => unsafe { id.as_ref() },
+            };
+            let inner = unsafe { self.inner.as_ref() };
+            debug_assert!(!inner.value
+                .load(Ordering::SeqCst)
+                .is_null(),
+                          "Pointer already invalid"
             );
-        }
+            let prev = inner.refcnt
+                .fetch_sub(1, Ordering::AcqRel);
+            match prev {
+                0 => {
+                    // This should be impossible.
+                    eprintln!("GcHandle refcnt Underflow");
+                    std::process::abort();
+                },
+                1 => {
+                    // Free underlying memory
+                },
+                _ => {}, // Other references
+            }
+            // Mark the value as freed
+            inner.value.store(
+                std::ptr::null_mut(),
+                Ordering::Release
+            );
+            unsafe {
+                collector.handle_list.append_free_slot(
+                    self.inner.as_ptr() as *mut HandleSlot
+                );
+            }
+        });
     }
 }
 /// In order to send *references* between threads,

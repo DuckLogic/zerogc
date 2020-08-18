@@ -24,6 +24,7 @@ serde = { version = "1", optional = true }
 default = [
     "small-object-arenas", # Without this, allocating small objects is slow
     "sync", # Thread-safety by default
+    "multiple-collectors", # By default, allow multiple collectors
 ]
 # Use very fast dedicated arenas for small objects.
 # This makes allocation much faster
@@ -44,6 +45,12 @@ implicit-grey-stack = []
 #
 # This can increase overhead by requiring communication between threads.
 sync = []
+# Allow multiple collectors to exist at once
+# Otherwise, there's a single global collector (useful in VMs)
+#
+# Even if multiple collectors are enabled, pointers from
+# one collector can't be safely mixed with other collectors.
+multiple-collectors = []
 
 [dev-dependencies]
 # Used for examples :)

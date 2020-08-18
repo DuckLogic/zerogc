@@ -1,10 +1,9 @@
-use std::sync::{Arc};
 use std::cell::{Cell, UnsafeCell};
 use std::sync::atomic::{Ordering, AtomicBool};
 
 use slog::{Logger, FnValue, trace, Drain, o};
 
-use crate::{RawSimpleCollector};
+use crate::{RawSimpleCollector, SimpleCollector};
 use crate::utils::ThreadId;
 use std::mem::ManuallyDrop;
 use std::fmt::{Debug, Formatter};
@@ -96,7 +95,7 @@ impl CollectionManager {
          * context's shadow stack, so unfreezing it while in progress
          * could trigger undefined behavior!!!!!
          */
-        context.collector.prevent_collection(|_| {
+        context.collector.as_raw().prevent_collection(|_| {
             assert_eq!(context.state.get(), ContextState::Frozen);
             context.state.set(ContextState::Active);
         })
@@ -104,7 +103,7 @@ impl CollectionManager {
 }
 
 pub struct RawContext {
-    pub(crate) collector: Arc<RawSimpleCollector>,
+    pub(crate) collector: SimpleCollector,
     original_thread: ThreadId,
     // NOTE: We are Send, not Sync
     pub(super) shadow_stack: UnsafeCell<ShadowStack>,
@@ -129,16 +128,16 @@ impl Debug for RawContext {
     }
 }
 impl RawContext {
-    pub(crate) unsafe fn register_new(collector: &Arc<RawSimpleCollector>) -> ManuallyDrop<Box<Self>> {
-        let original_thread = if collector.logger.is_trace_enabled() {
+    pub(crate) unsafe fn register_new(collector: &SimpleCollector) -> ManuallyDrop<Box<Self>> {
+        let original_thread = if collector.as_raw().logger.is_trace_enabled() {
             ThreadId::current()
         } else {
             ThreadId::Nop
         };
         let mut context = ManuallyDrop::new(Box::new(RawContext {
-            collector: collector.clone(),
+            collector: collector.clone_internal(),
             original_thread: original_thread.clone(),
-            logger: collector.logger.new(o!(
+            logger: collector.as_raw().logger.new(o!(
                 "original_thread" => original_thread.clone()
             )),
             shadow_stack: UnsafeCell::new(ShadowStack {
@@ -146,9 +145,9 @@ impl RawContext {
             }),
             state: Cell::new(ContextState::Active)
         }));
-        let old_num_total = collector.add_context(&mut **context);
+        let old_num_total = collector.as_raw().add_context(&mut **context);
         trace!(
-            collector.logger, "Creating new context";
+            collector.as_raw().logger, "Creating new context";
             "ptr" => format_args!("{:p}", &**context),
             "old_num_total" => old_num_total,
             "current_thread" => &original_thread
@@ -171,11 +170,12 @@ impl RawContext {
          * This assumes that parking_lot priorities pending writes
          * over pending reads. The standard library doesn't guarantee this.
          */
-        let mut guard = self.collector.state.write();
+        let collector = self.collector.as_raw();
+        let mut guard = collector.state.write();
         let state = &mut *guard;
         // If there is not a active `PendingCollection` - create one
         if state.pending.is_none() {
-            assert!(!self.collector.manager.collecting.compare_and_swap(
+            assert!(!collector.manager.collecting.compare_and_swap(
                 false, true, Ordering::SeqCst
             ));
             let id = state.next_pending_id();
@@ -236,7 +236,7 @@ impl RawContext {
             "state" => ?pending.state,
             "collector_id" => expected_id
         );
-        self.collector.await_collection(
+        collector.await_collection(
             expected_id, ptr, guard,
             |state, contexts| {
                 let pending = state.pending.as_mut().unwrap();
@@ -247,20 +247,20 @@ impl RawContext {
                 trace!(
                     self.logger, "Beginning simple collection";
                     "current_thread" => FnValue(|_| ThreadId::current()),
-                    "original_size" => self.collector.heap.allocator.allocated_size(),
+                    "original_size" => collector.heap.allocator.allocated_size(),
                     "contexts" => ?contexts,
                     "total_contexts" => pending.total_contexts,
                     "state" => ?pending.state,
                     "collector_id" => pending.id,
                 );
-                self.collector.perform_raw_collection(&contexts);
+                collector.perform_raw_collection(&contexts);
                 assert_eq!(
                     pending.state,
                     PendingState::InProgress
                 );
                 pending.state = PendingState::Finished;
                 // Now acknowledge that we're finished
-                self.collector.acknowledge_finished_collection(
+                collector.acknowledge_finished_collection(
                     &mut state.pending, ptr
                 );
             }
