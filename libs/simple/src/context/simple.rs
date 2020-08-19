@@ -93,11 +93,11 @@ impl Debug for RawContext {
 impl RawContext {
     pub(crate) unsafe fn from_collector(collector: SimpleCollector) -> ManuallyDrop<Box<Self>> {
         assert!(
-            !collector.manager.has_existing_context
+            !collector.as_raw().manager.has_existing_context
                 .replace(true),
             "Already created a context for the collector!"
         );
-        let logger = collector.logger.new(o!());
+        let logger = collector.as_raw().logger.new(o!());
         let context = ManuallyDrop::new(Box::new(RawContext {
             logger: logger.clone(), collector,
             shadow_stack: UnsafeCell::new(ShadowStack {
@@ -128,9 +128,9 @@ impl RawContext {
          * at a safepoint.
          * This simplifies the implementation considerably.
          */
-        assert!(!self.collector.collecting.get());
-        self.collector.collecting.set(true);
-        let collection_id = self.collector.state.borrow_mut()
+        assert!(!self.collector.as_raw().collecting.get());
+        self.collector.as_raw().collecting.set(true);
+        let collection_id = self.collector.as_raw().state.borrow_mut()
             .next_pending_id();
         trace!(
             self.logger,
@@ -150,14 +150,14 @@ impl RawContext {
             "shadow_stack" => FnValue(|_| format!("{:?}", shadow_stack.as_vec())),
             "state" => ?self.state,
             "collection_id" => collection_id,
-            "original_size" => self.collector.heap.allocator.allocated_size(),
+            "original_size" => self.collector.as_raw().heap.allocator.allocated_size(),
         );
-        self.collector.perform_raw_collection(&[ptr]);
+        self.collector.as_raw().perform_raw_collection(&[ptr]);
         assert_eq!(
             self.state.replace(ContextState::Active),
             ContextState::SafePoint { collection_id }
         );
-        assert!(self.collector.collecting.replace(false));
+        assert!(self.collector.as_raw().collecting.replace(false));
     }
     /// Borrow a reference to the shadow stack,
     /// assuming this context is valid (not active).

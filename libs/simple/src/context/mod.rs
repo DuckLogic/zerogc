@@ -96,7 +96,7 @@ impl SimpleCollectorContext {
     pub(crate) unsafe fn from_collector(collector: &SimpleCollector) -> Self {
         SimpleCollectorContext {
             raw: Box::into_raw(ManuallyDrop::into_inner(
-                RawContext::from_collector(collector.internal_clone())
+                RawContext::from_collector(collector.clone_internal())
             )),
             root: true // We are the exclusive owner
         }
