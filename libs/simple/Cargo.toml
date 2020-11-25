@@ -17,8 +17,6 @@ parking_lot = { version = "0.10", features = ["nightly"] }
 crossbeam = { version = "0.7" }
 # Logging
 slog = "2.5"
-# [Optional] Serde support
-serde = { version = "1", optional = true }
 
 [features]
 default = [
