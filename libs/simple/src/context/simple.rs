@@ -3,7 +3,6 @@
 //!
 //! In exchange, there is no locking :)
 
-use std::sync::{Arc};
 use std::cell::{Cell, UnsafeCell, RefCell};
 
 use slog::{Logger, FnValue, trace, o};

@@ -7,7 +7,7 @@
 use core::num::Wrapping;
 
 use crate::prelude::*;
-use crate::GcDirectBarrier;
+use crate::{GcDirectBarrier, CollectorId};
 
 macro_rules! trace_tuple {
     { $($param:ident)* } => {
@@ -41,7 +41,7 @@ macro_rules! trace_tuple {
         }
         unsafe impl<$($param: NullTrace),*> NullTrace for ($($param,)*) {}
         unsafe impl<'new_gc, Id, $($param),*> $crate::GcBrand<'new_gc, Id> for ($($param,)*)
-            where Id: $crate::GcSystem, $($param: $crate::GcBrand<'new_gc, Id>,)*
+            where Id: $crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id>,)*
                  $(<$param as $crate::GcBrand<'new_gc, Id>>::Branded: Sized,)* {
             type Branded = ($(<$param as $crate::GcBrand<'new_gc, Id>>::Branded,)*);
         }
@@ -117,10 +117,10 @@ macro_rules! trace_array {
         unsafe impl<T: GcSafe> GcSafe for [T; $size] {
             const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
         }
-        unsafe impl<'new_gc, S: GcSystem, T> $crate::GcBrand<'new_gc, S> for [T; $size]
-            where S: GcSystem, T: GcBrand<'new_gc, S>,
-                  <T as GcBrand<'new_gc, S>>::Branded: Sized {
-            type Branded = [<T as GcBrand<'new_gc, S>>::Branded; $size];
+        unsafe impl<'new_gc, Id, T> $crate::GcBrand<'new_gc, Id> for [T; $size]
+            where Id: CollectorId, T: GcBrand<'new_gc, Id>,
+                  <T as GcBrand<'new_gc, Id>>::Branded: Sized {
+            type Branded = [<T as GcBrand<'new_gc, Id>>::Branded; $size];
         }
     };
     { $($size:tt),* } => ($(trace_array!($size);)*)
@@ -152,7 +152,7 @@ unsafe impl<'a, T: GcSafe + TraceImmutable> GcSafe for &'a T {
     const NEEDS_DROP: bool = false; // References are safe :)
 }
 /// TODO: Right now we can only rebrand unmanaged types (NullTrace)
-unsafe impl<'a: 'new_gc, 'new_gc, S: GcSystem, T: NullTrace> GcBrand<'new_gc, S> for &'a T {
+unsafe impl<'a: 'new_gc, 'new_gc, Id: CollectorId, T: NullTrace> GcBrand<'new_gc, Id> for &'a T {
     type Branded = Self;
 }
 
@@ -175,9 +175,9 @@ unsafe impl<'a, T: GcSafe> GcSafe for &'a mut T {
     const NEEDS_DROP: bool = false; // Referenes are Copy
 }
 /// TODO: Right now we can only rebrand unmanaged types (NullTrace)
-unsafe impl<'a, 'new_gc, S, T> GcBrand<'new_gc, S> for &'a mut T
-    where 'a: 'new_gc, S: GcSystem, T: GcBrand<'new_gc, S> {
-    type Branded = &'new_gc mut <T as GcBrand<'new_gc, S>>::Branded;
+unsafe impl<'a, 'new_gc, Id, T> GcBrand<'new_gc, Id> for &'a mut T
+    where 'a: 'new_gc, Id: CollectorId, T: GcBrand<'new_gc, Id> {
+    type Branded = &'new_gc mut <T as GcBrand<'new_gc, Id>>::Branded;
 }
 
 /// Implements tracing for slices, by tracing all the objects they refer to.

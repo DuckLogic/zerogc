@@ -9,7 +9,6 @@
     const_panic, // Const panic should be stable
     untagged_unions, // Why isn't this stable?
     new_uninit, // Until Rust has const generics, this is how we init arrays..
-    min_specialization, // Effectively required by GcRef :(
 )]
 #![allow(
     /*
@@ -18,17 +17,13 @@
      */
     clippy::vtable_address_comparisons,
 )]
-use zerogc::{GcSystem, GcSafe, Trace, GcVisitor, GcSimpleAlloc, GcRef, GcBrand, GcDirectBarrier, GcCreateHandle};
+use zerogc::{GcSystem, GcSafe, Trace, GcVisitor, GcSimpleAlloc};
 use std::alloc::Layout;
 use std::ptr::NonNull;
 use std::os::raw::c_void;
 use std::mem::{transmute, ManuallyDrop};
 use crate::alloc::{SmallArenaList, small_object_size};
 use std::ops::Deref;
-use std::hash::{Hash, Hasher};
-use std::fmt::{Debug, Formatter};
-use std::fmt;
-use std::marker::PhantomData;
 #[cfg(feature = "multiple-collectors")]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
@@ -103,6 +98,7 @@ mod alloc {
 }
 
 pub use handles::GcHandle;
+use std::any::TypeId;
 
 /// Uniquely identifies the collector in case there are
 /// multiple collectors.
@@ -113,38 +109,67 @@ pub use handles::GcHandle;
 ///
 /// As long as our memory is valid,
 /// it implies this pointer is too..
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(C)]
-struct CollectorId {
-    /*
-     * TODO: Store a pointer to the Arc to enable clones
-     * without having to abuse Arc::from_raw
-     */
+pub struct CollectorId {
     #[cfg(feature = "multiple-collectors")]
-    ptr: NonNull<RawSimpleCollector>,
+    /// This is in essence a borrowed reference to
+    /// the collector. SimpleCollector is implemented as a
+    /// raw pointer via [Arc::into_raw]
+    ///
+    /// We don't know whether the underlying memory will be valid.
+    rc: NonNull<RawSimpleCollector>,
 }
 impl CollectorId {
     #[cfg(feature = "multiple-collectors")]
-    pub unsafe fn as_ref(&self) -> &RawSimpleCollector {
-        self.ptr.as_ref()
+    #[inline]
+    unsafe fn as_ref(&self) -> &RawSimpleCollector {
+        self.rc.as_ref()
     }
     #[cfg(not(feature = "multiple-collectors"))]
-    pub unsafe fn as_ref(&self) -> &RawSimpleCollector {
+    #[inline]
+    unsafe fn as_ref(&self) -> &RawSimpleCollector {
         &*GLOBAL_COLLECTOR.load(Ordering::Acquire)
     }
     #[cfg(feature = "multiple-collectors")]
-    pub unsafe fn weak_ref(&self) -> WeakCollectorRef {
-        // TODO: This is a horrible hack
-        let arc = Arc::from_raw(
-            self.ptr.as_ptr()
-        );
+    unsafe fn weak_ref(&self) -> WeakCollectorRef {
+        let arc = Arc::from_raw(self.rc.as_ptr());
         let weak = Arc::downgrade(&arc);
         std::mem::forget(arc);
         WeakCollectorRef { weak }
     }
     #[cfg(not(feature = "multiple-collectors"))]
-    pub unsafe fn weak_ref(&self) -> WeakCollectorRef {
-        WeakCollectorRef {}
+    unsafe fn weak_ref(&self) -> WeakCollectorRef {
+        WeakCollectorRef { }
+    }
+}
+unsafe impl ::zerogc::CollectorId for CollectorId {
+    type System = SimpleCollector;
+
+    #[inline(always)]
+    unsafe fn gc_write_barrier<'gc, T, V>(
+        _owner: &Gc<'gc, T>,
+        _value: &Gc<'gc, V>,
+        _field_offset: usize
+    ) where T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {
+        // Simple GC doesn't need write barriers
+    }
+
+    #[inline]
+    unsafe fn assume_valid_system(&self) -> &'_ Self::System {
+        // TODO: Make the API nicer? (avoid borrowing and indirection)
+        #[cfg(feature = "multiple-collectors")] {
+            assert_eq!(
+                std::mem::size_of::<Self>(),
+                std::mem::size_of::<SimpleCollector>()
+            );
+            &*(self as *const CollectorId as *const SimpleCollector)
+        }
+        #[cfg(not(feature = "multiple-collectors"))] {
+            // NOTE: We live forever
+            static COLLECTOR: SimpleCollector = SimpleCollector { };
+            &COLLECTOR
+        }
     }
 }
 
@@ -160,7 +185,7 @@ impl WeakCollectorRef {
             "Dead collector"
         );
         CollectorId {
-            ptr: NonNull::new_unchecked(self.weak.as_ptr() as *mut _)
+            rc: NonNull::new_unchecked(self.weak.as_ptr() as *mut _)
         }
     }
     #[cfg(not(feature = "multiple-collectors"))]
@@ -177,8 +202,8 @@ impl WeakCollectorRef {
     pub fn try_ensure_valid<R>(&self, func: impl FnOnce(Option<CollectorId>) -> R) -> R{
         let rc = self.weak.upgrade();
         func(match rc {
-            Some(ref rc) => {
-                Some(CollectorId { ptr: NonNull::from(&**rc) })
+            Some(_) => {
+                Some(unsafe { self.assume_valid() })
             },
             None => None
         })
@@ -190,169 +215,24 @@ impl WeakCollectorRef {
     }
 }
 
-/// A garbage collected pointer
-///
-/// See docs for [zerogc::GcRef]
-#[repr(C)]
-pub struct Gc<'gc, T: GcSafe + 'gc> {
-    /// Used to uniquely identify the collector,
-    /// to ensure we aren't modifying another collector's pointers
-    collector_id: CollectorId,
-    // TODO: Field-ordering wise I feel this should come first
-    value: NonNull<T>,
-    marker: PhantomData<&'gc T>
-}
-impl<'gc, T: GcSafe + 'gc> Gc<'gc, T> {
-    #[inline]
-    pub(crate) unsafe fn from_raw(
-        id: CollectorId,
-        value: NonNull<T>
-    ) -> Self {
-        Gc { collector_id: id, value, marker: PhantomData }
-    }
-}
-unsafe impl<'gc, T: GcSafe + 'gc> GcRef<'gc, T> for Gc<'gc, T> {
-    type System = SimpleCollector;
-
-    #[inline]
-    fn value(&self) -> &'gc T {
-        unsafe { &mut *self.value.as_ptr() }
-    }
-}
-/// We support handles
-unsafe impl<'gc, T> GcCreateHandle<'gc, T> for Gc<'gc, T>
-    where T: GcSafe, T: GcBrand<'static, SimpleCollector>,
-        T::Branded: GcSafe {
-    type Handle = handles::GcHandle<T::Branded>;
-    #[inline]
-    fn create_handle(&self) -> Self::Handle {
-        unsafe {
-            let collector = self.collector_id;
-            let value = self.value.as_ptr();
-            let raw = collector.as_ref().handle_list
-                .alloc_raw_handle(value as *mut ());
-            /*
-             * WARN: Undefined Behavior
-             * if we don't finish initializing
-             * the handle!!!
-             *
-             * TODO: Encapsulate
-             */
-            raw.type_info.store(
-                <T as StaticGcType>::STATIC_TYPE
-                    as *const GcType
-                    as *mut GcType,
-                Ordering::Release
-            );
-            raw.refcnt.store(1, Ordering::Release);
-            let weak_collector = self.collector_id.weak_ref();
-            GcHandle::new(NonNull::from(raw), weak_collector)
-        }
-    }
-
-}
-/// Double-indirection is completely safe
-unsafe impl<'gc, T: GcSafe + 'gc> GcSafe for Gc<'gc, T> {
-    const NEEDS_DROP: bool = true; // We are Copy
-}
-/// Rebrand
-unsafe impl<'gc, 'new_gc, T> GcBrand<'new_gc, SimpleCollector> for Gc<'gc, T>
-    where T: GcSafe + GcBrand<'new_gc, SimpleCollector>,
-          T::Branded: GcSafe {
-    type Branded = Gc<'new_gc, <T as GcBrand<'new_gc, SimpleCollector>>::Branded>;
-}
-unsafe impl<'gc, T: GcSafe + 'gc> Trace for Gc<'gc, T> {
-    // We always need tracing....
-    const NEEDS_TRACE: bool = true;
-
-    #[inline]
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
-        <V as GcVisit>::visit_gc(visitor, self);
-        Ok(())
-    }
-}
-impl<'gc, T: GcSafe + 'gc> Deref for Gc<'gc, T> {
-    type Target = &'gc T;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*(&self.value as *const NonNull<T> as *const &'gc T) }
-    }
-}
-/// Simple GC doesn't need write barriers :)
-///
-/// This implementation is just for writing `Gc<T> -> Gc<T>`
-unsafe impl<'gc, T, V> GcDirectBarrier<'gc, Gc<'gc, T>> for Gc<'gc, V>
-    where T: GcSafe + 'gc, V: GcSafe + 'gc {
-    #[inline(always)]  // NOP
-    unsafe fn write_barrier(&self, _owner: &Gc<'gc, T>, _field_offset: usize) {}
-}
-// We can be copied freely :)
-impl<'gc, T: GcSafe + 'gc> Copy for Gc<'gc, T> {}
-impl<'gc, T: GcSafe + 'gc> Clone for Gc<'gc, T> {
-    #[inline]
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-// Delegating impls
-impl<'gc, T: GcSafe + Hash + 'gc> Hash for Gc<'gc, T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.value().hash(state)
-    }
-}
-impl<'gc, T: GcSafe + PartialEq + 'gc> PartialEq for Gc<'gc, T> {
-    fn eq(&self, other: &Self) -> bool {
-        // NOTE: We compare by value, not identity
-        self.value() == other.value()
-    }
-}
-impl<'gc, T: GcSafe + Eq + 'gc> Eq for Gc<'gc, T> {}
-impl<'gc, T: GcSafe + PartialEq + 'gc> PartialEq<T> for Gc<'gc, T> {
-    fn eq(&self, other: &T) -> bool {
-        self.value() == other
-    }
-}
-impl<'gc, T: GcSafe + Debug + 'gc> Debug for Gc<'gc, T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        if !f.alternate() {
-            // Pretend we're a newtype by default
-            f.debug_tuple("Gc").field(self.value()).finish()
-        } else {
-            // Alternate spec reveals `collector_ptr`
-            f.debug_struct("Gc")
-                .field("collector_id", &self.collector_id)
-                .field("value", self.value())
-                .finish()
-        }
-    }
-}
-// Visitor (specialized trait)
-trait GcVisit: GcVisitor {
-    fn visit_gc<'gc, T: GcSafe + 'gc>(&mut self, gc: &mut Gc<'gc, T>);
-}
-impl<V: GcVisitor> GcVisit for V {
-    #[inline]
-    default fn visit_gc<'gc, T: GcSafe + 'gc>(&mut self, _gc: &mut Gc<'gc, T>) {}
-}
-/// In order to send *references* between threads,
-/// the underlying type must be sync.
-///
-/// This is the same reason that `Arc<T>: Send` requires `T: Sync`
-unsafe impl<'gc, T: GcSafe + Sync> Send for Gc<'gc, T> {}
-/// If the underlying type is `Sync`, it's safe
-/// to share garbage collected references between threads.
-///
-/// The collector itself is always safe :D
-unsafe impl<'gc, T: GcSafe + Sync> Sync for Gc<'gc, T> {}
+pub type Gc<'gc, T> = ::zerogc::Gc<'gc, T, CollectorId>;
 
 #[cfg(not(feature = "multiple-collectors"))]
 static GLOBAL_COLLECTOR: AtomicPtr<RawSimpleCollector> = AtomicPtr::new(std::ptr::null_mut());
 
+#[repr(C)]
 pub struct SimpleCollector {
+    /// In reality, this is just an [Arc].
+    ///
+    /// It is implemented as a raw pointer around [Arc::into_raw]
     #[cfg(feature = "multiple-collectors")]
-    rc: Arc<RawSimpleCollector>
+    rc: NonNull<RawSimpleCollector>
 }
+/// We actually are thread safe ;)
+#[cfg(feature = "sync")]
+unsafe impl Send for SimpleCollector {}
+#[cfg(feature = "sync")]
+unsafe impl Sync for SimpleCollector {}
 
 impl SimpleCollector {
     pub fn create() -> Self {
@@ -373,9 +253,10 @@ impl SimpleCollector {
             std::ptr::null_mut(), marker_ptr,
             Ordering::SeqCst
         ).is_null(), "Collector already exists");
-        let raw = Box::new(
+        let mut raw = Box::new(
             unsafe { RawSimpleCollector::with_logger(logger) }
         );
+        raw.heap.allocator.collector_id = Some(CollectorId {});
         // It shall reign forever!
         let raw = Box::leak(raw);
         assert_eq!(
@@ -394,16 +275,22 @@ impl SimpleCollector {
         // We're assuming its safe to create multiple (as given by config)
         let raw = unsafe { RawSimpleCollector::with_logger(logger) };
         let mut collector = Arc::new(raw);
-        let collector_ptr = &*collector
-            as *const _
-            as *mut RawSimpleCollector;
+        let raw_ptr = unsafe { NonNull::new_unchecked(
+            Arc::as_ptr(&collector) as *mut RawSimpleCollector
+        ) };
         Arc::get_mut(&mut collector).unwrap()
-            .heap.allocator.collector_ptr = collector_ptr;
-        SimpleCollector { rc: collector }
+            .heap.allocator.collector_id = Some(CollectorId { rc: raw_ptr });
+        std::mem::forget(collector); // We own it as a raw pointer...
+        SimpleCollector { rc: raw_ptr }
     }
     #[cfg(feature = "multiple-collectors")]
     fn clone_internal(&self) -> SimpleCollector {
-        SimpleCollector { rc: self.rc.clone() }
+        let original = unsafe { Arc::from_raw(self.rc.as_ptr()) };
+        let cloned = Arc::clone(&original);
+        std::mem::forget(original);
+        SimpleCollector { rc: unsafe { NonNull::new_unchecked(
+            Arc::into_raw(cloned) as *mut _
+        ) } }
     }
     #[cfg(not(feature = "multiple-collectors"))]
     fn clone_internal(&self) -> SimpleCollector {
@@ -411,7 +298,7 @@ impl SimpleCollector {
     }
     #[cfg(feature = "multiple-collectors")]
     fn as_raw(&self) -> &RawSimpleCollector {
-        &*self.rc
+        unsafe { self.rc.as_ref() }
     }
     #[cfg(not(feature = "multiple-collectors"))]
     fn as_raw(&self) -> &RawSimpleCollector {
@@ -439,12 +326,20 @@ impl SimpleCollector {
         unsafe { SimpleCollectorContext::from_collector(&self) }
     }
 }
+impl Drop for SimpleCollector {
+    fn drop(&mut self) {
+        #[cfg(feature = "multiple-collectors")] {
+            drop(unsafe { Arc::from_raw(self.rc.as_ptr() as *const _) })
+        }
+    }
+}
 
-unsafe impl GcSystem for SimpleCollector {}
+unsafe impl GcSystem for SimpleCollector {
+    type Id = CollectorId;
+    type Context = SimpleCollectorContext;
+}
 
 unsafe impl<'gc, T: GcSafe + 'gc> GcSimpleAlloc<'gc, T> for SimpleCollectorContext {
-    type Ref = Gc<'gc, T>;
-
     #[inline]
     fn alloc(&'gc self, value: T) -> Gc<'gc, T> {
         self.collector().heap.allocator.alloc(value)
@@ -546,7 +441,7 @@ impl BigObjectLink {
 ///
 /// Most allocations should avoid locking.
 pub(crate) struct SimpleAlloc {
-    collector_ptr: *mut RawSimpleCollector,
+    collector_id: Option<CollectorId>,
     small_arenas: SmallArenaList,
     big_object_link: BigObjectLink,
     /// Whether the meaning of the mark bit is currently inverted.
@@ -558,7 +453,7 @@ pub(crate) struct SimpleAlloc {
 impl SimpleAlloc {
     fn new() -> SimpleAlloc {
         SimpleAlloc {
-            collector_ptr: std::ptr::null_mut(),
+            collector_id: None,
             allocated_size: AtomicUsize::new(0),
             small_arenas: SmallArenaList::new(),
             big_object_link: BigObjectLink::new(None),
@@ -599,7 +494,17 @@ impl SimpleAlloc {
                 value_ptr.write(value);
                 self.add_allocated_size(small_object_size::<T>());
                 Gc::from_raw(
-                    (*self.collector_ptr).unchecked_id(),
+                    match self.collector_id {
+                        Some(collector) => collector,
+                        None => {
+                            #[cfg(debug_assertions)] {
+                                unreachable!("Invalid collector id")
+                            }
+                            #[cfg(not(debug_assertions))] {
+                                std::hint::unreachable_unchecked()
+                            }
+                        }
+                    },
                     NonNull::new_unchecked(value_ptr),
                 )
             }
@@ -617,7 +522,7 @@ impl SimpleAlloc {
             prev: BigObjectLink::new(self.big_object_link.item()),
         });
         let gc = unsafe { Gc::from_raw(
-            (*self.collector_ptr).unchecked_id(),
+            self.collector_id.unwrap(),
             NonNull::new_unchecked(&mut *object.static_value),
         ) };
         {
@@ -736,17 +641,6 @@ impl RawSimpleCollector {
         }
     }
     #[inline]
-    unsafe fn unchecked_id(&self) -> CollectorId {
-        #[cfg(feature = "multiple-collectors")] {
-            CollectorId {
-                ptr: NonNull::from(self)
-            }
-        }
-        #[cfg(not(feature = "multiple-collectors"))] {
-            CollectorId {}
-        }
-    }
-    #[inline]
     fn should_collect(&self) -> bool {
         /*
          * Use relaxed ordering, just like `should_collect`
@@ -776,7 +670,7 @@ impl RawSimpleCollector {
             .collect();
         let num_roots = roots.len();
         let mut task = CollectionTask {
-            expected_collector: self.unchecked_id(),
+            expected_collector: self.heap.allocator.collector_id.unwrap(),
             roots, heap: &self.heap,
             grey_stack: if cfg!(feature = "implicit-grey-stack") {
                 Vec::new()
@@ -887,59 +781,86 @@ impl<'a> MarkVisitor<'a> {
 }
 unsafe impl GcVisitor for MarkVisitor<'_> {
     type Err = !;
-}
-impl GcVisit for MarkVisitor<'_> {
-    fn visit_gc<'gc, T: GcSafe + 'gc>(&mut self, gc: &mut Gc<'gc, T>) {
-        /*
-         * Check the collectors match. Otherwise we're mutating
-         * other people's data.
-         */
-        assert_eq!(gc.collector_id, self.expected_collector);
-        unsafe {
-            let header = GcHeader::from_value_ptr(
-                gc.as_raw_ptr(),
-                T::STATIC_TYPE
-            );
-            self.visit_raw_gc(&mut *header, |obj, visitor| {
-                let inverted_mark = visitor.inverted_mark;
-                if !T::NEEDS_TRACE {
-                    /*
-                     * We don't need to mark this grey
-                     * It has no internals that need to be traced.
-                     * We can directly move it directly to the black set
-                     */
-                    obj.update_raw_state(MarkState::Black.to_raw(inverted_mark));
-                } else {
-                    /*
-                     * We need to mark this object grey and push it onto the grey stack.
-                     * It will be processed later
-                     */
-                    (*obj).update_raw_state(MarkState::Grey.to_raw(inverted_mark));
-                    #[cfg(not(feature = "implicit-grey-stack"))] {
-                        visitor.grey_stack.push(obj as *mut GcHeader);
-                    }
-                    #[cfg(feature = "implicit-grey-stack")] {
-                        /*
-                         * The user wants an implicit grey stack using
-                         * recursion. This risks stack overflow but can
-                         * boost performance (See 9a9634d68a4933d).
-                         * On some workloads this is fine.
-                         */
-                        T::trace(
-                            &mut *((*obj).value() as *mut T),
-                            visitor
-                        );
-                        /*
-                         * Mark the object black now it's innards have been traced
-                         * NOTE: We do **not** do this with an implicit stack.
-                         */
-                        (*obj).update_raw_state(MarkState::Black.to_raw(
-                            inverted_mark
-                        ));
-                    }
-                }
-            });
+
+    #[inline]
+    unsafe fn visit_gc<'gc, T, Id>(
+        &mut self, gc: &mut ::zerogc::Gc<'gc, T, Id>
+    ) -> Result<(), Self::Err>
+        where T: GcSafe + 'gc, Id: ::zerogc::CollectorId {
+        if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
+            /*
+             * Since the `TypeId`s match, we know the generic `Id`
+             * matches our own `crate::CollectorId`.
+             * Therefore its safe to specific the generic `Id` into the
+             * `Gc` into its more specific type.
+             */
+            let gc = std::mem::transmute::<
+                &mut ::zerogc::Gc<'gc, T, Id>,
+                &mut ::zerogc::Gc<'gc, T, crate::CollectorId>
+            >(gc);
+            /*
+             * Check the collectors match. Otherwise we're mutating
+             * other people's data.
+             */
+            assert_eq!(gc.collector_id(), self.expected_collector);
+            self._visit_own_gc(gc);
+            Ok(())
+        } else {
+            // Just ignore
+            Ok(())
         }
+    }
+}
+impl MarkVisitor<'_> {
+    /// Visit a GC type whose [::zerogc::CollectorId] matches our own
+    ///
+    /// The caller should only use `GcVisitor::visit_gc()`
+    unsafe fn _visit_own_gc<'gc, T: GcSafe + 'gc>(&mut self, gc: &mut Gc<'gc, T>) {
+        // Verify this again (should be checked by caller)
+        debug_assert_eq!(gc.collector_id(), self.expected_collector);
+        let header = GcHeader::from_value_ptr(
+            gc.as_raw_ptr(),
+            T::STATIC_TYPE
+        );
+        self.visit_raw_gc(&mut *header, |obj, visitor| {
+            let inverted_mark = visitor.inverted_mark;
+            if !T::NEEDS_TRACE {
+                /*
+                 * We don't need to mark this grey
+                 * It has no internals that need to be traced.
+                 * We can directly move it directly to the black set
+                 */
+                obj.update_raw_state(MarkState::Black.to_raw(inverted_mark));
+            } else {
+                /*
+                 * We need to mark this object grey and push it onto the grey stack.
+                 * It will be processed later
+                 */
+                (*obj).update_raw_state(MarkState::Grey.to_raw(inverted_mark));
+                #[cfg(not(feature = "implicit-grey-stack"))] {
+                    visitor.grey_stack.push(obj as *mut GcHeader);
+                }
+                #[cfg(feature = "implicit-grey-stack")] {
+                    /*
+                     * The user wants an implicit grey stack using
+                     * recursion. This risks stack overflow but can
+                     * boost performance (See 9a9634d68a4933d).
+                     * On some workloads this is fine.
+                     */
+                    T::trace(
+                        &mut *((*obj).value() as *mut T),
+                        visitor
+                    );
+                    /*
+                     * Mark the object black now it's innards have been traced
+                     * NOTE: We do **not** do this with an implicit stack.
+                     */
+                    (*obj).update_raw_state(MarkState::Black.to_raw(
+                        inverted_mark
+                    ));
+                }
+            }
+        });
     }
 }
 

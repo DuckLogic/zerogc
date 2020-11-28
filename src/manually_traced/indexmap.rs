@@ -2,6 +2,7 @@ use indexmap::{IndexMap, IndexSet};
 
 use crate::prelude::*;
 use std::hash::Hash;
+use crate::CollectorId;
 
 // Maps
 
@@ -35,14 +36,14 @@ unsafe impl<K, V> GcSafe for IndexMap<K, V> where
     K: GcSafe + TraceImmutable + Eq + Hash, V: GcSafe {
     const NEEDS_DROP: bool = true; // IndexMap has internal memory
 }
-unsafe impl<'new_gc, S, K, V> GcBrand<'new_gc, S> for IndexMap<K, V>
-    where S: GcSystem, K: TraceImmutable + Eq + Hash + GcBrand<'new_gc, S>,
-          V: GcBrand<'new_gc, S>,
-          <K as GcBrand<'new_gc, S>>::Branded: TraceImmutable + Eq + Hash + Sized,
-          <V as GcBrand<'new_gc, S>>::Branded: Sized {
+unsafe impl<'new_gc, Id, K, V> GcBrand<'new_gc, Id> for IndexMap<K, V>
+    where Id: CollectorId, K: TraceImmutable + Eq + Hash + GcBrand<'new_gc, Id>,
+          V: GcBrand<'new_gc, Id>,
+          <K as GcBrand<'new_gc, Id>>::Branded: TraceImmutable + Eq + Hash + Sized,
+          <V as GcBrand<'new_gc, Id>>::Branded: Sized {
     type Branded = IndexMap<
-        <K as GcBrand<'new_gc, S>>::Branded,
-        <V as GcBrand<'new_gc, S>>::Branded
+        <K as GcBrand<'new_gc, Id>>::Branded,
+        <V as GcBrand<'new_gc, Id>>::Branded
     >;
 }
 
@@ -69,8 +70,8 @@ unsafe impl<V> Trace for IndexSet<V>
         Ok(())
     }
 }
-unsafe impl<'new_gc, S, V> GcBrand<'new_gc, S> for IndexSet<V>
-    where S: GcSystem, V: GcBrand<'new_gc, S> + TraceImmutable + Eq + Hash,
-          <V as GcBrand<'new_gc, S>>::Branded: TraceImmutable + Eq + Hash, {
-    type Branded = IndexSet<<V as GcBrand<'new_gc, S>>::Branded>;
+unsafe impl<'new_gc, Id, V> GcBrand<'new_gc, Id> for IndexSet<V>
+    where Id: CollectorId, V: GcBrand<'new_gc, Id> + TraceImmutable + Eq + Hash,
+          <V as GcBrand<'new_gc, Id>>::Branded: TraceImmutable + Eq + Hash, {
+    type Branded = IndexSet<<V as GcBrand<'new_gc, Id>>::Branded>;
 }

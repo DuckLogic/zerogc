@@ -14,6 +14,7 @@ use zerogc::prelude::*;
 use super::{SimpleCollector, RawSimpleCollector, DynTrace};
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
+use crate::CollectorId;
 
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -156,6 +157,7 @@ impl Drop for SimpleCollectorContext {
 }
 unsafe impl GcContext for SimpleCollectorContext {
     type System = SimpleCollector;
+    type Id = CollectorId;
 
     #[inline]
     unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T) {

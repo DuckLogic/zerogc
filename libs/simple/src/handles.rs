@@ -5,8 +5,8 @@ use std::ptr::NonNull;
 use std::marker::PhantomData;
 use std::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
 
-use zerogc::{Trace, GcSafe, GcBindHandle, GcBrand, GcVisitor, NullTrace, TraceImmutable};
-use crate::{DynTrace, GcType, Gc, SimpleCollectorContext, SimpleCollector, MarkVisitor, GcHeader, MarkState, WeakCollectorRef};
+use zerogc::{Trace, GcSafe, GcBrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
+use crate::{DynTrace, GcType, Gc, SimpleCollector, MarkVisitor, GcHeader, MarkState, WeakCollectorRef, CollectorId, SimpleCollectorContext, RawSimpleCollector};
 
 const INITIAL_HANDLE_CAPACITY: usize = 128;
 
@@ -370,7 +370,9 @@ impl<T: GcSafe> GcHandle<T> {
     }
 }
 unsafe impl<T: GcSafe> ::zerogc::GcHandle<T> for GcHandle<T> {
-    type Context = SimpleCollectorContext;
+    type System = SimpleCollector;
+    type Id = CollectorId;
+
     #[cfg(feature = "sync")]
     fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R {
         self.collector.ensure_valid(|collector| unsafe {
@@ -396,12 +398,10 @@ unsafe impl<T: GcSafe> ::zerogc::GcHandle<T> for GcHandle<T> {
     }
 }
 unsafe impl<'new_gc, T> GcBindHandle<'new_gc, T> for GcHandle<T>
-    where T: GcSafe, T: GcBrand<'new_gc, SimpleCollector>,
+    where T: GcSafe, T: GcBrand<'new_gc, CollectorId>,
         T::Branded: GcSafe {
-    type System = SimpleCollector;
-    type Bound = Gc<'new_gc, T::Branded>;
     #[inline]
-    fn bind_to(&self, _context: &'new_gc Self::Context) -> Self::Bound {
+    fn bind_to(&self, context: &'new_gc SimpleCollectorContext) -> Gc<'new_gc, T::Branded> {
         /*
          * We can safely assume the object will
          * be as valid as long as the context.
@@ -417,6 +417,11 @@ unsafe impl<'new_gc, T> GcBindHandle<'new_gc, T> for GcHandle<T>
          */
         unsafe {
             let collector = self.collector.assume_valid();
+            assert_eq!(
+                collector.as_ref() as *const RawSimpleCollector,
+                context.collector() as *const RawSimpleCollector,
+                "Collectors mismatch"
+            );
             let inner = self.inner.as_ref();
             let value = inner.value.load(Ordering::Acquire)
                 as *mut T as *mut T::Branded;
@@ -530,3 +535,37 @@ unsafe impl<T: GcSafe + Sync> Send for GcHandle<T> {}
 ///
 /// The collector itself is always safe
 unsafe impl<T: GcSafe + Sync> Sync for GcHandle<T> {}
+
+/// We support handles
+unsafe impl<'gc, T> GcHandleSystem<'gc, T> for SimpleCollector
+    where T: GcSafe + 'gc,
+          T: GcBrand<'static, CollectorId>,
+          T::Branded: GcSafe {
+    type Handle = GcHandle<T::Branded>;
+    #[inline]
+    fn create_handle(gc: Gc<'gc, T>) -> Self::Handle {
+        use crate::StaticGcType;
+        unsafe {
+            let collector = gc.collector_id();
+            let value = gc.as_raw_ptr();
+            let raw = collector.as_ref().handle_list
+                .alloc_raw_handle(value as *mut ());
+            /*
+             * WARN: Undefined Behavior
+             * if we don't finish initializing
+             * the handle!!!
+             *
+             * TODO: Encapsulate
+             */
+            raw.type_info.store(
+                <T as StaticGcType>::STATIC_TYPE
+                    as *const GcType
+                    as *mut GcType,
+                Ordering::Release
+            );
+            raw.refcnt.store(1, Ordering::Release);
+            let weak_collector = collector.weak_ref();
+            GcHandle::new(NonNull::from(raw), weak_collector)
+        }
+    }
+}

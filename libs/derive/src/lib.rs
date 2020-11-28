@@ -224,9 +224,9 @@ fn impl_extras(target: &DeriveInput) -> Result<TokenStream, Error> {
                     let barrier = quote_spanned!(field.span() => ::zerogc::GcDirectBarrier::write_barrier(&value, &self, offset));
                     extra_items.push(quote! {
                         #[inline] // TODO: Implement `GcDirectBarrier` ourselves
-                        #mutator_vis fn #mutator_name<OwningRef>(self: OwningRef, value: #value_ref_type)
-                            where OwningRef: ::zerogc::GcRef<'gc, Self>,
-                                   #value_ref_type: ::zerogc::GcDirectBarrier<'gc, OwningRef> {
+                        #mutator_vis fn #mutator_name<Id>(self: ::zerogc::Gc<'gc, Self, Id>, value: #value_ref_type)
+                            where Id: ::zerogc::CollectorId,
+                                   #value_ref_type: ::zerogc::GcDirectBarrier<'gc, ::zerogc::Gc<'gc, Self, Id>> {
                             unsafe {
                                 let target_ptr = #field_as_ptr;
                                 let offset = target_ptr as usize - self.as_raw_ptr() as usize;
@@ -306,7 +306,7 @@ fn impl_brand(target: &DeriveInput) -> Result<TokenStream, Error> {
     }
     let mut impl_generics = generics.clone();
     impl_generics.params.push(GenericParam::Lifetime(parse_quote!('new_gc)));
-    impl_generics.params.push(GenericParam::Type(parse_quote!(S: ::zerogc::GcSystem)));
+    impl_generics.params.push(GenericParam::Type(parse_quote!(S: ::zerogc::CollectorId)));
     let (_, ty_generics, where_clause) = generics.split_for_impl();
     let (impl_generics, _, _) = impl_generics.split_for_impl();
     Ok(quote! {
