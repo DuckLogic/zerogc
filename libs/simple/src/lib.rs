@@ -29,46 +29,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 #[cfg(not(feature = "multiple-collectors"))]
 use std::sync::atomic::AtomicPtr;
-#[cfg(not(feature = "sync"))]
-use std::cell::Cell;
-
 
 use slog::{Logger, FnValue, o, debug};
 use crate::context::{RawContext};
-use crate::utils::ThreadId;
+use crate::utils::{ThreadId, AtomicCell};
 
 pub use crate::context::SimpleCollectorContext;
 use handles::GcHandleList;
-
-#[cfg(feature = "sync")]
-type AtomicCell<T> = ::crossbeam::atomic::AtomicCell<T>;
-/// Fallback `AtomicCell` implementation when we actually
-/// don't care about thread safety
-#[cfg(not(feature = "sync"))]
-#[derive(Default)]
-struct AtomicCell<T>(Cell<T>);
-#[cfg(not(feature = "sync"))]
-impl<T: Copy> AtomicCell<T> {
-    const fn new(value: T) -> Self {
-        AtomicCell(Cell::new(value))
-    }
-    fn store(&self, value: T) {
-        self.0.set(value)
-    }
-    fn load(&self) -> T {
-        self.0.get()
-    }
-    fn compare_exchange(&self, expected: T, updated: T) -> Result<T, T>
-        where T: PartialEq {
-        let existing = self.0.get();
-        if existing == expected {
-            self.0.set(updated);
-            Ok(existing)
-        } else {
-            Err(existing)
-        }
-    }
-}
 
 mod handles;
 mod context;

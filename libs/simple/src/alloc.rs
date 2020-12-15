@@ -1,12 +1,20 @@
 #![allow(clippy::vec_box)] // We must Box<Chunk> for a stable address
-use once_cell::sync::OnceCell;
 use std::alloc::Layout;
-use crate::{GcHeader};
 use std::mem;
 use std::ptr::NonNull;
 use std::mem::MaybeUninit;
+
+#[cfg(feature = "sync")]
+use once_cell::sync::OnceCell;
+#[cfg(not(feature = "sync"))]
+use once_cell::unsync::OnceCell;
+#[cfg(feature = "sync")]
 use parking_lot::Mutex;
-use crossbeam::atomic::AtomicCell;
+#[cfg(not(feature = "sync"))]
+use std::cell::RefCell;
+
+use crate::{GcHeader};
+use crate::utils::AtomicCell;
 
 /// The minimum size of supported memory (in words)
 ///
@@ -136,7 +144,13 @@ struct ArenaState {
     /// This is required for thread safety.
     /// One thread could still be seeing an old chunk's location
     /// after it's been moved.
+    #[cfg(feature = "sync")]
     chunks: Mutex<Vec<Box<Chunk>>>,
+    /// List of chunks, not thread-safe
+    ///
+    /// We still box it however, as an extra check of safety.
+    #[cfg(not(feature = "sync"))]
+    chunks: RefCell<Vec<Box<Chunk>>>,
     /// Lockless access to the current chunk
     ///
     /// The pointers wont be invalidated,
@@ -147,14 +161,27 @@ impl ArenaState {
     fn new(chunks: Vec<Box<Chunk>>) -> Self {
         assert!(!chunks.is_empty());
         let current_chunk = NonNull::from(&**chunks.last().unwrap());
+        let chunk_lock;
+        #[cfg(feature = "sync")] {
+            chunk_lock = Mutex::new(chunks);
+        }
+        #[cfg(not(feature = "sync"))] {
+            chunk_lock = RefCell::new(chunks);
+        }
         ArenaState {
-            chunks: Mutex::new(chunks),
+            chunks: chunk_lock,
             current_chunk: AtomicCell::new(current_chunk)
         }
     }
     #[inline]
+    #[cfg(feature = "sync")]
     fn lock_chunks(&self) -> ::parking_lot::MutexGuard<Vec<Box<Chunk>>> {
         self.chunks.lock()
+    }
+    #[inline]
+    #[cfg(not(feature = "sync"))]
+    fn lock_chunks(&self) -> ::std::cell::RefMut<Vec<Box<Chunk>>> {
+        self.chunks.borrow_mut()
     }
     #[inline]
     fn current_chunk(&self) -> NonNull<Chunk> {

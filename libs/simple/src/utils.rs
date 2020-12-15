@@ -1,5 +1,36 @@
-use std::fmt::{Debug, Formatter};
-use std::fmt;
+use std::fmt::{self, Debug, Formatter};
+#[cfg(not(feature = "sync"))]
+use std::cell::Cell;
+
+#[cfg(feature = "sync")]
+pub type AtomicCell<T> = ::crossbeam_utils::atomic::AtomicCell<T>;
+/// Fallback `AtomicCell` implementation when we actually
+/// don't care about thread safety
+#[cfg(not(feature = "sync"))]
+#[derive(Default)]
+pub struct AtomicCell<T>(Cell<T>);
+#[cfg(not(feature = "sync"))]
+impl<T: Copy> AtomicCell<T> {
+    pub const fn new(value: T) -> Self {
+        AtomicCell(Cell::new(value))
+    }
+    pub fn store(&self, value: T) {
+        self.0.set(value)
+    }
+    pub fn load(&self) -> T {
+        self.0.get()
+    }
+    pub fn compare_exchange(&self, expected: T, updated: T) -> Result<T, T>
+        where T: PartialEq {
+        let existing = self.0.get();
+        if existing == expected {
+            self.0.set(updated);
+            Ok(existing)
+        } else {
+            Err(existing)
+        }
+    }
+}
 
 #[derive(Clone)]
 pub enum ThreadId {
