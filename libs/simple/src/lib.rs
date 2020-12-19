@@ -38,6 +38,7 @@ use zerogc_context::utils::{ThreadId, AtomicCell, MemorySize};
 use crate::alloc::{SmallArenaList, small_object_size};
 
 use zerogc_context::collector::{RawSimpleAlloc};
+use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
@@ -64,7 +65,7 @@ mod alloc {
 }
 
 pub type SimpleCollector = ::zerogc_context::CollectorRef<RawSimpleCollector>;
-pub type SimpleCollectorContext = ::zerogc_context::SimpleCollectorContext<RawSimpleCollector>;
+pub type SimpleCollectorContext = ::zerogc_context::CollectorContext<RawSimpleCollector>;
 pub type CollectorId = ::zerogc_context::CollectorId<RawSimpleCollector>;
 pub type Gc<'gc, T> = ::zerogc::Gc<'gc, T, CollectorId>;
 
@@ -85,6 +86,42 @@ pub unsafe trait DynTrace {
 unsafe impl<T: Trace + ?Sized> DynTrace for T {
     fn trace(&mut self, visitor: &mut MarkVisitor) {
         let Ok(()) = self.visit(visitor);
+    }
+}
+
+unsafe impl RawHandleImpl for RawSimpleCollector {
+    type TypeInfo = GcType;
+
+    #[inline]
+    fn type_info_of<T: GcSafe>() -> &'static Self::TypeInfo {
+        &<T as StaticGcType>::STATIC_TYPE
+    }
+
+    #[inline]
+    fn handle_list(&self) -> &GcHandleList<Self> {
+        &self.handle_list
+    }
+}
+
+/// A wrapper for [GcHandleList] that implements [DynTrace]
+#[repr(transparent)]
+struct GcHandleListWrapper(GcHandleList<RawSimpleCollector>);
+unsafe impl DynTrace for GcHandleListWrapper {
+    fn trace(&mut self, visitor: &mut MarkVisitor) {
+        unsafe {
+            let Ok(()) = self.0.trace::<_, !>(|raw_ptr, type_info| {
+                let header = &mut *GcHeader::from_value_ptr(raw_ptr, type_info);
+                // Mark grey
+                header.update_raw_state(MarkState::Grey.
+                    to_raw(visitor.inverted_mark));
+                // Visit innards
+                (type_info.trace_func)(header.value(), visitor);
+                // Mark black
+                header.update_raw_state(MarkState::Black.
+                    to_raw(visitor.inverted_mark));
+                Ok(())
+            });
+        }
     }
 }
 
@@ -362,6 +399,8 @@ pub struct RawSimpleCollector {
     logger: Logger,
     heap: GcHeap,
     manager: zerogc_context::CollectionManager<Self>,
+    /// Tracks object handles
+    handle_list: GcHandleList<Self>,
 }
 
 unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector {
@@ -474,6 +513,7 @@ impl RawSimpleCollector {
             logger,
             manager: CollectionManager::new(),
             heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD),
+            handle_list: GcHandleList::new(),
         }
     }
     #[cold]
@@ -487,6 +527,13 @@ impl RawSimpleCollector {
                 (**ctx).assume_valid_shadow_stack()
                     .reverse_iter().map(NonNull::as_ptr)
             })
+            .chain(std::iter::once(&self.handle_list
+                // Cast to wrapper type
+                as *const GcHandleList<Self> as *const GcHandleListWrapper
+                // Make into virtual pointer
+                as *const dyn DynTrace
+                as *mut dyn DynTrace
+            ))
             .collect();
         let num_roots = roots.len();
         let mut task = CollectionTask {
@@ -677,7 +724,8 @@ impl MarkVisitor<'_> {
     }
 }
 
-struct GcType {
+#[doc(hidden)] // NOTE: Needed for GcHandleImpl
+pub struct GcType {
     value_size: usize,
     value_offset: usize,
     trace_func: unsafe fn(*mut c_void, &mut MarkVisitor),

@@ -1,5 +1,6 @@
 #![feature(
     negative_impls, // !Send is much cleaner than `PhantomData<Rc>`
+    untagged_unions, // I want to avoid ManuallyDrop in unions
 )]
 //! The implementation of [::zerogc::CollectorContext] that is
 //! shared among both thread-safe and thread-unsafe code.
@@ -19,6 +20,7 @@ pub use self::nosync::*;
 
 pub mod utils;
 pub mod collector;
+pub mod handle;
 
 use crate::collector::{RawCollectorImpl};
 use crate::sync::SyncCollectorImpl;
@@ -93,7 +95,7 @@ impl ContextState {
  * inside of RawContext that is not thread-safe.
  */
 // TODO: Rename to remove 'Simple' from name
-pub struct SimpleCollectorContext<C: RawCollectorImpl> {
+pub struct CollectorContext<C: RawCollectorImpl> {
     raw: *mut RawContext<C>,
     /// Whether we are the root context
     ///
@@ -101,10 +103,10 @@ pub struct SimpleCollectorContext<C: RawCollectorImpl> {
     /// and is responsible for dropping it
     root: bool
 }
-impl<C: RawCollectorImpl> SimpleCollectorContext<C> {
+impl<C: RawCollectorImpl> CollectorContext<C> {
     #[cfg(not(feature = "sync"))]
     pub(crate) unsafe fn from_collector(collector: &CollectorRef<C>) -> Self {
-        SimpleCollectorContext {
+        CollectorContext {
             raw: Box::into_raw(ManuallyDrop::into_inner(
                 RawContext::from_collector(collector.clone_internal())
             )),
@@ -113,7 +115,7 @@ impl<C: RawCollectorImpl> SimpleCollectorContext<C> {
     }
     #[cfg(feature = "sync")]
     pub(crate) unsafe fn register_root(collector: &CollectorRef<C>) -> Self {
-        SimpleCollectorContext {
+        CollectorContext {
             raw: Box::into_raw(ManuallyDrop::into_inner(
                 RawContext::register_new(&collector)
             )),
@@ -149,7 +151,7 @@ impl<C: RawCollectorImpl> SimpleCollectorContext<C> {
         })
     }
 }
-impl<C: RawCollectorImpl> Drop for SimpleCollectorContext<C> {
+impl<C: RawCollectorImpl> Drop for CollectorContext<C> {
     #[inline]
     fn drop(&mut self) {
         if self.root {
@@ -159,7 +161,7 @@ impl<C: RawCollectorImpl> Drop for SimpleCollectorContext<C> {
         }
     }
 }
-unsafe impl<C: RawCollectorImpl> GcContext for SimpleCollectorContext<C> {
+unsafe impl<C: RawCollectorImpl> GcContext for CollectorContext<C> {
     type System = CollectorRef<C>;
     type Id = CollectorId<C>;
 
@@ -185,7 +187,7 @@ unsafe impl<C: RawCollectorImpl> GcContext for SimpleCollectorContext<C> {
         where T: Trace, F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R {
         debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
         self.with_shadow_stack(value, || {
-            let mut sub_context = ManuallyDrop::new(SimpleCollectorContext {
+            let mut sub_context = ManuallyDrop::new(CollectorContext {
                 /*
                  * safe to copy because we wont drop it
                  * Lifetime is guarenteed to be restricted to
@@ -211,7 +213,7 @@ unsafe impl<C: RawCollectorImpl> GcContext for SimpleCollectorContext<C> {
 /// implementing `Send` would allow another thread to obtain a
 /// reference to our internal `&RefCell`. Further mutation/access
 /// would be undefined.....
-impl<C: RawCollectorImpl> !Send for SimpleCollectorContext<C> {}
+impl<C: RawCollectorImpl> !Send for CollectorContext<C> {}
 
 //
 // Root tracking

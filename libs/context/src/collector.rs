@@ -6,9 +6,9 @@ use std::fmt::{self, Debug, Formatter};
 
 use slog::{Logger, o};
 
-use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc, GcBrand, GcHandle, GcHandleSystem};
+use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc};
 
-use crate::{SimpleCollectorContext, CollectionManager};
+use crate::{CollectorContext, CollectionManager};
 
 /// A specific implementation of a collector
 pub unsafe trait RawCollectorImpl: 'static + Sized {
@@ -205,9 +205,9 @@ impl<C: RawCollectorImpl> WeakCollectorRef<C> {
 }
 
 pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
-    fn alloc<'gc, T: GcSafe + 'gc>(context: &'gc SimpleCollectorContext<Self>, value: T) -> Gc<'gc, T, CollectorId<Self>>;
+    fn alloc<'gc, T: GcSafe + 'gc>(context: &'gc CollectorContext<Self>, value: T) -> Gc<'gc, T, CollectorId<Self>>;
 }
-unsafe impl<'gc, T, C> GcSimpleAlloc<'gc, T> for SimpleCollectorContext<C>
+unsafe impl<'gc, T, C> GcSimpleAlloc<'gc, T> for CollectorContext<C>
     where T: GcSafe + 'gc, C: RawSimpleAlloc {
     #[inline]
     fn alloc(&'gc self, value: T) -> Gc<'gc, T, Self::Id> {
@@ -282,18 +282,18 @@ impl<C: RawCollectorImpl> CollectorRef<C> {
     /// Warning: Only one collector should be created per thread.
     /// Doing otherwise can cause deadlocks/panics.
     #[cfg(feature = "sync")]
-    pub fn create_context(&self) -> SimpleCollectorContext<C> {
-        unsafe { SimpleCollectorContext::register_root(&self) }
+    pub fn create_context(&self) -> CollectorContext<C> {
+        unsafe { CollectorContext::register_root(&self) }
     }
     /// Convert this collector into a unique context
     ///
     /// The single-threaded implementation only allows a single context,
     /// so this method is nessicarry to support it.
-    pub fn into_context(self) -> SimpleCollectorContext<C> {
+    pub fn into_context(self) -> CollectorContext<C> {
         #[cfg(feature = "sync")]
             { self.create_context() }
         #[cfg(not(feature = "sync"))]
-            unsafe { SimpleCollectorContext::from_collector(&self) }
+            unsafe { CollectorContext::from_collector(&self) }
     }
 }
 impl<C: RawCollectorImpl> Drop for CollectorRef<C> {
@@ -306,32 +306,5 @@ impl<C: RawCollectorImpl> Drop for CollectorRef<C> {
 
 unsafe impl<C: RawCollectorImpl> GcSystem for CollectorRef<C> {
     type Id = CollectorId<C>;
-    type Context = SimpleCollectorContext<C>;
-}
-
-unsafe impl<'gc, T, C> GcHandleSystem<'gc, T> for CollectorRef<C>
-    where C: RawHandleImpl<'gc, T>,
-          T: GcSafe + 'gc,
-          T: GcBrand<'static, CollectorId<C>>,
-          T::Branded: GcSafe {
-    type Handle = C::Handle;
-
-    #[inline]
-    fn create_handle(gc: Gc<'gc, T, Self::Id>) -> Self::Handle {
-        C::create_handle(gc)
-    }
-}
-
-pub unsafe trait RawHandleImpl<'gc, T>: RawCollectorImpl
-    where T: GcSafe + 'gc,
-          T: GcBrand<'static, CollectorId<Self>>,
-          <T as GcBrand<'static, CollectorId<Self>>>::Branded: GcSafe {
-    /// The type of handles to the object `T`.
-    type Handle: GcHandle<<T as GcBrand<'static, CollectorId<Self>>>::Branded, System=CollectorRef<Self>>;
-
-    /// Create a handle to the specified GC pointer,
-    /// which can be used without a context
-    ///
-    /// The system is implicit in the [Gc]
-    fn create_handle(gc: Gc<'gc, T, CollectorId<Self>>) -> Self::Handle;
+    type Context = CollectorContext<C>;
 }
