@@ -1,21 +1,29 @@
+#![feature(
+    negative_impls, // !Send is much cleaner than `PhantomData<Rc>`
+)]
 //! The implementation of [::zerogc::CollectorContext] that is
 //! shared among both thread-safe and thread-unsafe code.
+use std::mem::ManuallyDrop;
+use std::fmt::{self, Debug, Formatter};
+
+use zerogc::prelude::*;
 
 #[cfg(feature = "sync")]
 mod sync;
 #[cfg(not(feature = "sync"))]
-mod simple;
+mod nosync;
 #[cfg(feature = "sync")]
 pub use self::sync::*;
 #[cfg(not(feature = "sync"))]
-pub use self::simple::*;
+pub use self::nosync::*;
 
-use zerogc::prelude::*;
-use super::{SimpleCollector, RawSimpleCollector, DynTrace};
-use std::mem::ManuallyDrop;
-use std::ptr::NonNull;
-use crate::CollectorId;
+pub mod utils;
+pub mod collector;
 
+use crate::collector::{RawCollectorImpl};
+use crate::sync::SyncCollectorImpl;
+
+pub use crate::collector::{WeakCollectorRef, CollectorRef, CollectorId};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ContextState {
@@ -84,17 +92,18 @@ impl ContextState {
  * We still couldn't be Send, since we use interior mutablity
  * inside of RawContext that is not thread-safe.
  */
-pub struct SimpleCollectorContext {
-    raw: *mut RawContext,
+// TODO: Rename to remove 'Simple' from name
+pub struct SimpleCollectorContext<C: RawCollectorImpl> {
+    raw: *mut RawContext<C>,
     /// Whether we are the root context
     ///
     /// Only the root actually owns the `Arc`
     /// and is responsible for dropping it
     root: bool
 }
-impl SimpleCollectorContext {
+impl<C: RawCollectorImpl> SimpleCollectorContext<C> {
     #[cfg(not(feature = "sync"))]
-    pub(crate) unsafe fn from_collector(collector: &SimpleCollector) -> Self {
+    pub(crate) unsafe fn from_collector(collector: &CollectorRef<C>) -> Self {
         SimpleCollectorContext {
             raw: Box::into_raw(ManuallyDrop::into_inner(
                 RawContext::from_collector(collector.clone_internal())
@@ -103,7 +112,7 @@ impl SimpleCollectorContext {
         }
     }
     #[cfg(feature = "sync")]
-    pub(crate) unsafe fn register_root(collector: &SimpleCollector) -> Self {
+    pub(crate) unsafe fn register_root(collector: &CollectorRef<C>) -> Self {
         SimpleCollectorContext {
             raw: Box::into_raw(ManuallyDrop::into_inner(
                 RawContext::register_new(&collector)
@@ -112,7 +121,7 @@ impl SimpleCollectorContext {
         }
     }
     #[inline]
-    pub(crate) fn collector(&self) -> &RawSimpleCollector {
+    pub fn collector(&self) -> &C {
         unsafe { &(*self.raw).collector.as_raw() }
     }
     #[inline(always)]
@@ -121,12 +130,7 @@ impl SimpleCollectorContext {
     ) -> R {
         let old_link = (*(*self.raw).shadow_stack.get()).last;
         let new_link = ShadowStackLink {
-            element: NonNull::new_unchecked(
-                std::mem::transmute::<
-                    *mut dyn DynTrace,
-                    *mut (dyn DynTrace + 'static)
-                >(value as *mut dyn DynTrace)
-            ),
+            element: C::create_dyn_pointer(value),
             prev: old_link
         };
         (*(*self.raw).shadow_stack.get()).last = &new_link;
@@ -145,7 +149,7 @@ impl SimpleCollectorContext {
         })
     }
 }
-impl Drop for SimpleCollectorContext {
+impl<C: RawCollectorImpl> Drop for SimpleCollectorContext<C> {
     #[inline]
     fn drop(&mut self) {
         if self.root {
@@ -155,9 +159,9 @@ impl Drop for SimpleCollectorContext {
         }
     }
 }
-unsafe impl GcContext for SimpleCollectorContext {
-    type System = SimpleCollector;
-    type Id = CollectorId;
+unsafe impl<C: RawCollectorImpl> GcContext for SimpleCollectorContext<C> {
+    type System = CollectorRef<C>;
+    type Id = CollectorId<C>;
 
     #[inline]
     unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T) {
@@ -169,11 +173,11 @@ unsafe impl GcContext for SimpleCollectorContext {
     }
 
     unsafe fn freeze(&mut self) {
-        (*self.raw).collector.as_raw().manager.freeze_context(&*self.raw);
+        (*self.raw).collector.as_raw().manager().freeze_context(&*self.raw);
     }
 
     unsafe fn unfreeze(&mut self) {
-        (*self.raw).collector.as_raw().manager.unfreeze_context(&*self.raw);
+        (*self.raw).collector.as_raw().manager().unfreeze_context(&*self.raw);
     }
 
     #[inline]
@@ -207,7 +211,7 @@ unsafe impl GcContext for SimpleCollectorContext {
 /// implementing `Send` would allow another thread to obtain a
 /// reference to our internal `&RefCell`. Further mutation/access
 /// would be undefined.....
-impl !Send for SimpleCollectorContext {}
+impl<C: RawCollectorImpl> !Send for SimpleCollectorContext<C> {}
 
 //
 // Root tracking
@@ -215,30 +219,37 @@ impl !Send for SimpleCollectorContext {}
 
 #[repr(C)]
 #[derive(Debug)]
-pub(crate) struct ShadowStackLink {
-    pub element: NonNull<dyn DynTrace>,
+pub(crate) struct ShadowStackLink<T> {
+    pub element: T,
     /// The previous link in the chain,
     /// or NULL if there isn't any
-    pub prev: *const ShadowStackLink
+    pub prev: *const ShadowStackLink<T>
 }
 
-#[derive(Clone, Debug)]
-pub struct ShadowStack {
+impl<C: RawCollectorImpl> Debug for ShadowStack<C> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShadowStack")
+            .field("last", &format_args!("{:p}", self.last))
+            .finish()
+    }
+}
+#[derive(Clone)]
+pub struct ShadowStack<C: RawCollectorImpl> {
     /// The last element in the shadow stack,
     /// or NULL if it's empty
-    pub(crate) last: *const ShadowStackLink
+    pub(crate) last: *const ShadowStackLink<C::GcDynPointer>
 }
-impl ShadowStack {
-    unsafe fn as_vec(&self) -> Vec<*mut dyn DynTrace> {
+impl<C: RawCollectorImpl> ShadowStack<C> {
+    unsafe fn as_vec(&self) -> Vec<C::GcDynPointer> {
         let mut result: Vec<_> = self.reverse_iter().collect();
         result.reverse();
         result
     }
     #[inline]
-    pub(crate) unsafe fn reverse_iter(&self) -> impl Iterator<Item=*mut dyn DynTrace> + '_ {
+    pub unsafe fn reverse_iter(&self) -> impl Iterator<Item=C::GcDynPointer> + '_ {
         std::iter::successors(
             self.last.as_ref(),
             |link| link.prev.as_ref()
-        ).map(|link| link.element.as_ptr())
+        ).map(|link| link.element)
     }
 }

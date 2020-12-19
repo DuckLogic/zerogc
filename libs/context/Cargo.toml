@@ -1,0 +1,39 @@
+[package]
+name = "zerogc-context"
+description = "Handles the context of a zerogc collector."
+version = "0.1.1"
+authors = ["Techcable <Techcable@techcable.net>"]
+repository = "https://github.com/DuckLogic/zerogc"
+readme = "../../README.md"
+license = "MIT"
+edition = "2018"
+
+[dependencies]
+zerogc = { path = "../..", version = "0.1.0" }
+once_cell = { version = "1.4.0", optional = true }
+# Concurrency
+parking_lot = { version = "0.11", features = ["nightly"], optional = true }
+crossbeam-utils = { version = "0.8", optional = true }
+# Logging
+slog = "2.7"
+
+[features]
+default = [
+    "sync", # Thread-safety by default
+    "multiple-collectors", # By default, allow multiple collectors
+]
+# Allow multiple threads to access the garbage collector
+# by creating a seperate context for each.
+#
+# This can increase overhead by requiring communication between threads.
+sync = [
+    "parking_lot",
+    "crossbeam-utils"
+]
+# Allow multiple collectors to exist at once
+# Otherwise, there's a single global collector (useful in VMs)
+#
+# Even if multiple collectors are enabled, pointers from
+# one collector can't be safely mixed with other collectors.
+multiple-collectors = []
+

@@ -7,7 +7,7 @@ use std::cell::{Cell, UnsafeCell, RefCell};
 
 use slog::{Logger, FnValue, trace, o};
 
-use crate::{RawSimpleCollector, SimpleCollector};
+use crate::{RawSimpleCollector, CollectorRef};
 use std::mem::ManuallyDrop;
 use std::fmt::{self, Debug, Formatter};
 use crate::context::{ShadowStack, ContextState};
@@ -66,7 +66,7 @@ pub struct RawContext {
     ///
     /// This is still an Arc for easier use alongside the
     /// thread-safe implementation
-    pub(crate) collector: SimpleCollector,
+    pub(crate) collector: CollectorRef,
     // NOTE: We are Send, not Sync
     pub(super) shadow_stack: UnsafeCell<ShadowStack>,
     // TODO: Does the collector access this async?
@@ -90,7 +90,7 @@ impl Debug for RawContext {
     }
 }
 impl RawContext {
-    pub(crate) unsafe fn from_collector(collector: SimpleCollector) -> ManuallyDrop<Box<Self>> {
+    pub(crate) unsafe fn from_collector(collector: CollectorRef) -> ManuallyDrop<Box<Self>> {
         assert!(
             !collector.as_raw().manager.has_existing_context
                 .replace(true),

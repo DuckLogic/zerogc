@@ -17,29 +17,28 @@
      */
     clippy::vtable_address_comparisons,
 )]
-use zerogc::{GcSystem, GcSafe, Trace, GcVisitor, GcSimpleAlloc};
 use std::alloc::Layout;
 use std::ptr::NonNull;
 use std::os::raw::c_void;
 use std::mem::{transmute, ManuallyDrop};
-use crate::alloc::{SmallArenaList, small_object_size};
-use std::ops::Deref;
 #[cfg(feature = "multiple-collectors")]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 #[cfg(not(feature = "multiple-collectors"))]
 use std::sync::atomic::AtomicPtr;
+use std::any::TypeId;
 
-use slog::{Logger, FnValue, o, debug};
-use crate::context::{RawContext};
-use crate::utils::{ThreadId, AtomicCell};
+use slog::{Logger, FnValue, debug};
 
-pub use crate::context::SimpleCollectorContext;
-use handles::GcHandleList;
+use zerogc::{GcSafe, Trace, GcVisitor};
 
-mod handles;
-mod context;
-mod utils;
+use zerogc_context::{RawContext, CollectionManager};
+use zerogc_context::utils::{ThreadId, AtomicCell, MemorySize};
+
+use crate::alloc::{SmallArenaList, small_object_size};
+
+use zerogc_context::collector::{RawSimpleAlloc};
+
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
 #[cfg(not(feature = "small-object-arenas"))]
@@ -64,256 +63,23 @@ mod alloc {
     }
 }
 
-pub use handles::GcHandle;
-use std::any::TypeId;
-
-/// Uniquely identifies the collector in case there are
-/// multiple collectors.
-///
-/// If there are multiple collectors `cfg!(feature="multiple-collectors")`,
-/// we need to use a pointer to tell them apart.
-/// Otherwise, this is a zero-sized structure.
-///
-/// As long as our memory is valid,
-/// it implies this pointer is too..
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[repr(C)]
-pub struct CollectorId {
-    #[cfg(feature = "multiple-collectors")]
-    /// This is in essence a borrowed reference to
-    /// the collector. SimpleCollector is implemented as a
-    /// raw pointer via [Arc::into_raw]
-    ///
-    /// We don't know whether the underlying memory will be valid.
-    rc: NonNull<RawSimpleCollector>,
-}
-impl CollectorId {
-    #[cfg(feature = "multiple-collectors")]
-    #[inline]
-    unsafe fn as_ref(&self) -> &RawSimpleCollector {
-        self.rc.as_ref()
-    }
-    #[cfg(not(feature = "multiple-collectors"))]
-    #[inline]
-    unsafe fn as_ref(&self) -> &RawSimpleCollector {
-        &*GLOBAL_COLLECTOR.load(Ordering::Acquire)
-    }
-    #[cfg(feature = "multiple-collectors")]
-    unsafe fn weak_ref(&self) -> WeakCollectorRef {
-        let arc = Arc::from_raw(self.rc.as_ptr());
-        let weak = Arc::downgrade(&arc);
-        std::mem::forget(arc);
-        WeakCollectorRef { weak }
-    }
-    #[cfg(not(feature = "multiple-collectors"))]
-    unsafe fn weak_ref(&self) -> WeakCollectorRef {
-        WeakCollectorRef { }
-    }
-}
-unsafe impl ::zerogc::CollectorId for CollectorId {
-    type System = SimpleCollector;
-
-    #[inline(always)]
-    unsafe fn gc_write_barrier<'gc, T, V>(
-        _owner: &Gc<'gc, T>,
-        _value: &Gc<'gc, V>,
-        _field_offset: usize
-    ) where T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {
-        // Simple GC doesn't need write barriers
-    }
-
-    #[inline]
-    unsafe fn assume_valid_system(&self) -> &'_ Self::System {
-        // TODO: Make the API nicer? (avoid borrowing and indirection)
-        #[cfg(feature = "multiple-collectors")] {
-            assert_eq!(
-                std::mem::size_of::<Self>(),
-                std::mem::size_of::<SimpleCollector>()
-            );
-            &*(self as *const CollectorId as *const SimpleCollector)
-        }
-        #[cfg(not(feature = "multiple-collectors"))] {
-            // NOTE: We live forever
-            static COLLECTOR: SimpleCollector = SimpleCollector { };
-            &COLLECTOR
-        }
-    }
-}
-
-struct WeakCollectorRef {
-    #[cfg(feature = "multiple-collectors")]
-    weak: std::sync::Weak<RawSimpleCollector>,
-}
-impl WeakCollectorRef {
-    #[cfg(feature = "multiple-collectors")]
-    pub unsafe fn assume_valid(&self) -> CollectorId {
-        debug_assert!(
-            self.weak.upgrade().is_some(),
-            "Dead collector"
-        );
-        CollectorId {
-            rc: NonNull::new_unchecked(self.weak.as_ptr() as *mut _)
-        }
-    }
-    #[cfg(not(feature = "multiple-collectors"))]
-    pub unsafe fn assume_valid(&self) -> CollectorId {
-        CollectorId {}
-    }
-    pub fn ensure_valid<R>(&self, func: impl FnOnce(CollectorId) -> R) -> R {
-        self.try_ensure_valid(|id| match id{
-            Some(id) => func(id),
-            None => panic!("Dead collector")
-        })
-    }
-    #[cfg(feature = "multiple-collectors")]
-    pub fn try_ensure_valid<R>(&self, func: impl FnOnce(Option<CollectorId>) -> R) -> R{
-        let rc = self.weak.upgrade();
-        func(match rc {
-            Some(_) => {
-                Some(unsafe { self.assume_valid() })
-            },
-            None => None
-        })
-    }
-    #[cfg(not(feature = "multiple-collectors"))]
-    pub fn try_ensure_valid<R>(&self, func: impl FnOnce(Option<CollectorId>) -> R) -> R {
-        // global collector is always valid
-        func(Some(CollectorId {}))
-    }
-}
-
+pub type SimpleCollector = ::zerogc_context::CollectorRef<RawSimpleCollector>;
+pub type SimpleCollectorContext = ::zerogc_context::SimpleCollectorContext<RawSimpleCollector>;
+pub type CollectorId = ::zerogc_context::CollectorId<RawSimpleCollector>;
 pub type Gc<'gc, T> = ::zerogc::Gc<'gc, T, CollectorId>;
 
 #[cfg(not(feature = "multiple-collectors"))]
 static GLOBAL_COLLECTOR: AtomicPtr<RawSimpleCollector> = AtomicPtr::new(std::ptr::null_mut());
 
-#[repr(C)]
-pub struct SimpleCollector {
-    /// In reality, this is just an [Arc].
-    ///
-    /// It is implemented as a raw pointer around [Arc::into_raw]
-    #[cfg(feature = "multiple-collectors")]
-    rc: NonNull<RawSimpleCollector>
-}
-/// We actually are thread safe ;)
-#[cfg(feature = "sync")]
-unsafe impl Send for SimpleCollector {}
-#[cfg(feature = "sync")]
-unsafe impl Sync for SimpleCollector {}
-
-impl SimpleCollector {
-    pub fn create() -> Self {
-        SimpleCollector::with_logger(Logger::root(
-            slog::Discard,
-            o!()
-        ))
-    }
-    #[cfg(not(feature = "multiple-collectors"))]
-    pub fn with_logger(logger: Logger) -> Self {
-        let marker_ptr = NonNull::dangling().as_ptr();
-        /*
-         * There can only be one collector (due to configuration).
-         *
-         * Exchange with marker pointer while we're initializing.
-         */
-        assert!(GLOBAL_COLLECTOR.compare_and_swap(
-            std::ptr::null_mut(), marker_ptr,
-            Ordering::SeqCst
-        ).is_null(), "Collector already exists");
-        let mut raw = Box::new(
-            unsafe { RawSimpleCollector::with_logger(logger) }
-        );
-        raw.heap.allocator.collector_id = Some(CollectorId {});
-        // It shall reign forever!
-        let raw = Box::leak(raw);
-        assert_eq!(
-            GLOBAL_COLLECTOR.compare_and_swap(
-                marker_ptr, raw as *mut RawSimpleCollector,
-                Ordering::SeqCst
-            ),
-            marker_ptr, "Unexpected modification"
-        );
-        // NOTE: The raw pointer is implicit (now that we're leaked)
-        SimpleCollector {}
-    }
-
-    #[cfg(feature = "multiple-collectors")]
-    pub fn with_logger(logger: Logger) -> Self {
-        // We're assuming its safe to create multiple (as given by config)
-        let raw = unsafe { RawSimpleCollector::with_logger(logger) };
-        let mut collector = Arc::new(raw);
-        let raw_ptr = unsafe { NonNull::new_unchecked(
-            Arc::as_ptr(&collector) as *mut RawSimpleCollector
-        ) };
-        Arc::get_mut(&mut collector).unwrap()
-            .heap.allocator.collector_id = Some(CollectorId { rc: raw_ptr });
-        std::mem::forget(collector); // We own it as a raw pointer...
-        SimpleCollector { rc: raw_ptr }
-    }
-    #[cfg(feature = "multiple-collectors")]
-    fn clone_internal(&self) -> SimpleCollector {
-        let original = unsafe { Arc::from_raw(self.rc.as_ptr()) };
-        let cloned = Arc::clone(&original);
-        std::mem::forget(original);
-        SimpleCollector { rc: unsafe { NonNull::new_unchecked(
-            Arc::into_raw(cloned) as *mut _
-        ) } }
-    }
-    #[cfg(not(feature = "multiple-collectors"))]
-    fn clone_internal(&self) -> SimpleCollector {
-        SimpleCollector {}
-    }
-    #[cfg(feature = "multiple-collectors")]
-    fn as_raw(&self) -> &RawSimpleCollector {
-        unsafe { self.rc.as_ref() }
-    }
-    #[cfg(not(feature = "multiple-collectors"))]
-    fn as_raw(&self) -> &RawSimpleCollector {
-        let ptr = GLOBAL_COLLECTOR.load(Ordering::Acquire);
-        assert!(!ptr.is_null());
-        unsafe { &*ptr }
-    }
-
-    /// Create a new context bound to this collector
-    ///
-    /// Warning: Only one collector should be created per thread.
-    /// Doing otherwise can cause deadlocks/panics.
-    #[cfg(feature = "sync")]
-    pub fn create_context(&self) -> SimpleCollectorContext {
-        unsafe { SimpleCollectorContext::register_root(&self) }
-    }
-    /// Convert this collector into a unique context
-    ///
-    /// The single-threaded implementation only allows a single context,
-    /// so this method is nessicarry to support it.
-    pub fn into_context(self) -> SimpleCollectorContext {
-        #[cfg(feature = "sync")]
-            { self.create_context() }
-        #[cfg(not(feature = "sync"))]
-        unsafe { SimpleCollectorContext::from_collector(&self) }
-    }
-}
-impl Drop for SimpleCollector {
-    fn drop(&mut self) {
-        #[cfg(feature = "multiple-collectors")] {
-            drop(unsafe { Arc::from_raw(self.rc.as_ptr() as *const _) })
-        }
-    }
-}
-
-unsafe impl GcSystem for SimpleCollector {
-    type Id = CollectorId;
-    type Context = SimpleCollectorContext;
-}
-
-unsafe impl<'gc, T: GcSafe + 'gc> GcSimpleAlloc<'gc, T> for SimpleCollectorContext {
+unsafe impl RawSimpleAlloc for RawSimpleCollector {
     #[inline]
-    fn alloc(&'gc self, value: T) -> Gc<'gc, T> {
-        self.collector().heap.allocator.alloc(value)
+    fn alloc<'gc, T>(context: &'gc SimpleCollectorContext, value: T) -> Gc<'gc, T> where T: GcSafe + 'gc {
+        context.collector().heap.allocator.alloc(value)
     }
 }
 
-unsafe trait DynTrace {
+#[doc(hidden)] // NOTE: Needs be public for RawCollectorImpl
+pub unsafe trait DynTrace {
     fn trace(&mut self, visitor: &mut MarkVisitor);
 }
 unsafe impl<T: Trace + ?Sized> DynTrace for T {
@@ -591,22 +357,93 @@ unsafe impl Send for RawSimpleCollector {}
 unsafe impl Sync for RawSimpleCollector {}
 
 /// The internal data for a simple collector
-struct RawSimpleCollector {
+#[doc(hidden)]
+pub struct RawSimpleCollector {
     logger: Logger,
     heap: GcHeap,
-    manager: self::context::CollectionManager,
-    /// Tracks object handles
-    handle_list: GcHandleList
+    manager: zerogc_context::CollectionManager<Self>,
 }
-impl RawSimpleCollector {
-    unsafe fn with_logger(logger: Logger) -> Self {
-        RawSimpleCollector {
-            logger,
-            manager: context::CollectionManager::new(),
-            heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD),
-            handle_list: GcHandleList::new(),
-        }
+
+unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector {
+    type GcDynPointer = NonNull<dyn DynTrace>;
+
+    #[inline]
+    unsafe fn create_dyn_pointer<T: Trace>(value: *mut T) -> Self::GcDynPointer {
+        debug_assert!(!value.is_null());
+        NonNull::new_unchecked(
+            std::mem::transmute::<
+                *mut dyn DynTrace,
+                *mut (dyn DynTrace + 'static)
+            >(value as *mut dyn DynTrace)
+        )
     }
+
+    #[cfg(not(feature = "multiple-collectors"))]
+    #[inline]
+    fn global_ptr() -> *const Self {
+        GLOBAL_COLLECTOR.load(Ordering::Acquire)
+    }
+
+    #[cfg(not(feature = "multiple-collectors"))]
+    fn init_global(logger: Logger) {
+        let marker_ptr = NonNull::dangling().as_ptr();
+        /*
+         * There can only be one collector (due to configuration).
+         *
+         * Exchange with marker pointer while we're initializing.
+         */
+        assert!(GLOBAL_COLLECTOR.compare_and_swap(
+            std::ptr::null_mut(), marker_ptr,
+            Ordering::SeqCst
+        ).is_null(), "Collector already exists");
+        let mut raw = Box::new(
+            unsafe { RawSimpleCollector::with_logger(logger) }
+        );
+        raw.heap.allocator.collector_id = Some(CollectorId {});
+        // It shall reign forever!
+        let raw = Box::leak(raw);
+        assert_eq!(
+            GLOBAL_COLLECTOR.compare_and_swap(
+                marker_ptr, raw as *mut RawSimpleCollector,
+                Ordering::SeqCst
+            ),
+            marker_ptr, "Unexpected modification"
+        );
+    }
+
+    #[cfg(feature = "multiple-collectors")]
+    fn init(logger: Logger) -> NonNull<Self> {
+        // We're assuming its safe to create multiple (as given by config)
+        let raw = unsafe { RawSimpleCollector::with_logger(logger) };
+        let mut collector = Arc::new(raw);
+        let raw_ptr = unsafe { NonNull::new_unchecked(
+            Arc::as_ptr(&collector) as *mut RawSimpleCollector
+        ) };
+        Arc::get_mut(&mut collector).unwrap()
+            .heap.allocator.collector_id = Some(unsafe { CollectorId::from_raw(raw_ptr) });
+        std::mem::forget(collector); // We own it as a raw pointer...
+        raw_ptr
+    }
+
+    #[inline(always)]
+    unsafe fn gc_write_barrier<'gc, T, V>(
+        _owner: &Gc<'gc, T>,
+        _value: &Gc<'gc, V>,
+        _field_offset: usize
+    ) where T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {
+        // Simple GC doesn't need write barriers
+    }
+
+    #[inline]
+    fn logger(&self) -> &Logger {
+        &self.logger
+    }
+
+    #[inline]
+    fn manager(&self) -> &CollectionManager<Self> {
+        &self.manager
+    }
+
     #[inline]
     fn should_collect(&self) -> bool {
         /*
@@ -619,21 +456,37 @@ impl RawSimpleCollector {
         self.heap.should_collect_relaxed() ||
             self.manager.should_trigger_collection()
     }
+
+    #[inline]
+    fn allocated_size(&self) -> MemorySize {
+        MemorySize { bytes: self.heap.allocator.allocated_size() }
+    }
+
+    #[inline]
+    unsafe fn perform_raw_collection(&self, contexts: &[*mut RawContext<Self>]) {
+        self.perform_raw_collection(contexts)
+    }
+}
+
+impl RawSimpleCollector {
+    unsafe fn with_logger(logger: Logger) -> Self {
+        RawSimpleCollector {
+            logger,
+            manager: CollectionManager::new(),
+            heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD),
+        }
+    }
     #[cold]
     #[inline(never)]
     unsafe fn perform_raw_collection(
-        &self, contexts: &[*mut RawContext]
+        &self, contexts: &[*mut RawContext<RawSimpleCollector>]
     ) {
         debug_assert!(self.manager.is_collecting());
         let roots: Vec<*mut dyn DynTrace> = contexts.iter()
             .flat_map(|ctx| {
                 (**ctx).assume_valid_shadow_stack()
-                    .reverse_iter()
+                    .reverse_iter().map(NonNull::as_ptr)
             })
-            .chain(std::iter::once(&self.handle_list
-                as *const GcHandleList as *const dyn DynTrace
-                as *mut dyn DynTrace
-            ))
             .collect();
         let num_roots = roots.len();
         let mut task = CollectionTask {
@@ -655,14 +508,6 @@ impl RawSimpleCollector {
             "original_size" => original_size,
             "memory_freed" => original_size - updated_size
         );
-    }
-}
-impl Deref for RawSimpleCollector {
-    type Target = context::CollectionManager;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.manager // TODO: Do this explicitly
     }
 }
 struct CollectionTask<'a> {
@@ -715,7 +560,8 @@ impl<'a> CollectionTask<'a> {
     }
 }
 
-struct MarkVisitor<'a> {
+#[doc(hidden)] // NOTE: Needs be public for RawCollectorImpl
+pub struct MarkVisitor<'a> {
     expected_collector: CollectorId,
     #[cfg_attr(feature = "implicit-grey-stack", allow(dead_code))]
     grey_stack: &'a mut Vec<*mut GcHeader>,

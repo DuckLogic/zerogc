@@ -1,4 +1,7 @@
-use std::fmt::{self, Debug, Formatter};
+//! Utilities for the context library
+//!
+//! Also used by some collector implementations.
+use std::fmt::{self, Debug, Formatter, Display};
 #[cfg(not(feature = "sync"))]
 use std::cell::Cell;
 
@@ -87,6 +90,31 @@ impl Debug for ThreadId {
                     .field(name)
                     .finish()
             }
+        }
+    }
+}
+/// The size of memory in bytes
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct MemorySize {
+    pub bytes: usize
+}
+impl Display for MemorySize {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if f.alternate() {
+            write!(f, "{}", self.bytes)
+        } else {
+            // Write approximation
+            let bytes = self.bytes;
+            let (amount, suffix) = if bytes > 1024 * 1024 * 1024 {
+                (1024 * 1024 * 1024, "GB")
+            } else if bytes > 1024 * 1024 {
+                (1024 * 1024, "MB")
+            } else if bytes > 1024 {
+                (1024, "KB")
+            } else {
+                (1, "")
+            };
+            write!(f, "{:.4}{}", bytes as f64 / amount as f64, suffix)
         }
     }
 }

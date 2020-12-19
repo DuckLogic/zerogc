@@ -1,26 +1,24 @@
 use std::cell::{Cell, UnsafeCell};
 use std::sync::atomic::{Ordering, AtomicBool};
-
-use slog::{Logger, FnValue, trace, Drain, o};
-
-use crate::{RawSimpleCollector, SimpleCollector};
-use crate::utils::ThreadId;
 use std::mem::ManuallyDrop;
 use std::fmt::{Debug, Formatter};
 use std::{fmt, mem};
 use std::collections::HashSet;
 use parking_lot::{Mutex, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard, Condvar, RwLock};
 
-use super::{ShadowStack};
-use crate::context::ContextState;
+use slog::{Logger, FnValue, trace, Drain, o};
+
+use super::{ShadowStack, ContextState};
+use crate::{RawCollectorImpl, CollectorRef};
+use crate::utils::ThreadId;
 
 /// Manages coordination of garbage collections
 ///
 /// This is factored out of the main code mainly due to
 /// differences from single-threaded collection
-pub(crate) struct CollectionManager {
+pub struct CollectionManager<C: RawCollectorImpl> {
     /// Lock on the internal state
-    state: RwLock<CollectorState>,
+    state: RwLock<CollectorState<C>>,
     /// Simple flag on whether we're currently collecting
     ///
     /// This should be true whenever `self.state.pending` is `Some`.
@@ -53,8 +51,8 @@ pub(crate) struct CollectionManager {
     /// Like `collection_wait`, his doesn't actually protect any data.
     collection_wait_lock: Mutex<()>,
 }
-impl CollectionManager {
-    pub(crate) fn new() -> Self {
+impl<C: RawCollectorImpl> CollectionManager<C> {
+    pub fn new() -> Self {
         CollectionManager {
             state: RwLock::new(CollectorState::new()),
             valid_contexts_wait: Condvar::new(),
@@ -78,7 +76,7 @@ impl CollectionManager {
     pub fn is_collecting(&self) -> bool {
         self.collecting.load(Ordering::SeqCst)
     }
-    pub(super) unsafe fn freeze_context(&self, context: &RawContext) {
+    pub(super) unsafe fn freeze_context(&self, context: &RawContext<C>) {
         assert_eq!(context.state.get(), ContextState::Active);
         // TODO: Isn't this state read concurrently?
         context.state.set(ContextState::Frozen);
@@ -89,7 +87,7 @@ impl CollectionManager {
          */
         self.valid_contexts_wait.notify_all();
     }
-    pub(super) unsafe fn unfreeze_context(&self, context: &RawContext) {
+    pub(super) unsafe fn unfreeze_context(&self, context: &RawContext<C>) {
         /*
          * A pending collection might be relying in the validity of this
          * context's shadow stack, so unfreezing it while in progress
@@ -102,16 +100,16 @@ impl CollectionManager {
     }
 }
 
-pub struct RawContext {
-    pub(crate) collector: SimpleCollector,
+pub struct RawContext<C: RawCollectorImpl> {
+    pub(crate) collector: CollectorRef<C>,
     original_thread: ThreadId,
     // NOTE: We are Send, not Sync
-    pub(super) shadow_stack: UnsafeCell<ShadowStack>,
+    pub(super) shadow_stack: UnsafeCell<ShadowStack<C>>,
     // TODO: Does the collector access this async?
     pub(super) state: Cell<ContextState>,
     pub(super) logger: Logger
 }
-impl Debug for RawContext {
+impl<C: RawCollectorImpl> Debug for RawContext<C> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.debug_struct("RawContext")
             .field(
@@ -127,9 +125,9 @@ impl Debug for RawContext {
             .finish()
     }
 }
-impl RawContext {
-    pub(crate) unsafe fn register_new(collector: &SimpleCollector) -> ManuallyDrop<Box<Self>> {
-        let original_thread = if collector.as_raw().logger.is_trace_enabled() {
+impl<C: RawCollectorImpl> RawContext<C> {
+    pub(crate) unsafe fn register_new(collector: &CollectorRef<C>) -> ManuallyDrop<Box<Self>> {
+        let original_thread = if collector.as_raw().logger().is_trace_enabled() {
             ThreadId::current()
         } else {
             ThreadId::Nop
@@ -137,7 +135,7 @@ impl RawContext {
         let mut context = ManuallyDrop::new(Box::new(RawContext {
             collector: collector.clone_internal(),
             original_thread: original_thread.clone(),
-            logger: collector.as_raw().logger.new(o!(
+            logger: collector.as_raw().logger().new(o!(
                 "original_thread" => original_thread.clone()
             )),
             shadow_stack: UnsafeCell::new(ShadowStack {
@@ -147,7 +145,7 @@ impl RawContext {
         }));
         let old_num_total = collector.as_raw().add_context(&mut **context);
         trace!(
-            collector.as_raw().logger, "Creating new context";
+            collector.as_raw().logger(), "Creating new context";
             "ptr" => format_args!("{:p}", &**context),
             "old_num_total" => old_num_total,
             "current_thread" => &original_thread
@@ -171,11 +169,11 @@ impl RawContext {
          * over pending reads. The standard library doesn't guarantee this.
          */
         let collector = self.collector.as_raw();
-        let mut guard = collector.state.write();
+        let mut guard = collector.manager().state.write();
         let state = &mut *guard;
         // If there is not a active `PendingCollection` - create one
         if state.pending.is_none() {
-            assert!(!collector.manager.collecting.compare_and_swap(
+            assert!(!collector.manager().collecting.compare_and_swap(
                 false, true, Ordering::SeqCst
             ));
             let id = state.next_pending_id();
@@ -212,7 +210,7 @@ impl RawContext {
             );
         }
         let shadow_stack = &*self.shadow_stack.get();
-        let ptr = self as *const RawContext as *mut RawContext;
+        let ptr = self as *const RawContext<C> as *mut RawContext<C>;
         debug_assert!(state.known_contexts.get_mut().contains(&ptr));
         let mut pending = state.pending.as_mut().unwrap();
         // Change our state to mark we are now waiting at a safepoint
@@ -247,7 +245,7 @@ impl RawContext {
                 trace!(
                     self.logger, "Beginning simple collection";
                     "current_thread" => FnValue(|_| ThreadId::current()),
-                    "original_size" => collector.heap.allocator.allocated_size(),
+                    "original_size" => %collector.allocated_size(),
                     "contexts" => ?contexts,
                     "total_contexts" => pending.total_contexts,
                     "state" => ?pending.state,
@@ -276,7 +274,7 @@ impl RawContext {
     ///
     /// A context is valid if it is either frozen
     /// or paused at a safepont.
-    pub unsafe fn assume_valid_shadow_stack(&self) -> &ShadowStack {
+    pub unsafe fn assume_valid_shadow_stack(&self) -> &ShadowStack<C> {
         match self.state.get() {
             ContextState::Active => unreachable!("active context: {:?}", self),
             ContextState::SafePoint { .. } | ContextState::Frozen { .. } => {},
@@ -290,13 +288,13 @@ impl RawContext {
 ///
 /// This must be held under a write lock for a collection to happen.
 /// This must be held under a read lock to prevent collections.
-pub struct CollectorState {
+pub struct CollectorState<C: RawCollectorImpl> {
     /// A pointer to the currently pending collection (if any)
     ///
     /// Once the number of the known roots in the pending collection
     /// is equal to the number of `total_contexts`,
     /// collection can safely begin.
-    pending: Option<PendingCollection>,
+    pending: Option<PendingCollection<C>>,
     /// A list of all the known contexts
     ///
     /// This persists across collections. Once a context
@@ -304,10 +302,10 @@ pub struct CollectorState {
     ///
     /// NOTE: We need another layer of locking since "readers"
     /// like add_context may want
-    known_contexts: Mutex<HashSet<*mut RawContext>>,
+    known_contexts: Mutex<HashSet<*mut RawContext<C>>>,
     next_pending_id: u64
 }
-impl CollectorState {
+impl<C: RawCollectorImpl> CollectorState<C> {
     pub fn new() -> Self {
         CollectorState {
             pending: None,
@@ -321,26 +319,25 @@ impl CollectorState {
         id
     }
 }
-/*
- * Implementing methods to control collector state.
- *
- * Because we're defined in the same crate
- * we can use an inhernent impl instead of an extension trait.
- */
-impl RawSimpleCollector {
-    pub fn prevent_collection<R>(&self, func: impl FnOnce(&CollectorState) -> R) -> R {
+
+/// Methods to control collector state.
+///
+/// Because we're not defined in the same crate,
+/// we must use an extension trait.
+pub(crate) trait SyncCollectorImpl: RawCollectorImpl {
+    fn prevent_collection<R>(&self, func: impl FnOnce(&CollectorState<Self>) -> R) -> R {
         // Acquire the lock to ensure there's no collection in progress
-        let mut state = self.state.read();
+        let mut state = self.manager().state.read();
         while state.pending.is_some() {
             RwLockReadGuard::unlocked(&mut state, || {
-                let mut lock = self.collection_wait_lock.lock();
-                self.collection_wait.wait(&mut lock);
+                let mut lock = self.manager().collection_wait_lock.lock();
+                self.manager().collection_wait.wait(&mut lock);
             })
         }
-        assert!(!self.collecting.load(Ordering::SeqCst));
+        assert!(!self.manager().collecting.load(Ordering::SeqCst));
         func(&*state) // NOTE: Lock will be released by RAII
     }
-    pub unsafe fn add_context(&self, raw: *mut RawContext) -> usize {
+    unsafe fn add_context(&self, raw: *mut RawContext<Self>) -> usize {
         /*
          * It's unsafe to create a context
          * while a collection is in progress.
@@ -353,9 +350,9 @@ impl RawSimpleCollector {
             old_num_known
         })
     }
-    pub unsafe fn free_context(&self, raw: *mut RawContext) {
+    unsafe fn free_context(&self, raw: *mut RawContext<Self>) {
         trace!(
-            self.logger, "Freeing context";
+            self.logger(), "Freeing context";
             "ptr" => format_args!("{:p}", raw),
             "state" => ?(*raw).state.get()
         );
@@ -365,7 +362,7 @@ impl RawSimpleCollector {
          * need to mutate `valid_contexts` and `total_contexts`
          */
         let ptr = raw; // TODO - blegh
-        let guard = self.state.upgradable_read();
+        let guard = self.manager().state.upgradable_read();
         match &guard.pending {
             None => { // No collection
                 // Still need to remove from list of known_contexts
@@ -415,7 +412,7 @@ impl RawSimpleCollector {
          * Notify all threads waiting for contexts to be valid.
          * TODO: I think this is really only useful if we're waiting....
          */
-        self.valid_contexts_wait.notify_all();
+        self.manager().valid_contexts_wait.notify_all();
     }
     /// Wait until the specified collection is finished
     ///
@@ -424,9 +421,12 @@ impl RawSimpleCollector {
     unsafe fn await_collection(
         &self,
         expected_id: u64,
-        context: *mut RawContext,
-        mut lock: RwLockWriteGuard<CollectorState>,
-        perform_collection: impl FnOnce(&mut CollectorState, Vec<*mut RawContext>)
+        context: *mut RawContext<Self>,
+        mut lock: RwLockWriteGuard<CollectorState<Self>>,
+        perform_collection: impl FnOnce(
+            &mut CollectorState<Self>,
+            Vec<*mut RawContext<Self>>
+        )
     ) {
         loop {
             match &mut lock.pending {
@@ -437,7 +437,7 @@ impl RawSimpleCollector {
                      */
                     assert_eq!(expected_id, pending.id);
                     // Since we're Some, this should be true
-                    debug_assert!(self.collecting.load(Ordering::SeqCst));
+                    debug_assert!(self.manager().collecting.load(Ordering::SeqCst));
                     match pending.state {
                         PendingState::Finished => {
                             self.acknowledge_finished_collection(
@@ -483,24 +483,24 @@ impl RawSimpleCollector {
                              * We can proceed immediately and everyone else
                              * will slowly begin to wakeup;
                              */
-                            self.collection_wait.notify_all();
+                            self.manager().collection_wait.notify_all();
                             return
                         }
                         PendingState::Waiting => {
                             RwLockWriteGuard::unlocked(&mut lock, || {
-                                let mut lock = self.valid_contexts_lock.lock();
+                                let mut lock = self.manager().valid_contexts_lock.lock();
                                 /*
                                  * Wait for all contexts to be valid.
                                  *
                                  * Typically we're waiting for them to reach
                                  * a safepoint.
                                  */
-                                self.valid_contexts_wait.wait(&mut lock);
+                                self.manager().valid_contexts_wait.wait(&mut lock);
                             })
                         }
                         PendingState::InProgress => {
                             RwLockWriteGuard::unlocked(&mut lock, || {
-                                let mut lock = self.collection_wait_lock.lock();
+                                let mut lock = self.manager().collection_wait_lock.lock();
                                 /*
                                  * Another thread has already started collecting.
                                  * Wait for them to finish.
@@ -510,7 +510,7 @@ impl RawSimpleCollector {
                                  * (accidental) wakeups. However I guess it's possible
                                  * we're woken up somehow in the middle of collection.
                                  */
-                                self.collection_wait.wait(&mut lock);
+                                self.manager().collection_wait.wait(&mut lock);
                             })
                         }
                     }
@@ -526,8 +526,8 @@ impl RawSimpleCollector {
     }
     unsafe fn acknowledge_finished_collection(
         &self,
-        pending_ref: &mut Option<PendingCollection>,
-        context: *mut RawContext
+        pending_ref: &mut Option<PendingCollection<Self>>,
+        context: *mut RawContext<Self>
     ) {
         let waiting_contexts = {
             let pending = pending_ref.as_mut().unwrap();
@@ -554,15 +554,17 @@ impl RawSimpleCollector {
         };
         if waiting_contexts == 0 {
             *pending_ref = None;
-            assert!(self.collecting.compare_and_swap(
+            assert!(self.manager().collecting.compare_and_swap(
                 true, false,
                 Ordering::SeqCst
             ));
             // Someone may be waiting for us to become `None`
-            self.collection_wait.notify_all();
+            self.manager().collection_wait.notify_all();
         }
     }
 }
+/// Blanket implementation
+impl<C: RawCollectorImpl> SyncCollectorImpl for C {}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum PendingState {
@@ -579,7 +581,7 @@ enum PendingState {
 /// The state of a collector waiting for all its contexts
 /// to reach a safepoint
 #[derive(Debug)]
-struct PendingCollection {
+pub(crate) struct PendingCollection<C: RawCollectorImpl> {
     /// The state of the current collection
     state: PendingState,
     /// The total number of known contexts
@@ -592,16 +594,16 @@ struct PendingCollection {
     /// The number of contexts that are waiting
     waiting_contexts: usize,
     /// The contexts that are ready to be collected.
-    valid_contexts: Vec<*mut RawContext>,
+    valid_contexts: Vec<*mut RawContext<C>>,
     /// The unique id of this safepoint
     ///
     /// 64-bit integers pretty much never overflow (for like 100 years)
     id: u64
 }
-impl PendingCollection {
+impl<C: RawCollectorImpl> PendingCollection<C> {
     pub fn new(
         id: u64,
-        valid_contexts: Vec<*mut RawContext>,
+        valid_contexts: Vec<*mut RawContext<C>>,
         total_contexts: usize,
     ) -> Self {
         PendingCollection {
@@ -615,9 +617,10 @@ impl PendingCollection {
     /// Push a context that's pending collection
     ///
     /// Undefined behavior if the context roots are invalid in any way.
+    #[inline]
     pub unsafe fn push_pending_context(
         &mut self,
-        context: *mut RawContext,
+        context: *mut RawContext<C>,
     ) {
         debug_assert_ne!((*context).state.get(), ContextState::Active);
         assert_eq!(self.state, PendingState::Waiting);

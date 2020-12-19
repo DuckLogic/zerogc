@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use std::cell::RefCell;
 
 use crate::{GcHeader};
-use crate::utils::AtomicCell;
+use zerogc_context::utils::AtomicCell;
 
 /// The minimum size of supported memory (in words)
 ///
