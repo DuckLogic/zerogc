@@ -438,7 +438,7 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
         let mut raw = Box::new(
             unsafe { RawSimpleCollector::with_logger(logger) }
         );
-        raw.heap.allocator.collector_id = Some(CollectorId {});
+        raw.heap.allocator.collector_id = Some(*Self::GLOBAL_ID);
         // It shall reign forever!
         let raw = Box::leak(raw);
         assert_eq!(

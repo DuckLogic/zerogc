@@ -1,6 +1,6 @@
 [package]
 name = "zerogc"
-version = "0.1.0"
+version = "0.1.2"
 authors = ["Techcable <Techcable@techcable.net>"]
 description = "Zero overhead tracing garbage collection for rust"
 repository = "https://github.com/DuckLogic/zerogc"
@@ -15,7 +15,7 @@ readme = "README.md"
 indexmap = { version = "1.4", optional = true }
 
 [workspace]
-members = ["libs/simple", "libs/derive"]
+members = ["libs/simple", "libs/derive", "libs/context"]
 
 [profile.dev]
 opt-level = 1

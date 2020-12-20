@@ -1,6 +1,7 @@
 #![feature(
     negative_impls, // !Send is much cleaner than `PhantomData<Rc>`
     untagged_unions, // I want to avoid ManuallyDrop in unions
+    const_fn, // Apparently this feature is unstable???
 )]
 //! The implementation of [::zerogc::CollectorContext] that is
 //! shared among both thread-safe and thread-unsafe code.
@@ -23,7 +24,10 @@ pub mod collector;
 pub mod handle;
 
 use crate::collector::{RawCollectorImpl};
+#[cfg(feature = "sync")]
 use crate::sync::SyncCollectorImpl;
+#[cfg(not(feature = "sync"))]
+use crate::nosync::NoSyncCollectorImpl;
 
 pub use crate::collector::{WeakCollectorRef, CollectorRef, CollectorId};
 

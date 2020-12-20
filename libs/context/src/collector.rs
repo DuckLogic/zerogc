@@ -1,14 +1,18 @@
 //! The interface to a collector
 
-use std::ptr::NonNull;
-use std::sync::Arc;
 use std::fmt::{self, Debug, Formatter};
+#[cfg(feature = "multiple-collectors")]
+use std::sync::Arc;
+#[cfg(feature = "multiple-collectors")]
+use std::ptr::NonNull;
 
 use slog::{Logger, o};
 
 use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc};
 
 use crate::{CollectorContext, CollectionManager};
+#[cfg(not(feature = "multiple-collectors"))]
+use std::marker::PhantomData;
 
 /// A specific implementation of a collector
 pub unsafe trait RawCollectorImpl: 'static + Sized {
@@ -21,19 +25,27 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     /// Convert the specified value into a dyn pointer
     unsafe fn create_dyn_pointer<T: Trace>(t: *mut T) -> Self::GcDynPointer;
 
+    /// Id of global collector, for when we aren't configured
+    /// to allow multiple collectors.
     #[cfg(not(feature = "multiple-collectors"))]
+    const GLOBAL_ID: &'static CollectorId<Self> = &CollectorId { _marker: PhantomData };
+
     /// When the collector is a singleton,
     /// return the global implementation
+    #[cfg(not(feature = "multiple-collectors"))]
     fn global_ptr() -> *const Self;
+
     #[cfg(not(feature = "multiple-collectors"))]
     fn init_global(logger: Logger);
+
     #[cfg(feature = "multiple-collectors")]
     fn init(logger: Logger) -> NonNull<Self>;
+
     /// The id of this collector
     #[inline]
     fn id(&self) -> CollectorId<Self> {
         #[cfg(not(feature = "multiple-collectors"))] {
-            CollectorId {}
+            CollectorId { _marker: PhantomData }
         }
         #[cfg(feature = "multiple-collectors")] {
             CollectorId { rc: NonNull::from(self) }
@@ -63,6 +75,7 @@ impl<C: RawCollectorImpl> PartialEq for CollectorId<C> {
             self.rc.as_ptr() == other.rc.as_ptr()
         }
         #[cfg(not(feature = "multiple-collectors"))] {
+            let CollectorId { _marker: PhantomData } = *other;
             true // Singleton
         }
     }
@@ -103,6 +116,11 @@ pub struct CollectorId<C: RawCollectorImpl> {
     ///
     /// We don't know whether the underlying memory will be valid.
     rc: NonNull<C>,
+    /// Phantom reference to `&'static C`
+    ///
+    /// This represents the fact we (statically) refer to the global instance
+    #[cfg(not(feature = "multiple-collectors"))]
+    _marker: PhantomData<&'static C>
 }
 impl<C: RawCollectorImpl> CollectorId<C> {
     #[cfg(feature = "multiple-collectors")]
@@ -118,7 +136,7 @@ impl<C: RawCollectorImpl> CollectorId<C> {
     #[cfg(not(feature = "multiple-collectors"))]
     #[inline]
     pub unsafe fn as_ref(&self) -> &C {
-        &*GLOBAL_COLLECTOR.load(Ordering::Acquire)
+        &*C::global_ptr()
     }
     #[cfg(feature = "multiple-collectors")]
     pub unsafe fn weak_ref(&self) -> WeakCollectorRef<C> {
@@ -129,7 +147,7 @@ impl<C: RawCollectorImpl> CollectorId<C> {
     }
     #[cfg(not(feature = "multiple-collectors"))]
     pub unsafe fn weak_ref(&self) -> WeakCollectorRef<C> {
-        WeakCollectorRef { }
+        WeakCollectorRef { _marker: PhantomData }
     }
 }
 unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
@@ -155,9 +173,7 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
             &*(self as *const CollectorId<C> as *const CollectorRef<C>)
         }
         #[cfg(not(feature = "multiple-collectors"))] {
-            // NOTE: We live forever
-            const COLLECTOR: CollectorRef = CollectorRef { };
-            &COLLECTOR
+            &*(C::GLOBAL_ID as *const CollectorId<C> as *const CollectorRef<C>)
         }
     }
 }
@@ -165,6 +181,8 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
 pub struct WeakCollectorRef<C: RawCollectorImpl> {
     #[cfg(feature = "multiple-collectors")]
     weak: std::sync::Weak<C>,
+    #[cfg(not(feature = "multiple-collectors"))]
+    _marker: PhantomData<&'static C>
 }
 impl<C: RawCollectorImpl> WeakCollectorRef<C> {
     #[cfg(feature = "multiple-collectors")]
@@ -179,7 +197,7 @@ impl<C: RawCollectorImpl> WeakCollectorRef<C> {
     }
     #[cfg(not(feature = "multiple-collectors"))]
     pub unsafe fn assume_valid(&self) -> CollectorId<C> {
-        CollectorId {}
+        CollectorId { _marker: PhantomData }
     }
     pub fn ensure_valid<R>(&self, func: impl FnOnce(CollectorId<C>) -> R) -> R {
         self.try_ensure_valid(|id| match id{
@@ -200,7 +218,7 @@ impl<C: RawCollectorImpl> WeakCollectorRef<C> {
     #[cfg(not(feature = "multiple-collectors"))]
     pub fn try_ensure_valid<R>(&self, func: impl FnOnce(Option<CollectorId<C>>) -> R) -> R {
         // global collector is always valid
-        func(Some(CollectorId {}))
+        func(Some(CollectorId { _marker: PhantomData }))
     }
 }
 
@@ -224,7 +242,10 @@ pub struct CollectorRef<C: RawCollectorImpl> {
     ///
     /// It is implemented as a raw pointer around [Arc::into_raw]
     #[cfg(feature = "multiple-collectors")]
-    rc: NonNull<C>
+    rc: NonNull<C>,
+    /// Phantom reference to the global collector instance
+    #[cfg(not(feature = "multiple-collectors"))]
+    _marker: PhantomData<&'static C>
 }
 /// We actually are thread safe ;)
 #[cfg(feature = "sync")]
@@ -241,9 +262,9 @@ impl<C: RawCollectorImpl> CollectorRef<C> {
     }
     #[cfg(not(feature = "multiple-collectors"))]
     pub fn with_logger(logger: Logger) -> Self {
-        unsafe { C::init_global(logger) }
+        C::init_global(logger); // TODO: Is this safe?
         // NOTE: The raw pointer is implicit (now that we're leaked)
-        CollectorRef {}
+        CollectorRef { _marker: PhantomData }
     }
 
     #[cfg(feature = "multiple-collectors")]
@@ -262,7 +283,7 @@ impl<C: RawCollectorImpl> CollectorRef<C> {
     }
     #[cfg(not(feature = "multiple-collectors"))]
     pub(crate) fn clone_internal(&self) -> CollectorRef<C> {
-        CollectorRef {}
+        CollectorRef { _marker: PhantomData }
     }
     #[cfg(feature = "multiple-collectors")]
     #[inline]
@@ -272,7 +293,7 @@ impl<C: RawCollectorImpl> CollectorRef<C> {
     #[cfg(not(feature = "multiple-collectors"))]
     #[inline]
     pub fn as_raw(&self) -> &C {
-        let ptr = GLOBAL_COLLECTOR.load(Ordering::Acquire);
+        let ptr = C::global_ptr();
         assert!(!ptr.is_null());
         unsafe { &*ptr }
     }

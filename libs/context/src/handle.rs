@@ -7,10 +7,6 @@ use std::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
 
 use zerogc::{Trace, GcSafe, GcBrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
 use crate::{Gc, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef};
-#[cfg(feature = "sync")]
-use crate::SyncCollectorImpl;
-#[cfg(not(feature = "sync"))]
-use crate::NoSyncCollectorImpl; // TODO
 use crate::collector::RawCollectorImpl;
 
 const INITIAL_HANDLE_CAPACITY: usize = 64;
@@ -391,7 +387,8 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C
     #[cfg(feature = "sync")]
     fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R {
         self.collector.ensure_valid(|collector| unsafe {
-
+            // Used for 'prevent_collection' method
+            use crate::SyncCollectorImpl;
             /*
              * This should be sufficient to ensure
              * the value won't be collected or relocated.
