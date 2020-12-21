@@ -20,7 +20,6 @@ slog = "2.7"
 [features]
 default = [
     "sync", # Thread-safety by default
-    "multiple-collectors", # By default, allow multiple collectors
 ]
 # Allow multiple threads to access the garbage collector
 # by creating a seperate context for each.
@@ -30,10 +29,4 @@ sync = [
     "parking_lot",
     "crossbeam-utils"
 ]
-# Allow multiple collectors to exist at once
-# Otherwise, there's a single global collector (useful in VMs)
-#
-# Even if multiple collectors are enabled, pointers from
-# one collector can't be safely mixed with other collectors.
-multiple-collectors = []
 

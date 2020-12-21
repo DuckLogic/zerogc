@@ -48,7 +48,7 @@ sync = ["zerogc-context/sync", "parking_lot"]
 #
 # Even if multiple collectors are enabled, pointers from
 # one collector can't be safely mixed with other collectors.
-multiple-collectors = ["zerogc-context/multiple-collectors"]
+multiple-collectors = []
 
 [dev-dependencies]
 # Used for examples :)

@@ -26,6 +26,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 #[cfg(not(feature = "multiple-collectors"))]
 use std::sync::atomic::AtomicPtr;
+#[cfg(not(feature = "multiple-collectors"))]
+use std::marker::PhantomData;
 use std::any::TypeId;
 
 use slog::{Logger, FnValue, debug};
@@ -418,36 +420,8 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     }
 
     #[cfg(not(feature = "multiple-collectors"))]
-    #[inline]
-    fn global_ptr() -> *const Self {
-        GLOBAL_COLLECTOR.load(Ordering::Acquire)
-    }
-
-    #[cfg(not(feature = "multiple-collectors"))]
-    fn init_global(logger: Logger) {
-        let marker_ptr = NonNull::dangling().as_ptr();
-        /*
-         * There can only be one collector (due to configuration).
-         *
-         * Exchange with marker pointer while we're initializing.
-         */
-        assert!(GLOBAL_COLLECTOR.compare_and_swap(
-            std::ptr::null_mut(), marker_ptr,
-            Ordering::SeqCst
-        ).is_null(), "Collector already exists");
-        let mut raw = Box::new(
-            unsafe { RawSimpleCollector::with_logger(logger) }
-        );
-        raw.heap.allocator.collector_id = Some(*Self::GLOBAL_ID);
-        // It shall reign forever!
-        let raw = Box::leak(raw);
-        assert_eq!(
-            GLOBAL_COLLECTOR.compare_and_swap(
-                marker_ptr, raw as *mut RawSimpleCollector,
-                Ordering::SeqCst
-            ),
-            marker_ptr, "Unexpected modification"
-        );
+    fn init(_logger: Logger) -> NonNull<Self> {
+        panic!("Not a singleton")
     }
 
     #[cfg(feature = "multiple-collectors")]
@@ -505,8 +479,47 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     unsafe fn perform_raw_collection(&self, contexts: &[*mut RawContext<Self>]) {
         self.perform_raw_collection(contexts)
     }
-}
 
+    #[cfg(feature = "multiple-collectors")]
+    type Ptr = NonNull<Self>;
+    #[cfg(not(feature = "multiple-collectors"))]
+    type Ptr = PhantomData<&'static Self>;
+    const SINGLETON: bool = cfg!(not(feature = "multiple-collectors"));
+}
+#[cfg(not(feature = "multiple-collectors"))]
+unsafe impl zerogc_context::collector::SingletonCollector for RawSimpleCollector {
+    #[inline]
+    fn global_ptr() -> *const Self {
+        GLOBAL_COLLECTOR.load(Ordering::Acquire)
+    }
+
+    fn init_global(logger: Logger) {
+        let marker_ptr = NonNull::dangling().as_ptr();
+        /*
+         * There can only be one collector (due to configuration).
+         *
+         * Exchange with marker pointer while we're initializing.
+         */
+        assert!(GLOBAL_COLLECTOR.compare_and_swap(
+            std::ptr::null_mut(), marker_ptr,
+            Ordering::SeqCst
+        ).is_null(), "Collector already exists");
+        let mut raw = Box::new(
+            unsafe { RawSimpleCollector::with_logger(logger) }
+        );
+        const GLOBAL_ID: CollectorId = unsafe { CollectorId::from_raw(PhantomData) };
+        raw.heap.allocator.collector_id = Some(GLOBAL_ID);
+        // It shall reign forever!
+        let raw = Box::leak(raw);
+        assert_eq!(
+            GLOBAL_COLLECTOR.compare_and_swap(
+                marker_ptr, raw as *mut RawSimpleCollector,
+                Ordering::SeqCst
+            ),
+            marker_ptr, "Unexpected modification"
+        );
+    }
+}
 impl RawSimpleCollector {
     unsafe fn with_logger(logger: Logger) -> Self {
         RawSimpleCollector {

@@ -386,7 +386,7 @@ pub unsafe trait CollectorId: Copy + Eq + Debug + 'static {
     ///
     /// ## Safety
     /// Undefined behavior if the associated collector no longer exists.
-    unsafe fn assume_valid_system(&self) -> &'_ Self::System;
+    unsafe fn assume_valid_system(&self) -> &Self::System;
 }
 
 /// A garbage collected pointer to a value.
