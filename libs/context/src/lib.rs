@@ -10,26 +10,16 @@ use std::fmt::{self, Debug, Formatter};
 
 use zerogc::prelude::*;
 
-#[cfg(feature = "sync")]
-mod sync;
-#[cfg(not(feature = "sync"))]
-mod nosync;
-#[cfg(feature = "sync")]
-pub use self::sync::*;
-#[cfg(not(feature = "sync"))]
-pub use self::nosync::*;
+pub mod state;
 
 pub mod utils;
 pub mod collector;
 pub mod handle;
 
 use crate::collector::{RawCollectorImpl};
-#[cfg(feature = "sync")]
-use crate::sync::SyncCollectorImpl;
-#[cfg(not(feature = "sync"))]
-use crate::nosync::NoSyncCollectorImpl;
 
 pub use crate::collector::{WeakCollectorRef, CollectorRef, CollectorId};
+pub use crate::state::{CollectionManager, RawContext};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ContextState {
@@ -100,7 +90,7 @@ impl ContextState {
  */
 // TODO: Rename to remove 'Simple' from name
 pub struct CollectorContext<C: RawCollectorImpl> {
-    raw: *mut RawContext<C>,
+    raw: *mut C::RawContext,
     /// Whether we are the root context
     ///
     /// Only the root actually owns the `Arc`
@@ -108,44 +98,34 @@ pub struct CollectorContext<C: RawCollectorImpl> {
     root: bool
 }
 impl<C: RawCollectorImpl> CollectorContext<C> {
-    #[cfg(not(feature = "sync"))]
-    pub(crate) unsafe fn from_collector(collector: &CollectorRef<C>) -> Self {
-        CollectorContext {
-            raw: Box::into_raw(ManuallyDrop::into_inner(
-                RawContext::from_collector(collector.clone_internal())
-            )),
-            root: true // We are the exclusive owner
-        }
-    }
-    #[cfg(feature = "sync")]
     pub(crate) unsafe fn register_root(collector: &CollectorRef<C>) -> Self {
         CollectorContext {
             raw: Box::into_raw(ManuallyDrop::into_inner(
-                RawContext::register_new(&collector)
+                C::RawContext::register_new(&collector)
             )),
             root: true, // We are responsible for unregistering
         }
     }
     #[inline]
     pub fn collector(&self) -> &C {
-        unsafe { &(*self.raw).collector.as_raw() }
+        unsafe { &(*self.raw).collector() }
     }
     #[inline(always)]
     unsafe fn with_shadow_stack<R, T: Trace>(
         &self, value: *mut &mut T, func: impl FnOnce() -> R
     ) -> R {
-        let old_link = (*(*self.raw).shadow_stack.get()).last;
+        let old_link = (*(*self.raw).shadow_stack_ptr()).last;
         let new_link = ShadowStackLink {
             element: C::create_dyn_pointer(value),
             prev: old_link
         };
-        (*(*self.raw).shadow_stack.get()).last = &new_link;
+        (*(*self.raw).shadow_stack_ptr()).last = &new_link;
         let result = func();
         debug_assert_eq!(
-            (*(*self.raw).shadow_stack.get()).last,
+            (*(*self.raw).shadow_stack_ptr()).last,
             &new_link
         );
-        (*(*self.raw).shadow_stack.get()).last = new_link.prev;
+        (*(*self.raw).shadow_stack_ptr()).last = new_link.prev;
         result
     }
     #[cold]
@@ -160,7 +140,7 @@ impl<C: RawCollectorImpl> Drop for CollectorContext<C> {
     fn drop(&mut self) {
         if self.root {
             unsafe {
-                self.collector().free_context(self.raw);
+                C::Manager::free_context(self.collector(), self.raw);
             }
         }
     }
@@ -171,25 +151,25 @@ unsafe impl<C: RawCollectorImpl> GcContext for CollectorContext<C> {
 
     #[inline]
     unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T) {
-        debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
-        if (*self.raw).collector.as_raw().should_collect() {
+        debug_assert_eq!((*self.raw).state(), ContextState::Active);
+        if (*self.raw).collector().should_collect() {
             self.trigger_basic_safepoint(value);
         }
-        debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
+        debug_assert_eq!((*self.raw).state(), ContextState::Active);
     }
 
     unsafe fn freeze(&mut self) {
-        (*self.raw).collector.as_raw().manager().freeze_context(&*self.raw);
+        (*self.raw).collector().manager().freeze_context(&*self.raw);
     }
 
     unsafe fn unfreeze(&mut self) {
-        (*self.raw).collector.as_raw().manager().unfreeze_context(&*self.raw);
+        (*self.raw).collector().manager().unfreeze_context(&*self.raw);
     }
 
     #[inline]
     unsafe fn recurse_context<T, F, R>(&self, value: &mut &mut T, func: F) -> R
         where T: Trace, F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R {
-        debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
+        debug_assert_eq!((*self.raw).state(), ContextState::Active);
         self.with_shadow_stack(value, || {
             let mut sub_context = ManuallyDrop::new(CollectorContext {
                 /*
@@ -204,7 +184,7 @@ unsafe impl<C: RawCollectorImpl> GcContext for CollectorContext<C> {
             debug_assert!(!sub_context.root);
             // No need to run drop code on context.....
             std::mem::forget(sub_context);
-            debug_assert_eq!((*self.raw).state.get(), ContextState::Active);
+            debug_assert_eq!((*self.raw).state(), ContextState::Active);
             result
         })
     }

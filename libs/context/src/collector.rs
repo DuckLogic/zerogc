@@ -9,7 +9,8 @@ use slog::{Logger, o};
 
 use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc};
 
-use crate::{CollectorContext, CollectionManager};
+use crate::{CollectorContext};
+use crate::state::{CollectionManager, RawContext};
 
 /// A specific implementation of a collector
 pub unsafe trait RawCollectorImpl: 'static + Sized {
@@ -18,16 +19,26 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     /// The simple collector implements this as
     /// a trait object pointer.
     type GcDynPointer: Copy + Debug + 'static;
+
     /// A pointer to this collector
     ///
     /// Must be a ZST if the collector is a singleton.
     type Ptr: CollectorPtr<Self>;
+
+    /// The type that manages this collector's state
+    type Manager: CollectionManager<Self, Context=Self::RawContext>;
+
+    /// The context
+    type RawContext: RawContext<Self>;
 
     /// True if this collector is a singleton
     ///
     /// If the collector allows multiple instances,
     /// this *must* be false
     const SINGLETON: bool;
+
+    /// True if this collector is thread-safe.
+    const SYNC: bool;
 
     /// Convert the specified value into a dyn pointer
     unsafe fn create_dyn_pointer<T: Trace>(t: *mut T) -> Self::GcDynPointer;
@@ -50,14 +61,20 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     /// The logger associated with this collector
     fn logger(&self) -> &Logger;
 
-    fn manager(&self) -> &CollectionManager<Self>;
+    fn manager(&self) -> &Self::Manager;
 
     fn should_collect(&self) -> bool;
 
     fn allocated_size(&self) -> crate::utils::MemorySize;
 
-    unsafe fn perform_raw_collection(&self, contexts: &[*mut crate::RawContext<Self>]);
+    unsafe fn perform_raw_collection(&self, contexts: &[*mut Self::RawContext]);
 }
+
+/// A thread safe collector
+pub unsafe trait SyncCollector: RawCollectorImpl + Sync {
+
+}
+
 /// A collector implemented as a singleton
 ///
 /// This only has one instance
@@ -322,10 +339,9 @@ pub struct CollectorRef<C: RawCollectorImpl> {
     ptr: C::Ptr
 }
 /// We actually are thread safe ;)
+unsafe impl<C: SyncCollector> Send for CollectorRef<C> {}
 #[cfg(feature = "sync")]
-unsafe impl<C: RawCollectorImpl + Sync> Send for CollectorRef<C> {}
-#[cfg(feature = "sync")]
-unsafe impl<C: RawCollectorImpl + Sync> Sync for CollectorRef<C> {}
+unsafe impl<C: SyncCollector> Sync for CollectorRef<C> {}
 
 /// Internal trait for initializing a collector
 #[doc(hidden)]
@@ -384,23 +400,22 @@ impl<C: RawCollectorImpl> CollectorRef<C> {
         CollectorId { ptr: self.ptr  }
     }
 
+    /// Convert this collector into a unique context
+    ///
+    /// The single-threaded implementation only allows a single context,
+    /// so this method is nessicary to support it.
+    pub fn into_context(self) -> CollectorContext<C> {
+        unsafe { CollectorContext::register_root(&self) }
+    }
+}
+impl<C: SyncCollector> CollectorRef<C> {
+
     /// Create a new context bound to this collector
     ///
     /// Warning: Only one collector should be created per thread.
     /// Doing otherwise can cause deadlocks/panics.
-    #[cfg(feature = "sync")]
     pub fn create_context(&self) -> CollectorContext<C> {
         unsafe { CollectorContext::register_root(&self) }
-    }
-    /// Convert this collector into a unique context
-    ///
-    /// The single-threaded implementation only allows a single context,
-    /// so this method is nessicarry to support it.
-    pub fn into_context(self) -> CollectorContext<C> {
-        #[cfg(feature = "sync")]
-            { self.create_context() }
-        #[cfg(not(feature = "sync"))]
-            unsafe { CollectorContext::from_collector(&self) }
     }
 }
 impl<C: RawCollectorImpl> Drop for CollectorRef<C> {

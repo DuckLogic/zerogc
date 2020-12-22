@@ -19,12 +19,13 @@ slog = "2.7"
 
 [features]
 default = [
-    "sync", # Thread-safety by default
+    "sync", # Support thread-safety by default
 ]
-# Allow multiple threads to access the garbage collector
+# This will allow multiple threads to access the garbage collector
 # by creating a seperate context for each.
 #
-# This can increase overhead by requiring communication between threads.
+# Thread safe collectors can have increased overhead
+# by requiring communication between threads.
 sync = [
     "parking_lot",
     "crossbeam-utils"

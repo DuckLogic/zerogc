@@ -29,8 +29,13 @@ pub struct CollectionManager<C: RawCollectorImpl> {
     /// Sanity check to ensure there's only one context
     has_existing_context: Cell<bool>,
 }
-impl<C: RawCollectorImpl> CollectionManager<C> {
-    pub fn new() -> Self {
+impl<C: RawCollectorImpl> super::sealed::Sealed for CollectionManager<C> {}
+unsafe impl<C> super::CollectionManager<C> for CollectionManager<C>
+    where C: RawCollectorImpl<Manager=Self, RawContext=RawContext<C>> {
+    type Context = RawContext<C>;
+
+    fn new() -> Self {
+        assert!(!C::SYNC);
         CollectionManager {
             _marker: PhantomData,
             state: RefCell::new(CollectorState::new()),
@@ -39,11 +44,11 @@ impl<C: RawCollectorImpl> CollectionManager<C> {
         }
     }
     #[inline]
-    pub fn is_collecting(&self) -> bool {
+    fn is_collecting(&self) -> bool {
         self.collecting.get()
     }
     #[inline]
-    pub fn should_trigger_collection(&self) -> bool {
+    fn should_trigger_collection(&self) -> bool {
         /*
          * Unlike the sync context manager, we can assume
          * there is only a single thread.
@@ -55,13 +60,23 @@ impl<C: RawCollectorImpl> CollectionManager<C> {
          */
         false
     }
-    pub(super) unsafe fn freeze_context(&self, context: &RawContext<C>) {
+    unsafe fn freeze_context(&self, context: &RawContext<C>) {
         debug_assert_eq!(context.state.get(), ContextState::Active);
         unimplemented!("Freezing single-threaded contexts")
     }
-    pub(super) unsafe fn unfreeze_context(&self, _context: &RawContext<C>) {
+    unsafe fn unfreeze_context(&self, _context: &RawContext<C>) {
         // We can't freeze, so we sure can't unfreeze
         unreachable!("Can't unfreeze a single-threaded context")
+    }
+
+    fn prevent_collection<R>(_collector: &C, _func: impl FnOnce() -> R) -> R {
+        unimplemented!("Preventing collections for non-sync collectors")
+    }
+
+    #[inline]
+    unsafe fn free_context(_collector: &C, _context: *mut Self::Context) {
+        assert!(!C::SYNC);
+        // No extra work to do - automatic Drop handles everything
     }
 }
 pub struct RawContext<C: RawCollectorImpl> {
@@ -93,13 +108,19 @@ impl<C: RawCollectorImpl> Debug for RawContext<C> {
             .finish()
     }
 }
-impl<C: RawCollectorImpl> RawContext<C> {
-    pub(crate) unsafe fn from_collector(collector: CollectorRef<C>) -> ManuallyDrop<Box<Self>> {
+impl<C: RawCollectorImpl> super::sealed::Sealed for RawContext<C> {}
+unsafe impl<C> super::RawContext<C> for RawContext<C>
+    where C: RawCollectorImpl<RawContext=Self, Manager=CollectionManager<C>> {
+    unsafe fn register_new(collector: &CollectorRef<C>) -> ManuallyDrop<Box<Self>> {
+        assert!(!C::SYNC);
+        // NOTE: Nosync collector must have only **ONE** context
         assert!(
             !collector.as_raw().manager().has_existing_context
                 .replace(true),
             "Already created a context for the collector!"
         );
+        // Assume ownership
+        let collector = collector.clone_internal();
         let logger = collector.as_raw().logger().new(o!());
         let context = ManuallyDrop::new(Box::new(RawContext {
             logger: logger.clone(), collector,
@@ -114,15 +135,9 @@ impl<C: RawCollectorImpl> RawContext<C> {
         );
         context
     }
-    /// Trigger a safepoint for this context.
-    ///
-    /// This implicitly attempts a collection,
-    /// potentially blocking until completion..
-    ///
-    /// Undefined behavior if mutated during collection
     #[cold]
     #[inline(never)]
-    pub unsafe fn trigger_safepoint(&self) {
+    unsafe fn trigger_safepoint(&self) {
         /*
          * Begin a collection.
          *
@@ -162,17 +177,20 @@ impl<C: RawCollectorImpl> RawContext<C> {
         );
         assert!(self.collector.as_raw().manager().collecting.replace(false));
     }
-    /// Borrow a reference to the shadow stack,
-    /// assuming this context is valid (not active).
-    ///
-    /// A context is valid if it is either frozen
-    /// or paused at a safepont.
-    pub unsafe fn assume_valid_shadow_stack(&self) -> &ShadowStack<C> {
-        match self.state.get() {
-            ContextState::Active => unreachable!("active context: {:?}", self),
-            ContextState::SafePoint { .. } | ContextState::Frozen { .. } => {},
-        }
-        &*self.shadow_stack.get()
+
+    #[inline]
+    fn shadow_stack_ptr(&self) -> *mut ShadowStack<C> {
+        self.shadow_stack.get()
+    }
+
+    #[inline]
+    unsafe fn collector(&self) -> &C {
+        self.collector.as_raw()
+    }
+
+    #[inline]
+    fn state(&self) -> ContextState {
+        self.state.get()
     }
 }
 
@@ -199,15 +217,3 @@ impl CollectorState {
     }
 }
 
-/// Methods to control collector state.
-///
-/// Because we're not defined in the same crate,
-/// we must use an extension trait.
-pub(crate) trait NoSyncCollectorImpl: RawCollectorImpl {
-    #[inline]
-    unsafe fn free_context(&self, _raw: *mut RawContext<Self>) {
-        // No extra work to do - automatic Drop handles everything
-    }
-}
-/// Blanket implementation
-impl<C: RawCollectorImpl> NoSyncCollectorImpl for C {}

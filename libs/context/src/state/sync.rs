@@ -1,3 +1,4 @@
+/// Thread safe state
 use std::cell::{Cell, UnsafeCell};
 use std::sync::atomic::{Ordering, AtomicBool};
 use std::mem::ManuallyDrop;
@@ -11,6 +12,7 @@ use slog::{Logger, FnValue, trace, Drain, o};
 use super::{ShadowStack, ContextState};
 use crate::{RawCollectorImpl, CollectorRef};
 use crate::utils::ThreadId;
+use crate::collector::SyncCollector;
 
 /// Manages coordination of garbage collections
 ///
@@ -51,8 +53,14 @@ pub struct CollectionManager<C: RawCollectorImpl> {
     /// Like `collection_wait`, his doesn't actually protect any data.
     collection_wait_lock: Mutex<()>,
 }
-impl<C: RawCollectorImpl> CollectionManager<C> {
-    pub fn new() -> Self {
+impl<C: SyncCollector> super::sealed::Sealed for CollectionManager<C> {}
+unsafe impl<C> super::CollectionManager<C> for CollectionManager<C>
+    where C: SyncCollector,
+          C: RawCollectorImpl<Manager=Self, RawContext=RawContext<C>> {
+    type Context = RawContext<C>;
+
+    fn new() -> Self {
+        assert!(C::SYNC);
         CollectionManager {
             state: RwLock::new(CollectorState::new()),
             valid_contexts_wait: Condvar::new(),
@@ -63,7 +71,11 @@ impl<C: RawCollectorImpl> CollectionManager<C> {
         }
     }
     #[inline]
-    pub fn should_trigger_collection(&self) -> bool {
+    fn is_collecting(&self) -> bool {
+        self.collecting.load(Ordering::SeqCst)
+    }
+    #[inline]
+    fn should_trigger_collection(&self) -> bool {
         /*
          * Use relaxed ordering. Eventually consistency is correct
          * enough for our use cases. It may delay some threads reaching
@@ -72,11 +84,7 @@ impl<C: RawCollectorImpl> CollectionManager<C> {
          */
         self.collecting.load(Ordering::Relaxed)
     }
-    #[inline]
-    pub fn is_collecting(&self) -> bool {
-        self.collecting.load(Ordering::SeqCst)
-    }
-    pub(super) unsafe fn freeze_context(&self, context: &RawContext<C>) {
+    unsafe fn freeze_context(&self, context: &RawContext<C>) {
         assert_eq!(context.state.get(), ContextState::Active);
         // TODO: Isn't this state read concurrently?
         context.state.set(ContextState::Frozen);
@@ -87,7 +95,7 @@ impl<C: RawCollectorImpl> CollectionManager<C> {
          */
         self.valid_contexts_wait.notify_all();
     }
-    pub(super) unsafe fn unfreeze_context(&self, context: &RawContext<C>) {
+    unsafe fn unfreeze_context(&self, context: &RawContext<C>) {
         /*
          * A pending collection might be relying in the validity of this
          * context's shadow stack, so unfreezing it while in progress
@@ -97,6 +105,16 @@ impl<C: RawCollectorImpl> CollectionManager<C> {
             assert_eq!(context.state.get(), ContextState::Frozen);
             context.state.set(ContextState::Active);
         })
+    }
+
+    #[inline]
+    fn prevent_collection<R>(collector: &C, func: impl FnOnce() -> R) -> R {
+        collector.prevent_collection(|_state| func())
+    }
+
+    #[inline]
+    unsafe fn free_context(collector: &C, context: *mut Self::Context) {
+        collector.free_context(context)
     }
 }
 
@@ -125,8 +143,11 @@ impl<C: RawCollectorImpl> Debug for RawContext<C> {
             .finish()
     }
 }
-impl<C: RawCollectorImpl> RawContext<C> {
-    pub(crate) unsafe fn register_new(collector: &CollectorRef<C>) -> ManuallyDrop<Box<Self>> {
+/// Dummy impl
+impl<C: SyncCollector> super::sealed::Sealed for RawContext<C> {}
+unsafe impl<C> super::RawContext<C> for RawContext<C>
+    where C: SyncCollector<RawContext=Self, Manager=CollectionManager<C>> {
+    unsafe fn register_new(collector: &CollectorRef<C>) -> ManuallyDrop<Box<Self>> {
         let original_thread = if collector.as_raw().logger().is_trace_enabled() {
             ThreadId::current()
         } else {
@@ -152,15 +173,9 @@ impl<C: RawCollectorImpl> RawContext<C> {
         );
         context
     }
-    /// Trigger a safepoint for this context.
-    ///
-    /// This implicitly attempts a collection,
-    /// potentially blocking until completion..
-    ///
-    /// Undefined behavior if mutated during collection
     #[cold]
     #[inline(never)]
-    pub unsafe fn trigger_safepoint(&self) {
+    unsafe fn trigger_safepoint(&self) {
         /*
          * Collecting requires a *write* lock.
          * We are higher priority than
@@ -269,17 +284,20 @@ impl<C: RawCollectorImpl> RawContext<C> {
             "collector_id" => expected_id,
         );
     }
-    /// Borrow a reference to the shadow stack,
-    /// assuming this context is valid (not active).
-    ///
-    /// A context is valid if it is either frozen
-    /// or paused at a safepont.
-    pub unsafe fn assume_valid_shadow_stack(&self) -> &ShadowStack<C> {
-        match self.state.get() {
-            ContextState::Active => unreachable!("active context: {:?}", self),
-            ContextState::SafePoint { .. } | ContextState::Frozen { .. } => {},
-        }
-        &*self.shadow_stack.get()
+
+    #[inline]
+    fn shadow_stack_ptr(&self) -> *mut ShadowStack<C> {
+        self.shadow_stack.get()
+    }
+
+    #[inline]
+    unsafe fn collector(&self) -> &C {
+        self.collector.as_raw()
+    }
+
+    #[inline]
+    fn state(&self) -> ContextState {
+        self.state.get()
     }
 }
 // Pending collections
@@ -324,7 +342,7 @@ impl<C: RawCollectorImpl> CollectorState<C> {
 ///
 /// Because we're not defined in the same crate,
 /// we must use an extension trait.
-pub(crate) trait SyncCollectorImpl: RawCollectorImpl {
+pub(crate) trait SyncCollectorImpl: RawCollectorImpl<Manager=CollectionManager<Self>> {
     fn prevent_collection<R>(&self, func: impl FnOnce(&CollectorState<Self>) -> R) -> R {
         // Acquire the lock to ensure there's no collection in progress
         let mut state = self.manager().state.read();
@@ -564,7 +582,9 @@ pub(crate) trait SyncCollectorImpl: RawCollectorImpl {
     }
 }
 /// Blanket implementation
-impl<C: RawCollectorImpl> SyncCollectorImpl for C {}
+impl<C> SyncCollectorImpl for C
+    where C: crate::collector::SyncCollector,
+          C: RawCollectorImpl<Manager=CollectionManager<Self>> {}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum PendingState {

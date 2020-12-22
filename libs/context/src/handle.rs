@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
 
 use zerogc::{Trace, GcSafe, GcBrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
-use crate::{Gc, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef};
+use crate::{Gc, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef, CollectionManager};
 use crate::collector::RawCollectorImpl;
 
 const INITIAL_HANDLE_CAPACITY: usize = 64;
@@ -384,11 +384,8 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C
     type System = CollectorRef<C>;
     type Id = CollectorId<C>;
 
-    #[cfg(feature = "sync")]
     fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R {
         self.collector.ensure_valid(|collector| unsafe {
-            // Used for 'prevent_collection' method
-            use crate::SyncCollectorImpl;
             /*
              * This should be sufficient to ensure
              * the value won't be collected or relocated.
@@ -398,16 +395,12 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C
              * This is preferable to using `recursive_read`,
              * since that could starve writers (collectors).
              */
-            collector.as_ref().prevent_collection(|_state| {
+            C::Manager::prevent_collection(collector.as_ref(), || {
                 let value = self.inner.as_ref().value
                     .load(Ordering::Acquire) as *mut T;
                 func(&*value)
             })
         })
-    }
-    #[cfg(not(feature = "sync"))]
-    fn use_critical<R>(&self, _func: impl FnOnce(&T) -> R) -> R {
-        unimplemented!("critical sections for single-collector impl")
     }
 }
 unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>

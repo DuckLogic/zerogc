@@ -34,13 +34,16 @@ use slog::{Logger, FnValue, debug};
 
 use zerogc::{GcSafe, Trace, GcVisitor};
 
-use zerogc_context::{RawContext, CollectionManager};
 use zerogc_context::utils::{ThreadId, AtomicCell, MemorySize};
 
 use crate::alloc::{SmallArenaList, small_object_size};
 
 use zerogc_context::collector::{RawSimpleAlloc};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
+use zerogc_context::{
+    CollectionManager as AbstractCollectionManager,
+    RawContext as AbstractRawContext
+};
 
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
@@ -65,6 +68,16 @@ mod alloc {
         pub fn find<T>(&self) -> Option<FakeArena> { None }
     }
 }
+
+#[cfg(feature = "sync")]
+type RawContext<C> = zerogc_context::state::sync::RawContext<C>;
+#[cfg(feature = "sync")]
+type CollectionManager<C> = zerogc_context::state::sync::CollectionManager<C>;
+#[cfg(not(feature = "sync"))]
+type RawContext<C> = zerogc_context::state::nosync::RawContext<C>;
+#[cfg(not(feature = "sync"))]
+type CollectionManager<C> = zerogc_context::state::nosync::CollectionManager<C>;
+
 
 pub type SimpleCollector = ::zerogc_context::CollectorRef<RawSimpleCollector>;
 pub type SimpleCollectorContext = ::zerogc_context::CollectorContext<RawSimpleCollector>;
@@ -400,13 +413,27 @@ unsafe impl Sync for RawSimpleCollector {}
 pub struct RawSimpleCollector {
     logger: Logger,
     heap: GcHeap,
-    manager: zerogc_context::CollectionManager<Self>,
+    manager: CollectionManager<Self>,
     /// Tracks object handles
     handle_list: GcHandleList<Self>,
 }
 
 unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector {
     type GcDynPointer = NonNull<dyn DynTrace>;
+
+    #[cfg(feature = "multiple-collectors")]
+    type Ptr = NonNull<Self>;
+
+    #[cfg(not(feature = "multiple-collectors"))]
+    type Ptr = PhantomData<&'static Self>;
+
+    type Manager = CollectionManager<Self>;
+
+    type RawContext = RawContext<Self>;
+
+    const SINGLETON: bool = cfg!(not(feature = "multiple-collectors"));
+
+    const SYNC: bool = cfg!(feature = "sync");
 
     #[inline]
     unsafe fn create_dyn_pointer<T: Trace>(value: *mut T) -> Self::GcDynPointer {
@@ -446,17 +473,14 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     ) where T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {
         // Simple GC doesn't need write barriers
     }
-
     #[inline]
     fn logger(&self) -> &Logger {
         &self.logger
     }
-
     #[inline]
     fn manager(&self) -> &CollectionManager<Self> {
         &self.manager
     }
-
     #[inline]
     fn should_collect(&self) -> bool {
         /*
@@ -469,23 +493,17 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
         self.heap.should_collect_relaxed() ||
             self.manager.should_trigger_collection()
     }
-
     #[inline]
     fn allocated_size(&self) -> MemorySize {
         MemorySize { bytes: self.heap.allocator.allocated_size() }
     }
-
     #[inline]
     unsafe fn perform_raw_collection(&self, contexts: &[*mut RawContext<Self>]) {
         self.perform_raw_collection(contexts)
     }
-
-    #[cfg(feature = "multiple-collectors")]
-    type Ptr = NonNull<Self>;
-    #[cfg(not(feature = "multiple-collectors"))]
-    type Ptr = PhantomData<&'static Self>;
-    const SINGLETON: bool = cfg!(not(feature = "multiple-collectors"));
 }
+#[cfg(feature = "sync")]
+unsafe impl ::zerogc_context::collector::SyncCollector for RawSimpleCollector {}
 #[cfg(not(feature = "multiple-collectors"))]
 unsafe impl zerogc_context::collector::SingletonCollector for RawSimpleCollector {
     #[inline]
