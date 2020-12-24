@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 
 use slog::{Logger, o};
 
-use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc};
+use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc, NullTrace, TraceImmutable, GcVisitor};
 
 use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
@@ -294,6 +294,20 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
         &*(self as *const CollectorId<C> as *const CollectorRef<C>)
     }
 }
+unsafe impl<C: RawCollectorImpl> Trace for CollectorId<C> {
+    const NEEDS_TRACE: bool = false;
+    #[inline(always)]
+    fn visit<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
+        Ok(())
+    }
+}
+unsafe impl<C: RawCollectorImpl> TraceImmutable for CollectorId<C> {
+    #[inline(always)]
+    fn visit_immutable<V: GcVisitor>(&self, _visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
+        Ok(())
+    }
+}
+unsafe impl<C: RawCollectorImpl> NullTrace for CollectorId<C> {}
 
 pub struct WeakCollectorRef<C: RawCollectorImpl> {
     weak: <C::Ptr as CollectorPtr<C>>::Weak,

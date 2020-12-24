@@ -363,7 +363,7 @@ impl<C: GcContext> FrozenContext<C> {
 ///
 /// It should be safe to assume that a collector exists
 /// if any of its pointers still do!
-pub unsafe trait CollectorId: Copy + Eq + Debug + 'static {
+pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + 'static {
     /// The type of the garbage collector system
     type System: GcSystem<Id=Self>;
     /// Perform a write barrier before writing to a garbage collected field
