@@ -6,6 +6,7 @@ use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
+use alloc::string::String;
 
 use crate::prelude::*;
 
@@ -15,3 +16,5 @@ unsafe_trace_deref!(Box, target = T);
 // We can only trace `Rc` and `Arc` if the inner type implements `TraceImmutable`
 unsafe_trace_deref!(Rc, T; immut = required; |rc| &**rc);
 unsafe_trace_deref!(Arc, T; immut = required; |arc| &**arc);
+// String is a primitive with no internal references
+unsafe_trace_primitive!(String);
