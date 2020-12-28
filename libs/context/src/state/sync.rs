@@ -188,9 +188,11 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
         let state = &mut *guard;
         // If there is not a active `PendingCollection` - create one
         if state.pending.is_none() {
-            assert!(!collector.manager().collecting.compare_and_swap(
-                false, true, Ordering::SeqCst
-            ));
+            assert_eq!(collector.manager().collecting.compare_exchange(
+                false, true,
+                Ordering::SeqCst,
+                Ordering::Relaxed, // Failure is a panic either way -_-
+            ), Ok(false));
             let id = state.next_pending_id();
             #[allow(clippy::mutable_key_type)] // Used for debugging (see below)
             let known_contexts = state.known_contexts.get_mut();
@@ -572,10 +574,11 @@ pub(crate) trait SyncCollectorImpl: RawCollectorImpl<Manager=CollectionManager<S
         };
         if waiting_contexts == 0 {
             *pending_ref = None;
-            assert!(self.manager().collecting.compare_and_swap(
+            assert_eq!(self.manager().collecting.compare_exchange(
                 true, false,
-                Ordering::SeqCst
-            ));
+                Ordering::SeqCst,
+                Ordering::Relaxed, // Failure is catastrophic
+            ), Ok(true));
             // Someone may be waiting for us to become `None`
             self.manager().collection_wait.notify_all();
         }

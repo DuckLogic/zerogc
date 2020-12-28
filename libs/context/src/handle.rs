@@ -45,6 +45,10 @@ impl<C: RawHandleImpl> GcHandleList<C> {
             last_free_slot: AtomicPtr::new(null_mut()),
         }
     }
+    /// Append the specified slot to this list
+    ///
+    /// The specified slot must be logically owned
+    /// and not already part of this list
     unsafe fn append_free_slot(&self, slot: *mut HandleSlot<C>) {
         // Verify it's actually free...
         debug_assert_eq!(
@@ -63,14 +67,27 @@ impl<C: RawHandleImpl> GcHandleList<C> {
              */
             (*slot).freed.prev_free_slot
                 .store(last_free, Ordering::Release);
-            let actual_last_free = self.last_free_slot.compare_and_swap(
+            /*
+             * We really dont want surprise failures because we're going to
+             * have to redo the above store if that happens.
+             * Likewise we want acquire ordering so we don't fail unnecessarily
+             * on retry.
+             * In theory this is premature optimization, but I really want to
+             * make this as straightforward as possible.
+             * Maybe we should look into the efficiency of this on ARM?
+             */
+            match self.last_free_slot.compare_exchange(
                 last_free, slot,
-                Ordering::AcqRel
-            );
-            if actual_last_free == last_free {
-                return // Success
-            } else {
-                last_free = actual_last_free;
+                Ordering::AcqRel,
+                Ordering::Acquire
+            ) {
+                Ok(actual) => {
+                    debug_assert_eq!(actual, last_free);
+                    return; // Success
+                },
+                Err(actual) => {
+                    last_free = actual;
+                }
             }
         }
     }
@@ -96,29 +113,36 @@ impl<C: RawHandleImpl> GcHandleList<C> {
              * If this CAS succeeds, we have ownership.
              * Otherwise another thread beat us and
              * we must try again.
+             *
+             * Avoid relaxed ordering and compare_exchange_weak
+             * to make this straightforward.
              */
-            let actual_slot = self.last_free_slot.compare_and_swap(
+            match self.last_free_slot.compare_exchange(
                 slot, prev,
-                Ordering::AcqRel
-            );
-            if actual_slot == slot {
-                // Verify it's actually free...
-                debug_assert_eq!(
+                Ordering::AcqRel,
+                Ordering::Acquire
+            ) {
+                Ok(actual_slot) => {
+                    debug_assert_eq!(actual_slot, slot);
+                    // Verify it's actually free...
+                    debug_assert_eq!(
+                        (*slot).valid.value
+                            .load(Ordering::SeqCst),
+                        std::ptr::null_mut()
+                    );
+                    /*
+                     * We own the slot, initialize it to point to
+                     * the provided pointer. The user is responsible
+                     * for any remaining initialization.
+                     */
                     (*slot).valid.value
-                        .load(Ordering::SeqCst),
-                    std::ptr::null_mut()
-                );
-                /*
-                 * We own the slot, initialize it to point to
-                 * the provided pointer. The user is responsible
-                 * for any remaining initialization.
-                 */
-                (*slot).valid.value
-                    .store(value, Ordering::Release);
-                return &(*slot).valid;
-            } else {
-                // Try again
-                slot = actual_slot;
+                        .store(value, Ordering::Release);
+                    return &(*slot).valid;
+                },
+                Err(actual_slot) => {
+                    // Try again
+                    slot = actual_slot;
+                }
             }
         }
         // Empty free list
@@ -173,20 +197,25 @@ impl<C: RawHandleImpl> GcHandleList<C> {
             last_alloc: AtomicUsize::new(0),
             prev: AtomicPtr::new(prev_bucket),
         }));
-        let actual_bucket = self.last_bucket.compare_and_swap(
-            prev_bucket, allocated_bucket, Ordering::SeqCst
-        );
-        if actual_bucket == prev_bucket {
-            Ok(&*actual_bucket)
-        } else {
-            /*
-             * Someone else beat us too creating the bucket.
-             *
-             * Free the bucket we've created and return
-             * their bucket
-             */
-            drop(Box::from_raw(allocated_bucket));
-            Err(&*actual_bucket)
+        match self.last_bucket.compare_exchange(
+            prev_bucket, allocated_bucket,
+            Ordering::SeqCst,
+            Ordering::SeqCst
+        ) {
+            Ok(actual_bucket) => {
+                assert_eq!(actual_bucket, prev_bucket);
+                Ok(&*actual_bucket)
+            },
+            Err(actual_bucket) => {
+                /*
+                 * Someone else beat us to creating the bucket.
+                 *
+                 * Free the bucket we've created and return
+                 * their bucket
+                 */
+                drop(Box::from_raw(allocated_bucket));
+                Err(&*actual_bucket)
+            }
         }
     }
     /// Trace the [GcHandle] using the specified closure.
@@ -267,10 +296,11 @@ impl<C: RawHandleImpl> GcHandleBucket<C> {
         for (i, slot) in self.slots.iter().enumerate()
             .skip(last_alloc) {
             // TODO: All these fences must be horrible on ARM
-            if slot.valid.value.compare_and_swap(
+            if slot.valid.value.compare_exchange(
                 std::ptr::null_mut(), value,
-                Ordering::AcqRel
-            ).is_null() {
+                Ordering::AcqRel,
+                Ordering::Relaxed
+            ).is_ok() {
                 // We acquired ownership!
                 self.last_alloc.fetch_max(i, Ordering::AcqRel);
                 return Some(&*slot);
@@ -469,16 +499,30 @@ impl<T: GcSafe, C: RawHandleImpl> Clone for GcHandle<T, C> {
                 .is_null(),
             "Pointer is invalid"
         );
+        let mut old_refcnt = inner.refcnt.load(Ordering::Relaxed);
         loop {
-            let old_refcnt = inner.refcnt.load(Ordering::Relaxed);
             assert_ne!(
                 old_refcnt, isize::max_value() as usize,
                 "Reference count overflow"
             );
-            if inner.refcnt.compare_and_swap(
+            /*
+             * NOTE: Relaxed is sufficient for failure since we have no
+             * expectations about the new state. Weak exchange is okay
+             * since we retry in a loop.
+             *
+             * NOTE: We do **not** use fetch_add because we are afraid
+             * of refcount overflow. We should possibly consider it
+             */
+            match inner.refcnt.compare_exchange_weak(
                 old_refcnt, old_refcnt + 1,
-                Ordering::AcqRel
-            ) == old_refcnt { break };
+                Ordering::AcqRel,
+                Ordering::Relaxed
+            ) {
+                Ok(_) => break,
+                Err(val) => {
+                    old_refcnt = val;
+                }
+            }
         }
         GcHandle {
             inner: self.inner,
