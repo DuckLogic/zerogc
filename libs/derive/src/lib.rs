@@ -1,14 +1,20 @@
+#![feature(backtrace)]
 extern crate proc_macro;
 
 use quote::{quote, quote_spanned};
 use syn::{
-    parse_macro_input, parenthesized, parse_quote, DeriveInput, Data,
-    Error, Generics, GenericParam, TypeParamBound, Fields, Member,
-    Index, Type, GenericArgument, Attribute, PathArguments,
+    parse_macro_input, parenthesized, parse_quote, DeriveInput,
+    Data, Error, Generics, GenericParam, TypeParamBound, Fields,
+    Member, Index, Type, GenericArgument, Attribute, PathArguments,
+    Meta, NestedMeta, TypeParam, WherePredicate, PredicateType,
+    Token
 };
 use proc_macro2::{Ident, TokenStream, Span};
 use syn::spanned::Spanned;
 use syn::parse::{ParseStream, Parse};
+use std::collections::HashSet;
+use syn::export::fmt::Display;
+use std::io::Write;
 
 struct MutableFieldOpts {
     public: bool
@@ -91,6 +97,7 @@ impl Parse for GcFieldAttrs {
 
 struct GcTypeAttrs {
     is_copy: bool,
+    ignore_params: HashSet<Ident>
 }
 impl GcTypeAttrs {
     pub fn find(attrs: &[Attribute]) -> Result<Self, Error> {
@@ -107,6 +114,7 @@ impl Default for GcTypeAttrs {
     fn default() -> Self {
         GcTypeAttrs {
             is_copy: false,
+            ignore_params: HashSet::new()
         }
     }
 }
@@ -116,13 +124,66 @@ impl Parse for GcTypeAttrs {
         parenthesized!(input in raw_input);
         let mut result = GcTypeAttrs::default();
         while !input.is_empty() {
-            let flag_name = input.parse::<Ident>()?;
-            if flag_name == "copy" {
+            let meta = input.parse::<Meta>()?;
+            if meta.path().is_ident("copy") {
+                if !matches!(meta, Meta::Path(_)) {
+                    return Err(Error::new(
+                        meta.span(),
+                        "Malformed attribute for #[zerogc(copy)]"
+                    ))
+                }
+                if result.is_copy {
+                    return Err(Error::new(
+                        meta.span(),
+                        "Duplicate flags: #[zerogc(copy)]"
+                    ))
+                }
                 result.is_copy = true;
+            } else if meta.path().is_ident("ignore_params") {
+                if !result.ignore_params.is_empty() {
+                    return Err(Error::new(
+                        meta.span(),
+                        "Duplicate flags: #[zerogc(ignore_params)]"
+                    ))
+                }
+                let list = match meta {
+                    Meta::List(ref list) if list.nested.is_empty() => {
+                        return Err(Error::new(
+                            list.span(),
+                            "Empty list for #[zerogc(ignore_parameters)]"
+                        ))
+                    }
+                    Meta::List(list) => list,
+                    _ => return Err(Error::new(
+                        meta.span(),
+                        "Expected a list attribute for #[zerogc(ignore_params)]"
+                    ))
+                };
+                for nested in list.nested {
+                    match nested {
+                        NestedMeta::Meta(Meta::Path(ref p)) if
+                            p.get_ident().is_some() => {
+                            let ident = p.get_ident().unwrap();
+                            if !result.ignore_params.insert(ident.clone()) {
+                                return Err(Error::new(
+                                    ident.span(),
+                                    "Duplicate parameter to ignore"
+                                ));
+                            }
+                        }
+                        _ => return Err(Error::new(
+                            nested.span(),
+                            "Invalid list value for #[zerogc(ignore_param)]"
+                        ))
+                    }
+                }
             } else {
                 return Err(Error::new(
-                    input.span(), "Unknown type flag"
+                    meta.span(), "Unknown type flag"
                 ))
+            }
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
             }
         }
         Ok(result)
@@ -132,20 +193,30 @@ impl Parse for GcTypeAttrs {
 #[proc_macro_derive(Trace, attributes(zerogc))]
 pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let trace_impl = impl_trace(&input)
+    let attrs = match GcTypeAttrs::find(&*input.attrs) {
+        Ok(attrs) => attrs,
+        Err(e) => return e.to_compile_error().into()
+    };
+    let trace_impl = impl_trace(&input, &attrs)
         .unwrap_or_else(|e| e.to_compile_error());
     let brand_impl = impl_brand(&input)
         .unwrap_or_else(|e| e.to_compile_error());
-    let gc_safe_impl = impl_gc_safe(&input)
+    let gc_safe_impl = impl_gc_safe(&input, &attrs)
         .unwrap_or_else(|e| e.to_compile_error());
     let extra_impls = impl_extras(&input)
         .unwrap_or_else(|e| e.to_compile_error());
-    From::from(quote! {
+    let t = From::from(quote! {
         #trace_impl
         #brand_impl
         #gc_safe_impl
         #extra_impls
-    })
+    });
+    debug_derive(
+        "derive(Trace)",
+        &format_args!("#[derive(Trace) for {}", input.ident),
+        &t
+    );
+    t
 }
 
 fn trace_fields(fields: &Fields, access_ref: &mut dyn FnMut(Member) -> TokenStream) -> TokenStream {
@@ -275,13 +346,22 @@ fn impl_brand(target: &DeriveInput) -> Result<TokenStream, Error> {
     let name = &target.ident;
     let mut generics: Generics = target.generics.clone();
     let mut rewritten_params = Vec::new();
+    let mut rewritten_restrictions = Vec::new();
     for param in &mut generics.params {
         let rewritten_param: GenericArgument;
         match param {
             GenericParam::Type(ref mut type_param) => {
+                let original_bounds = type_param.bounds.iter().cloned().collect::<Vec<_>>();
                 type_param.bounds.push(parse_quote!(::zerogc::GcBrand<'new_gc, S>));
                 let param_name = &type_param.ident;
-                rewritten_param = parse_quote!(<#param_name as ::zerogc::GcBrand<'new_gc, S>::Branded);
+                let rewritten_type: Type = parse_quote!(<#param_name as ::zerogc::GcBrand<'new_gc, S>>::Branded);
+                rewritten_restrictions.push(WherePredicate::Type(PredicateType {
+                    lifetimes: None,
+                    bounded_ty: rewritten_type.clone(),
+                    colon_token: Default::default(),
+                    bounds: original_bounds.into_iter().collect()
+                }));
+                rewritten_param = GenericArgument::Type(rewritten_type);
             },
             GenericParam::Lifetime(ref l) => {
                 /*
@@ -307,8 +387,9 @@ fn impl_brand(target: &DeriveInput) -> Result<TokenStream, Error> {
     let mut impl_generics = generics.clone();
     impl_generics.params.push(GenericParam::Lifetime(parse_quote!('new_gc)));
     impl_generics.params.push(GenericParam::Type(parse_quote!(S: ::zerogc::CollectorId)));
-    let (_, ty_generics, where_clause) = generics.split_for_impl();
-    let (impl_generics, _, _) = impl_generics.split_for_impl();
+    impl_generics.make_where_clause().predicates.extend(rewritten_restrictions);
+    let (_, ty_generics, _) = generics.split_for_impl();
+    let (impl_generics, _, where_clause) = impl_generics.split_for_impl();
     Ok(quote! {
         unsafe impl #impl_generics ::zerogc::GcBrand<'new_gc, S>
             for #name #ty_generics #where_clause {
@@ -316,11 +397,12 @@ fn impl_brand(target: &DeriveInput) -> Result<TokenStream, Error> {
         }
     })
 }
-fn impl_trace(target: &DeriveInput) -> Result<TokenStream, Error> {
+fn impl_trace(target: &DeriveInput, attrs: &GcTypeAttrs) -> Result<TokenStream, Error> {
     let name = &target.ident;
-    let generics = add_trait_bounds(
-        &target.generics, parse_quote!(zerogc::Trace)
-    );
+    let generics = add_trait_bounds_except(
+        &target.generics, parse_quote!(zerogc::Trace),
+        &attrs.ignore_params
+    )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let field_types: Vec<&Type>;
     let trace_impl: TokenStream;
@@ -399,12 +481,12 @@ fn impl_trace(target: &DeriveInput) -> Result<TokenStream, Error> {
         }
     })
 }
-fn impl_gc_safe(target: &DeriveInput) -> Result<TokenStream, Error> {
+fn impl_gc_safe(target: &DeriveInput, attrs: &GcTypeAttrs) -> Result<TokenStream, Error> {
     let name = &target.ident;
-    let generics = add_trait_bounds(
-        &target.generics, parse_quote!(zerogc::GcSafe)
-    );
-    let attrs = GcTypeAttrs::find(&*target.attrs)?;
+    let generics = add_trait_bounds_except(
+        &target.generics, parse_quote!(zerogc::GcSafe),
+        &attrs.ignore_params
+    )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let field_types: Vec<&Type> = match target.data {
         Data::Struct(ref data) => {
@@ -468,12 +550,108 @@ fn impl_gc_safe(target: &DeriveInput) -> Result<TokenStream, Error> {
     })
 }
 
-fn add_trait_bounds(generics: &Generics, bound: TypeParamBound) -> Generics {
+fn add_trait_bounds_except(
+    generics: &Generics, bound: TypeParamBound,
+    ignored_params: &HashSet<Ident>
+) -> Result<Generics, Error> {
+    let mut actually_ignored_args = HashSet::<Ident>::new();
+    let generics = add_trait_bounds(
+        &generics, bound,
+        &mut |param: &TypeParam| {
+            if ignored_params.contains(&param.ident) {
+                actually_ignored_args.insert(param.ident.clone());
+                true
+            } else {
+                false
+            }
+        }
+    );
+    if actually_ignored_args != *ignored_params {
+        let missing = ignored_params - &actually_ignored_args;
+        assert!(!missing.is_empty());
+        let mut combined_error: Option<Error> = None;
+        for missing in missing {
+            let error = Error::new(
+                missing.span(),
+                "Unknown parameter",
+            );
+            match combined_error {
+                Some(ref mut combined_error) => {
+                    combined_error.combine(error);
+                },
+                None => {
+                    combined_error = Some(error);
+                }
+            }
+        }
+        return Err(combined_error.unwrap());
+    }
+    Ok(generics)
+}
+
+fn add_trait_bounds(
+    generics: &Generics, bound: TypeParamBound,
+    should_ignore: &mut dyn FnMut(&TypeParam) -> bool
+) -> Generics {
     let mut result: Generics = (*generics).clone();
-    for param in &mut result.params {
+    'paramLoop: for param in &mut result.params {
         if let GenericParam::Type(ref mut type_param) = *param {
+            if should_ignore(type_param) {
+                continue 'paramLoop;
+            }
             type_param.bounds.push(bound.clone());
         }
     }
     result
+}
+
+fn debug_derive(key: &str, message: &dyn Display, value: &dyn Display) {
+    match ::std::env::var_os("DEBUG_DERIVE") {
+        Some(var) if var == "*" ||
+            var.to_string_lossy().contains(key) => {
+            // Enable this debug
+        },
+        _ => return,
+    }
+    eprintln!("{}:", message);
+    use std::process::{Command, Stdio};
+    let original_input = format!("{}", value);
+    let cmd_res = Command::new("rustfmt")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(original_input.as_bytes())?;
+            drop(stdin);
+            child.wait_with_output()
+        });
+    match cmd_res {
+        Ok(output) if output.status.success() => {
+            let formatted = String::from_utf8(output.stdout).unwrap();
+            for line in formatted.lines() {
+                eprintln!("  {}", line);
+            }
+        },
+        // Fallthrough on failure
+        Ok(output) => {
+            eprintln!("Rustfmt error [code={}]:", output.status.code().map_or_else(
+                || String::from("?"),
+                |i| format!("{}", i)
+            ));
+            let err_msg = String::from_utf8(output.stderr).unwrap();
+            for line in err_msg.lines() {
+                eprintln!("  {}", line);
+            }
+            eprintln!("Original input: [[[[");
+            for line in original_input.lines() {
+                eprintln!("{}", line);
+            }
+            eprintln!("]]]]");
+        }
+        Err(e) => {
+            eprintln!("Failed to run rustfmt: {}", e)
+        }
+    }
 }
