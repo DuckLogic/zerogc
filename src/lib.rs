@@ -783,6 +783,20 @@ pub unsafe trait GcBrand<'new_gc, Id: CollectorId>: Trace {
     type Branded: Trace + 'new_gc;
 }
 
+/// An object-safe version of the [Trace] trait
+pub unsafe trait DynTrace<V: GcVisitor> {
+    /// Visit this object
+    ///
+    /// See [Trace::visit] for more details
+    fn visit(&mut self, visitor: &mut V) -> Result<(), V::Err>;
+}
+unsafe impl<T: Trace, V: GcVisitor> DynTrace<V> for T {
+    #[inline]
+    fn visit(&mut self, visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
+        <T as Trace>::visit(self, visitor)
+    }
+}
+
 /// Indicates that a type can be traced by a garbage collector.
 ///
 /// This doesn't necessarily mean that the type is safe to allocate in a garbage collector ([GcSafe]).
