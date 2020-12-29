@@ -1,4 +1,4 @@
-use zerogc::{Gc, CollectorId, Trace, GcSafe};
+use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace};
 
 use zerogc_derive::Trace;
 
@@ -19,6 +19,7 @@ pub struct BasicCopy<'gc, Id: CollectorId> {
 }
 
 fn assert_copy<T: Copy>() {}
+fn assert_null_trace<T: NullTrace>() {}
 fn check_id<'gc, Id: CollectorId>() {
     assert_copy::<BasicCopy<'gc, Id>>();
     assert_copy::<Gc<'gc, BasicCopy<'gc, Id>, Id>>();
@@ -27,6 +28,16 @@ fn check_id<'gc, Id: CollectorId>() {
 
     assert!(<Basic<'gc, Id> as GcSafe>::NEEDS_DROP);
 }
+
+#[derive(Trace)]
+#[zerogc(nop_trace)]
+#[allow(unused)]
+struct NopTrace {
+    s: String,
+    i: i32,
+    wow: Box<NopTrace>
+}
+
 
 #[test]
 fn basic() {
@@ -40,6 +51,8 @@ fn basic() {
     assert!(<Basic::<dummy::DummyCollectorId> as GcSafe>::NEEDS_DROP);
     assert!(!<BasicCopy::<dummy::DummyCollectorId> as GcSafe>::NEEDS_DROP);
     assert_copy::<BasicCopy::<dummy::DummyCollectorId>>();
+    assert_null_trace::<NopTrace>();
+    assert!(!<NopTrace as Trace>::NEEDS_TRACE);
 
     check_id::<dummy::DummyCollectorId>();
 }

@@ -97,6 +97,7 @@ impl Parse for GcFieldAttrs {
 
 struct GcTypeAttrs {
     is_copy: bool,
+    nop_trace: bool,
     ignore_params: HashSet<Ident>
 }
 impl GcTypeAttrs {
@@ -114,6 +115,7 @@ impl Default for GcTypeAttrs {
     fn default() -> Self {
         GcTypeAttrs {
             is_copy: false,
+            nop_trace: false,
             ignore_params: HashSet::new()
         }
     }
@@ -139,6 +141,20 @@ impl Parse for GcTypeAttrs {
                     ))
                 }
                 result.is_copy = true;
+            } else if meta.path().is_ident("nop_trace") {
+                if !matches!(meta, Meta::Path(_)) {
+                    return Err(Error::new(
+                        meta.span(),
+                        "Malformed attribute for #[zerogc(nop_trace)]"
+                    ))
+                }
+                if result.nop_trace {
+                    return Err(Error::new(
+                        meta.span(),
+                        "Duplicate flags: #[zerogc(nop_trace)]"
+                    ))
+                }
+                result.nop_trace = true;
             } else if meta.path().is_ident("ignore_params") {
                 if !result.ignore_params.is_empty() {
                     return Err(Error::new(
@@ -193,30 +209,32 @@ impl Parse for GcTypeAttrs {
 #[proc_macro_derive(Trace, attributes(zerogc))]
 pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let attrs = match GcTypeAttrs::find(&*input.attrs) {
-        Ok(attrs) => attrs,
-        Err(e) => return e.to_compile_error().into()
+    let res = From::from(impl_derive_trace(&input)
+        .unwrap_or_else(|e| e.to_compile_error()));
+    debug_derive(
+        "derive(Trace)",
+        &format_args!("#[derive(Trace) for {}", input.ident),
+        &res
+    );
+    res
+}
+
+fn impl_derive_trace(input: &DeriveInput) -> Result<TokenStream, syn::Error> {
+    let attrs = GcTypeAttrs::find(&*input.attrs)?;
+    let trace_impl = if attrs.nop_trace {
+        impl_nop_trace(&input, &attrs)?
+    } else {
+        impl_trace(&input, &attrs)?
     };
-    let trace_impl = impl_trace(&input, &attrs)
-        .unwrap_or_else(|e| e.to_compile_error());
-    let brand_impl = impl_brand(&input)
-        .unwrap_or_else(|e| e.to_compile_error());
-    let gc_safe_impl = impl_gc_safe(&input, &attrs)
-        .unwrap_or_else(|e| e.to_compile_error());
-    let extra_impls = impl_extras(&input)
-        .unwrap_or_else(|e| e.to_compile_error());
-    let t = From::from(quote! {
+    let brand_impl = impl_brand(&input)?;
+    let gc_safe_impl = impl_gc_safe(&input, &attrs)?;
+    let extra_impls = impl_extras(&input)?;
+    Ok(quote! {
         #trace_impl
         #brand_impl
         #gc_safe_impl
         #extra_impls
-    });
-    debug_derive(
-        "derive(Trace)",
-        &format_args!("#[derive(Trace) for {}", input.ident),
-        &t
-    );
-    t
+    })
 }
 
 fn trace_fields(fields: &Fields, access_ref: &mut dyn FnMut(Member) -> TokenStream) -> TokenStream {
@@ -547,6 +565,62 @@ fn impl_gc_safe(target: &DeriveInput, attrs: &GcTypeAttrs) -> Result<TokenStream
             }
         }
         #fake_drop_impl
+    })
+}
+
+
+fn impl_nop_trace(target: &DeriveInput, attrs: &GcTypeAttrs) -> Result<TokenStream, Error> {
+    let name = &target.ident;
+    let generics = add_trait_bounds_except(
+        &target.generics, parse_quote!(zerogc::Trace),
+        &attrs.ignore_params
+    )?;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let field_types: Vec<&Type>;
+    match target.data {
+        Data::Struct(ref data) => {
+            field_types = data.fields.iter().map(|f| &f.ty).collect();
+        },
+        Data::Enum(ref data) => {
+            field_types = data.variants.iter()
+                .flat_map(|var| var.fields.iter().map(|f| &f.ty))
+                .collect();
+        },
+        Data::Union(_) => {
+            return Err(Error::new(
+                name.span(),
+                "Unions can't #[derive(Trace)]"
+            ));
+        },
+    }
+    let const_assertions = field_types.iter()
+        .map(|&t| {
+            let ty_span = t.span();
+            quote_spanned! { ty_span =>
+                #[allow(clippy::eq_op)]
+                const _: [(); 0 - !{
+                    const ASSERT: bool = !<#t as Trace>::NEEDS_TRACE;
+                    ASSERT
+                } as usize] = [];
+            }
+        }).collect::<Vec<_>>();
+    Ok(quote! {
+        #(#const_assertions)*
+        unsafe impl #impl_generics ::zerogc::Trace for #name #ty_generics #where_clause {
+            const NEEDS_TRACE: bool = false;
+
+            #[inline(always)] // NOP
+            fn visit<V: ::zerogc::GcVisitor>(&mut self, #[allow(unused)] visitor: &mut V) -> Result<(), V::Err> {
+                Ok(())
+            }
+        }
+        unsafe impl #impl_generics ::zerogc::TraceImmutable for #name #ty_generics #where_clause {
+            #[inline(always)] // NOP
+            fn visit_immutable<V: ::zerogc::GcVisitor>(&self, #[allow(unused)] visitor: &mut V) -> Result<(), V::Err> {
+                Ok(())
+            }
+        }
+        unsafe impl #impl_generics ::zerogc::NullTrace for #name #ty_generics #where_clause {}
     })
 }
 
