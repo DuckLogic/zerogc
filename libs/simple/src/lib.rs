@@ -579,8 +579,8 @@ impl RawSimpleCollector {
             self.logger, "Finished simple GC";
             "current_thread" => FnValue(|_| ThreadId::current()),
             "num_roots" => num_roots,
-            "original_size" => original_size,
-            "memory_freed" => original_size - updated_size
+            "original_size" => %MemorySize { bytes: original_size },
+            "memory_freed" => %MemorySize { bytes: original_size - updated_size },
         );
     }
 }

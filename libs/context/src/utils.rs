@@ -114,7 +114,7 @@ impl Display for MemorySize {
             } else {
                 (1, "")
             };
-            write!(f, "{:.4}{}", bytes as f64 / amount as f64, suffix)
+            write!(f, "{:.2}{}", bytes as f64 / amount as f64, suffix)
         }
     }
 }
