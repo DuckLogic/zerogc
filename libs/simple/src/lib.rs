@@ -94,12 +94,15 @@ unsafe impl RawSimpleAlloc for RawSimpleCollector {
     }
 }
 
-/// A type alias for [::zerogc::DynTrace], which is an
-/// object-safe version of [::zerogc::Trace]
-///
-/// The `'static` lifetime is a lie and simply represents the
-/// fact the lifetime is unchecked.
-type DynTrace = dyn ::zerogc::DynTrace<MarkVisitor<'static>>;
+#[doc(hidden)] // NOTE: Needs be public for RawCollectorImpl
+pub unsafe trait DynTrace {
+    fn trace(&mut self, visitor: &mut MarkVisitor);
+}
+unsafe impl<T: Trace + ?Sized> DynTrace for T {
+    fn trace(&mut self, visitor: &mut MarkVisitor) {
+        let Ok(()) = self.visit(visitor);
+    }
+}
 
 unsafe impl RawHandleImpl for RawSimpleCollector {
     type TypeInfo = GcType;
@@ -115,13 +118,13 @@ unsafe impl RawHandleImpl for RawSimpleCollector {
     }
 }
 
-/// A wrapper for [GcHandleList] that implements [::zerogc::DynTrace]
+/// A wrapper for [GcHandleList] that implements [DynTrace]
 #[repr(transparent)]
 struct GcHandleListWrapper(GcHandleList<RawSimpleCollector>);
-unsafe impl<'a> ::zerogc::DynTrace<MarkVisitor<'a>> for GcHandleListWrapper {
-    fn visit(&mut self, visitor: &mut MarkVisitor) -> Result<(), !> {
+unsafe impl DynTrace for GcHandleListWrapper {
+    fn trace(&mut self, visitor: &mut MarkVisitor) {
         unsafe {
-            self.0.trace::<_, !>(|raw_ptr, type_info| {
+            let Ok(()) = self.0.trace::<_, !>(|raw_ptr, type_info| {
                 let header = &mut *GcHeader::from_value_ptr(raw_ptr, type_info);
                 // Mark grey
                 header.update_raw_state(MarkState::Grey.
@@ -132,7 +135,7 @@ unsafe impl<'a> ::zerogc::DynTrace<MarkVisitor<'a>> for GcHandleListWrapper {
                 header.update_raw_state(MarkState::Black.
                     to_raw(visitor.inverted_mark));
                 Ok(())
-            })
+            });
         }
     }
 }
@@ -416,7 +419,7 @@ pub struct RawSimpleCollector {
 }
 
 unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector {
-    type GcDynPointer = NonNull<DynTrace>;
+    type GcDynPointer = NonNull<dyn DynTrace>;
 
     #[cfg(feature = "multiple-collectors")]
     type Ptr = NonNull<Self>;
@@ -437,8 +440,9 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
         debug_assert!(!value.is_null());
         NonNull::new_unchecked(
             std::mem::transmute::<
-                _, *mut DynTrace
-            >(value as *mut dyn ::zerogc::DynTrace<MarkVisitor>)
+                *mut dyn DynTrace,
+                *mut (dyn DynTrace + 'static)
+            >(value as *mut dyn DynTrace)
         )
     }
 
@@ -549,7 +553,7 @@ impl RawSimpleCollector {
         &self, contexts: &[*mut RawContext<RawSimpleCollector>]
     ) {
         debug_assert!(self.manager.is_collecting());
-        let roots: Vec<*mut DynTrace> = contexts.iter()
+        let roots: Vec<*mut dyn DynTrace> = contexts.iter()
             .flat_map(|ctx| {
                 (**ctx).assume_valid_shadow_stack()
                     .reverse_iter().map(NonNull::as_ptr)
@@ -558,8 +562,8 @@ impl RawSimpleCollector {
                 // Cast to wrapper type
                 as *const GcHandleList<Self> as *const GcHandleListWrapper
                 // Make into virtual pointer
-                as *const DynTrace
-                as *mut DynTrace
+                as *const dyn DynTrace
+                as *mut dyn DynTrace
             ))
             .collect();
         let num_roots = roots.len();
@@ -586,7 +590,7 @@ impl RawSimpleCollector {
 }
 struct CollectionTask<'a> {
     expected_collector: CollectorId,
-    roots: Vec<*mut DynTrace>,
+    roots: Vec<*mut dyn DynTrace>,
     heap: &'a GcHeap,
     #[cfg_attr(feature = "implicit-grey-stack", allow(dead_code))]
     grey_stack: Vec<*mut GcHeader>
@@ -600,16 +604,8 @@ impl<'a> CollectionTask<'a> {
                 grey_stack: &mut self.grey_stack,
                 inverted_mark: self.heap.allocator.mark_inverted()
             };
-            unsafe {
-                // Dynamically dispatched
-                let Ok(()) = (*root).visit(
-                    // Ignore lifetime
-                    std::mem::transmute::<
-                        &mut  MarkVisitor,
-                        &mut MarkVisitor<'static>
-                    >(&mut visitor)
-                );
-            }
+            // Dynamically dispatched
+            unsafe { (*root).trace(&mut visitor); }
         }
         #[cfg(not(feature = "implicit-grey-stack"))] unsafe {
             let was_inverted_mark = self.heap.allocator.mark_inverted();
@@ -792,8 +788,7 @@ impl<T: GcSafe> StaticGcType for T {
         value_size: std::mem::size_of::<T>(),
         value_offset: Self::VALUE_OFFSET,
         trace_func: unsafe { transmute::<_, unsafe fn(*mut c_void, &mut MarkVisitor)>(
-            <T as ::zerogc::DynTrace<MarkVisitor<'static>>>::visit
-                as fn(&mut T, &mut MarkVisitor<'static>) -> Result<(), !>,
+            <T as DynTrace>::trace as fn(&mut T, &mut MarkVisitor),
         ) },
         drop_func: if <T as GcSafe>::NEEDS_DROP {
             unsafe { Some(transmute::<_, unsafe fn(*mut c_void)>(

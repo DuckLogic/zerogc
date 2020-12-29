@@ -38,6 +38,7 @@ struct NopTrace {
     wow: Box<NopTrace>
 }
 
+
 #[test]
 fn basic() {
     let _b = Basic::<dummy::DummyCollectorId> {
