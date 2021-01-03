@@ -1,20 +1,73 @@
-#![feature(backtrace)]
 extern crate proc_macro;
 
 use quote::{quote, quote_spanned};
 use syn::{
-    parse_macro_input, parenthesized, parse_quote, DeriveInput,
-    Data, Error, Generics, GenericParam, TypeParamBound, Fields,
-    Member, Index, Type, GenericArgument, Attribute, PathArguments,
-    Meta, NestedMeta, TypeParam, WherePredicate, PredicateType,
-    Token
+    parse_macro_input, parenthesized, parse_quote, DeriveInput, Data,
+    Error, Generics, GenericParam, TypeParamBound, Fields, Member,
+    Index, Type, GenericArgument, Attribute, PathArguments, Meta,
+    TypeParam, WherePredicate, PredicateType, Token, Lifetime
 };
 use proc_macro2::{Ident, TokenStream, Span};
 use syn::spanned::Spanned;
-use syn::parse::{ParseStream, Parse};
+use syn::parse::{ParseStream, Parse, ParseBuffer};
 use std::collections::HashSet;
 use syn::export::fmt::Display;
 use std::io::Write;
+
+use indexmap::IndexMap;
+
+struct AttributeOptions {
+    ignored: bool
+}
+impl Default for AttributeOptions {
+    fn default() -> AttributeOptions {
+        AttributeOptions {
+            ignored: false
+        }
+    }
+}
+impl AttributeOptions {
+    pub fn find(attrs: &[Attribute]) -> Result<Self, Error> {
+        attrs.iter().find_map(|attr| {
+            if attr.path.is_ident("zerogc") {
+                Some(syn::parse2::<AttributeOptions>(attr.tokens.clone()))
+            } else {
+                None
+            }
+        }).unwrap_or_else(|| Ok(AttributeOptions::default()))
+    }
+}
+impl Parse for AttributeOptions {
+    fn parse(raw_input: &ParseBuffer) -> Result<Self, Error> {
+        let input;
+        parenthesized!(input in raw_input);
+        let mut result = AttributeOptions::default();
+        while !input.is_empty() {
+            let meta = input.parse::<Meta>()?;
+            if meta.path().is_ident("ignore") {
+                if !matches!(meta, Meta::Path(_)) {
+                    return Err(Error::new(
+                        meta.span(),
+                        "Malformed attribute for #[zerogc(ignore)]"
+                    ))
+                }
+                if result.ignored {
+                    return Err(Error::new(
+                        meta.span(),
+                        "Already ignoring attribute"
+                    ))
+                }
+                result.ignored = true;
+            } else {
+                return Err(Error::new(
+                    meta.span(),
+                    "Unknown attribute flag"
+                ));
+            }
+        }
+        Ok(result)
+    }
+}
 
 struct MutableFieldOpts {
     public: bool
@@ -38,6 +91,9 @@ impl Parse for MutableFieldOpts {
                     input.span(),
                     "Unknown modifier for mutable field"
                 ))
+            }
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
             }
         }
         Ok(result)
@@ -90,41 +146,89 @@ impl Parse for GcFieldAttrs {
                     input.span(), "Unknown field flag"
                 ))
             }
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
         }
         Ok(result)
     }
 }
 
-struct GcTypeAttrs {
+struct GcTypeInfo {
+    config: TypeConfig,
+    params: IndexMap<Ident, AttributeOptions>,
+    lifetimes: IndexMap<Lifetime, AttributeOptions>,
+}
+impl GcTypeInfo {
+    fn ignored_params(&self) -> HashSet<Ident> {
+        self.params.iter()
+            .filter(|&(_, ref opts)| opts.ignored)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+    fn parse(input: &DeriveInput) -> Result<GcTypeInfo, Error> {
+        let config = TypeConfig::find(&*input.attrs)?;
+        let mut params = IndexMap::new();
+        let mut lifetimes = IndexMap::new();
+        for lt in input.generics.lifetimes() {
+            lifetimes.insert(
+                lt.lifetime.clone(),
+                AttributeOptions::find(&lt.attrs)?
+            );
+        }
+        for param in input.generics.type_params() {
+            params.insert(
+                param.ident.clone(),
+                AttributeOptions::find(&param.attrs)?
+            );
+        }
+        if let Some(attrs) = lifetimes.get(&config.gc_lifetime()) {
+            if attrs.ignored {
+                return Err(Error::new(
+                    config.gc_lifetime().span(),
+                    "Ignored gc lifetime"
+                ))
+            }
+        }
+        Ok(GcTypeInfo { config, params, lifetimes })
+    }
+}
+struct TypeConfig {
     is_copy: bool,
     nop_trace: bool,
-    ignore_params: HashSet<Ident>
+    gc_lifetime: Option<Lifetime>
 }
-impl GcTypeAttrs {
+impl TypeConfig {
+    fn gc_lifetime(&self) -> Lifetime {
+        match self.gc_lifetime {
+            Some(ref lt) => lt.clone(),
+            None => Lifetime::new("'gc", Span::call_site())
+        }
+    }
     pub fn find(attrs: &[Attribute]) -> Result<Self, Error> {
         attrs.iter().find_map(|attr| {
             if attr.path.is_ident("zerogc") {
-                Some(syn::parse2::<GcTypeAttrs>(attr.tokens.clone()))
+                Some(syn::parse2::<TypeConfig>(attr.tokens.clone()))
             } else {
                 None
             }
-        }).unwrap_or_else(|| Ok(GcTypeAttrs::default()))
+        }).unwrap_or_else(|| Ok(TypeConfig::default()))
     }
 }
-impl Default for GcTypeAttrs {
+impl Default for TypeConfig {
     fn default() -> Self {
-        GcTypeAttrs {
+        TypeConfig {
             is_copy: false,
             nop_trace: false,
-            ignore_params: HashSet::new()
+            gc_lifetime: None
         }
     }
 }
-impl Parse for GcTypeAttrs {
+impl Parse for TypeConfig {
     fn parse(raw_input: ParseStream) -> Result<Self, Error> {
         let input;
         parenthesized!(input in raw_input);
-        let mut result = GcTypeAttrs::default();
+        let mut result = TypeConfig::default();
         while !input.is_empty() {
             let meta = input.parse::<Meta>()?;
             if meta.path().is_ident("copy") {
@@ -155,44 +259,34 @@ impl Parse for GcTypeAttrs {
                     ))
                 }
                 result.nop_trace = true;
-            } else if meta.path().is_ident("ignore_params") {
-                if !result.ignore_params.is_empty() {
+            } else if meta.path().is_ident("gc_lifetime") {
+                if result.gc_lifetime.is_some() {
                     return Err(Error::new(
                         meta.span(),
-                        "Duplicate flags: #[zerogc(ignore_params)]"
+                        "Duplicate flags: #[zerogc(gc_lifetime)]"
                     ))
                 }
-                let list = match meta {
-                    Meta::List(ref list) if list.nested.is_empty() => {
+                let s = match meta {
+                    Meta::NameValue(syn::MetaNameValue {
+                        lit: ::syn::Lit::Str(ref s), ..
+                    }) => s,
+                    _ => {
                         return Err(Error::new(
-                            list.span(),
-                            "Empty list for #[zerogc(ignore_parameters)]"
+                            meta.span(),
+                            "Malformed attribute for #[zerogc(nop_trace)]"
                         ))
                     }
-                    Meta::List(list) => list,
-                    _ => return Err(Error::new(
-                        meta.span(),
-                        "Expected a list attribute for #[zerogc(ignore_params)]"
-                    ))
                 };
-                for nested in list.nested {
-                    match nested {
-                        NestedMeta::Meta(Meta::Path(ref p)) if
-                            p.get_ident().is_some() => {
-                            let ident = p.get_ident().unwrap();
-                            if !result.ignore_params.insert(ident.clone()) {
-                                return Err(Error::new(
-                                    ident.span(),
-                                    "Duplicate parameter to ignore"
-                                ));
-                            }
-                        }
-                        _ => return Err(Error::new(
-                            nested.span(),
-                            "Invalid list value for #[zerogc(ignore_param)]"
-                        ))
+                let lifetime = match s.parse::<::syn::Lifetime>() {
+                    Ok(lifetime) => lifetime,
+                    Err(cause) => {
+                        return Err(Error::new(s.span(), format_args!(
+                            "Invalid lifetime name for #[zerogc(gc_lifetime)]: {}",
+                            cause
+                        )));
                     }
-                }
+                };
+                result.gc_lifetime = Some(lifetime);
             } else {
                 return Err(Error::new(
                     meta.span(), "Unknown type flag"
@@ -206,7 +300,7 @@ impl Parse for GcTypeAttrs {
     }
 }
 
-#[proc_macro_derive(Trace, attributes(zerogc))]
+#[proc_macro_derive(Trace)]
 pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let res = From::from(impl_derive_trace(&input)
@@ -220,15 +314,15 @@ pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 }
 
 fn impl_derive_trace(input: &DeriveInput) -> Result<TokenStream, syn::Error> {
-    let attrs = GcTypeAttrs::find(&*input.attrs)?;
-    let trace_impl = if attrs.nop_trace {
-        impl_nop_trace(&input, &attrs)?
+    let info = GcTypeInfo::parse(input)?;
+    let trace_impl = if info.config.nop_trace {
+        impl_nop_trace(&input, &info)?
     } else {
-        impl_trace(&input, &attrs)?
+        impl_trace(&input, &info)?
     };
-    let brand_impl = impl_brand(&input)?;
-    let gc_safe_impl = impl_gc_safe(&input, &attrs)?;
-    let extra_impls = impl_extras(&input)?;
+    let brand_impl = impl_brand(&input, &info)?;
+    let gc_safe_impl = impl_gc_safe(&input, &info)?;
+    let extra_impls = impl_extras(&input, &info)?;
     Ok(quote! {
         #trace_impl
         #brand_impl
@@ -253,9 +347,10 @@ fn trace_fields(fields: &Fields, access_ref: &mut dyn FnMut(Member) -> TokenStre
 /// Implement extra methods
 ///
 /// 1. Implement setters for `GcCell` fields using a write barrier
-fn impl_extras(target: &DeriveInput) -> Result<TokenStream, Error> {
+fn impl_extras(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
     let name = &target.ident;
     let mut extra_items = Vec::new();
+    let gc_lifetime = info.config.gc_lifetime();
     match target.data {
         Data::Struct(ref data) => {
             for field in &data.fields {
@@ -313,9 +408,9 @@ fn impl_extras(target: &DeriveInput) -> Result<TokenStream, Error> {
                     let barrier = quote_spanned!(field.span() => ::zerogc::GcDirectBarrier::write_barrier(&value, &self, offset));
                     extra_items.push(quote! {
                         #[inline] // TODO: Implement `GcDirectBarrier` ourselves
-                        #mutator_vis fn #mutator_name<Id>(self: ::zerogc::Gc<'gc, Self, Id>, value: #value_ref_type)
+                        #mutator_vis fn #mutator_name<Id>(self: ::zerogc::Gc<#gc_lifetime, Self, Id>, value: #value_ref_type)
                             where Id: ::zerogc::CollectorId,
-                                   #value_ref_type: ::zerogc::GcDirectBarrier<'gc, ::zerogc::Gc<'gc, Self, Id>> {
+                                   #value_ref_type: ::zerogc::GcDirectBarrier<#gc_lifetime, ::zerogc::Gc<#gc_lifetime, Self, Id>> {
                             unsafe {
                                 let target_ptr = #field_as_ptr;
                                 let offset = target_ptr as usize - self.as_raw_ptr() as usize;
@@ -360,7 +455,7 @@ fn impl_extras(target: &DeriveInput) -> Result<TokenStream, Error> {
     })
 }
 
-fn impl_brand(target: &DeriveInput) -> Result<TokenStream, Error> {
+fn impl_brand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
     let name = &target.ident;
     let mut generics: Generics = target.generics.clone();
     let mut rewritten_params = Vec::new();
@@ -382,16 +477,15 @@ fn impl_brand(target: &DeriveInput) -> Result<TokenStream, Error> {
                 rewritten_param = GenericArgument::Type(rewritten_type);
             },
             GenericParam::Lifetime(ref l) => {
-                /*
-                 * As of right now, we can only handle at most one lifetime.
-                 * That lifetime must be named `'gc` (to indicate its tied to collection).
-                 */
-                if l.lifetime.ident == "gc" {
+                if l.lifetime == info.config.gc_lifetime() {
                     rewritten_param = parse_quote!('new_gc);
+                    assert!(!info.lifetimes[&l.lifetime].ignored);
+                } else if info.lifetimes[&l.lifetime].ignored {
+                    rewritten_param = GenericArgument::Lifetime(l.lifetime.clone());
                 } else {
                     return Err(Error::new(
                         l.span(),
-                        "Only allowed to have 'gc lifetime"
+                        "Unable to handle lifetime"
                     ));
                 }
             },
@@ -415,11 +509,11 @@ fn impl_brand(target: &DeriveInput) -> Result<TokenStream, Error> {
         }
     })
 }
-fn impl_trace(target: &DeriveInput, attrs: &GcTypeAttrs) -> Result<TokenStream, Error> {
+fn impl_trace(target: &DeriveInput, attrs: &GcTypeInfo) -> Result<TokenStream, Error> {
     let name = &target.ident;
     let generics = add_trait_bounds_except(
         &target.generics, parse_quote!(zerogc::Trace),
-        &attrs.ignore_params
+        &attrs.ignored_params()
     )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let field_types: Vec<&Type>;
@@ -499,11 +593,11 @@ fn impl_trace(target: &DeriveInput, attrs: &GcTypeAttrs) -> Result<TokenStream, 
         }
     })
 }
-fn impl_gc_safe(target: &DeriveInput, attrs: &GcTypeAttrs) -> Result<TokenStream, Error> {
+fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
     let name = &target.ident;
     let generics = add_trait_bounds_except(
         &target.generics, parse_quote!(zerogc::GcSafe),
-        &attrs.ignore_params
+        &info.ignored_params()
     )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let field_types: Vec<&Type> = match target.data {
@@ -523,14 +617,14 @@ fn impl_gc_safe(target: &DeriveInput, attrs: &GcTypeAttrs) -> Result<TokenStream
             ))
         },
     };
-    let does_need_drop = if attrs.is_copy {
+    let does_need_drop = if info.config.is_copy {
         // If we're proven to be a copy type we don't need to be dropped
         quote!(false)
     } else {
         // We need to be dropped if any of our fields need to be dropped
         quote!(false #(|| <#field_types as ::zerogc::GcSafe>::NEEDS_DROP)*)
     };
-    let fake_drop_impl = if attrs.is_copy {
+    let fake_drop_impl = if info.config.is_copy {
         /*
          * If this type can be proven to implement Copy,
          * it is known to have no destructor.
@@ -550,7 +644,7 @@ fn impl_gc_safe(target: &DeriveInput, attrs: &GcTypeAttrs) -> Result<TokenStream
             }
         })
     };
-    let verify_gc_safe = if attrs.is_copy {
+    let verify_gc_safe = if info.config.is_copy {
         quote!(::zerogc::assert_copy::<Self>())
     } else {
         quote!(#(<#field_types as GcSafe>::assert_gc_safe();)*)
@@ -569,11 +663,11 @@ fn impl_gc_safe(target: &DeriveInput, attrs: &GcTypeAttrs) -> Result<TokenStream
 }
 
 
-fn impl_nop_trace(target: &DeriveInput, attrs: &GcTypeAttrs) -> Result<TokenStream, Error> {
+fn impl_nop_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
     let name = &target.ident;
     let generics = add_trait_bounds_except(
         &target.generics, parse_quote!(zerogc::Trace),
-        &attrs.ignore_params
+        &info.ignored_params()
     )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let field_types: Vec<&Type>;
