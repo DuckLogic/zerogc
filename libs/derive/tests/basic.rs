@@ -1,25 +1,18 @@
-/*
- * This is needed because we can't put attributes on lifetimes
- * and generic parameters right now.
- * TODO: Remove
- */
-#![feature(register_attr)]
-#![register_attr(zerogc)]
-
 use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace};
 
 use zerogc_derive::Trace;
 
 #[derive(Trace)]
-pub struct Basic<'gc, #[zerogc(ignore)] Id: CollectorId> {
+#[zerogc(ignore_params(Id))]
+pub struct Basic<'gc, Id: CollectorId> {
     parent: Option<Gc<'gc, Basic<'gc, Id>, Id>>,
     children: Vec<Gc<'gc, Basic<'gc, Id>, Id>>,
     value: String
 }
 
 #[derive(Copy, Clone, Trace)]
-#[zerogc(copy)]
-pub struct BasicCopy<'gc, #[zerogc(ignore)] Id: CollectorId> {
+#[zerogc(copy, ignore_params(Id))]
+pub struct BasicCopy<'gc, Id: CollectorId> {
     test: i32,
     value: i32,
     basic: Option<Gc<'gc, Basic<'gc, Id>, Id>>

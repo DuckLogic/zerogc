@@ -2,72 +2,18 @@ extern crate proc_macro;
 
 use quote::{quote, quote_spanned};
 use syn::{
-    parse_macro_input, parenthesized, parse_quote, DeriveInput, Data,
-    Error, Generics, GenericParam, TypeParamBound, Fields, Member,
-    Index, Type, GenericArgument, Attribute, PathArguments, Meta,
-    TypeParam, WherePredicate, PredicateType, Token, Lifetime
+    parse_macro_input, parenthesized, parse_quote, DeriveInput,
+    Data, Error, Generics, GenericParam, TypeParamBound, Fields,
+    Member, Index, Type, GenericArgument, Attribute, PathArguments,
+    Meta, TypeParam, WherePredicate, PredicateType, Token, Lifetime,
+    NestedMeta, Lit
 };
 use proc_macro2::{Ident, TokenStream, Span};
 use syn::spanned::Spanned;
-use syn::parse::{ParseStream, Parse, ParseBuffer};
+use syn::parse::{ParseStream, Parse};
 use std::collections::HashSet;
 use syn::export::fmt::Display;
 use std::io::Write;
-
-use indexmap::IndexMap;
-
-struct AttributeOptions {
-    ignored: bool
-}
-impl Default for AttributeOptions {
-    fn default() -> AttributeOptions {
-        AttributeOptions {
-            ignored: false
-        }
-    }
-}
-impl AttributeOptions {
-    pub fn find(attrs: &[Attribute]) -> Result<Self, Error> {
-        attrs.iter().find_map(|attr| {
-            if attr.path.is_ident("zerogc") {
-                Some(syn::parse2::<AttributeOptions>(attr.tokens.clone()))
-            } else {
-                None
-            }
-        }).unwrap_or_else(|| Ok(AttributeOptions::default()))
-    }
-}
-impl Parse for AttributeOptions {
-    fn parse(raw_input: &ParseBuffer) -> Result<Self, Error> {
-        let input;
-        parenthesized!(input in raw_input);
-        let mut result = AttributeOptions::default();
-        while !input.is_empty() {
-            let meta = input.parse::<Meta>()?;
-            if meta.path().is_ident("ignore") {
-                if !matches!(meta, Meta::Path(_)) {
-                    return Err(Error::new(
-                        meta.span(),
-                        "Malformed attribute for #[zerogc(ignore)]"
-                    ))
-                }
-                if result.ignored {
-                    return Err(Error::new(
-                        meta.span(),
-                        "Already ignoring attribute"
-                    ))
-                }
-                result.ignored = true;
-            } else {
-                return Err(Error::new(
-                    meta.span(),
-                    "Unknown attribute flag"
-                ));
-            }
-        }
-        Ok(result)
-    }
-}
 
 struct MutableFieldOpts {
     public: bool
@@ -155,50 +101,28 @@ impl Parse for GcFieldAttrs {
 }
 
 struct GcTypeInfo {
-    config: TypeConfig,
-    params: IndexMap<Ident, AttributeOptions>,
-    lifetimes: IndexMap<Lifetime, AttributeOptions>,
+    config: TypeAttrs,
 }
 impl GcTypeInfo {
-    fn ignored_params(&self) -> HashSet<Ident> {
-        self.params.iter()
-            .filter(|&(_, ref opts)| opts.ignored)
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
     fn parse(input: &DeriveInput) -> Result<GcTypeInfo, Error> {
-        let config = TypeConfig::find(&*input.attrs)?;
-        let mut params = IndexMap::new();
-        let mut lifetimes = IndexMap::new();
-        for lt in input.generics.lifetimes() {
-            lifetimes.insert(
-                lt.lifetime.clone(),
-                AttributeOptions::find(&lt.attrs)?
-            );
+        let config = TypeAttrs::find(&*input.attrs)?;
+        if config.ignored_lifetimes.contains(&config.gc_lifetime()) {
+            return Err(Error::new(
+                config.gc_lifetime().span(),
+                "Ignored gc lifetime"
+            ))
         }
-        for param in input.generics.type_params() {
-            params.insert(
-                param.ident.clone(),
-                AttributeOptions::find(&param.attrs)?
-            );
-        }
-        if let Some(attrs) = lifetimes.get(&config.gc_lifetime()) {
-            if attrs.ignored {
-                return Err(Error::new(
-                    config.gc_lifetime().span(),
-                    "Ignored gc lifetime"
-                ))
-            }
-        }
-        Ok(GcTypeInfo { config, params, lifetimes })
+        Ok(GcTypeInfo { config })
     }
 }
-struct TypeConfig {
+struct TypeAttrs {
     is_copy: bool,
     nop_trace: bool,
-    gc_lifetime: Option<Lifetime>
+    gc_lifetime: Option<Lifetime>,
+    ignore_params: HashSet<Ident>,
+    ignored_lifetimes: HashSet<Lifetime>
 }
-impl TypeConfig {
+impl TypeAttrs {
     fn gc_lifetime(&self) -> Lifetime {
         match self.gc_lifetime {
             Some(ref lt) => lt.clone(),
@@ -208,27 +132,29 @@ impl TypeConfig {
     pub fn find(attrs: &[Attribute]) -> Result<Self, Error> {
         attrs.iter().find_map(|attr| {
             if attr.path.is_ident("zerogc") {
-                Some(syn::parse2::<TypeConfig>(attr.tokens.clone()))
+                Some(syn::parse2::<TypeAttrs>(attr.tokens.clone()))
             } else {
                 None
             }
-        }).unwrap_or_else(|| Ok(TypeConfig::default()))
+        }).unwrap_or_else(|| Ok(TypeAttrs::default()))
     }
 }
-impl Default for TypeConfig {
+impl Default for TypeAttrs {
     fn default() -> Self {
-        TypeConfig {
+        TypeAttrs {
             is_copy: false,
             nop_trace: false,
-            gc_lifetime: None
+            gc_lifetime: None,
+            ignore_params: Default::default(),
+            ignored_lifetimes: Default::default(),
         }
     }
 }
-impl Parse for TypeConfig {
+impl Parse for TypeAttrs {
     fn parse(raw_input: ParseStream) -> Result<Self, Error> {
         let input;
         parenthesized!(input in raw_input);
-        let mut result = TypeConfig::default();
+        let mut result = TypeAttrs::default();
         while !input.is_empty() {
             let meta = input.parse::<Meta>()?;
             if meta.path().is_ident("copy") {
@@ -268,7 +194,7 @@ impl Parse for TypeConfig {
                 }
                 let s = match meta {
                     Meta::NameValue(syn::MetaNameValue {
-                        lit: ::syn::Lit::Str(ref s), ..
+                        lit: Lit::Str(ref s), ..
                     }) => s,
                     _ => {
                         return Err(Error::new(
@@ -287,6 +213,89 @@ impl Parse for TypeConfig {
                     }
                 };
                 result.gc_lifetime = Some(lifetime);
+            } else if meta.path().is_ident("ignore_params") {
+                if !result.ignore_params.is_empty() {
+                    return Err(Error::new(
+                        meta.span(),
+                        "Duplicate flags: #[zerogc(ignore_params)]"
+                    ))
+                }
+                let list = match meta {
+                    Meta::List(ref list) if list.nested.is_empty() => {
+                        return Err(Error::new(
+                            list.span(),
+                            "Empty list for #[zerogc(ignore_params)]"
+                        ))
+                    }
+                    Meta::List(list) => list,
+                    _ => return Err(Error::new(
+                        meta.span(),
+                        "Expected a list attribute for #[zerogc(ignore_params)]"
+                    ))
+                };
+                for nested in list.nested {
+                    match nested {
+                        NestedMeta::Meta(Meta::Path(ref p))
+                                if p.get_ident().is_some() => {
+                            let ident = p.get_ident().unwrap();
+                            if !result.ignore_params.insert(ident.clone()) {
+                                return Err(Error::new(
+                                    ident.span(),
+                                    "Duplicate parameter to ignore"
+                                ));
+                            }
+                        }
+                        _ => return Err(Error::new(
+                            nested.span(),
+                            "Invalid list value for #[zerogc(ignore_param)]"
+                        ))
+                    }
+                }
+            } else if meta.path().is_ident("ignore_lifetimes") {
+                if !result.ignore_params.is_empty() {
+                    return Err(Error::new(
+                        meta.span(),
+                        "Duplicate flags: #[zerogc(ignore_lifetimes)]"
+                    ))
+                }
+                let list = match meta {
+                    Meta::List(ref list) if list.nested.is_empty() => {
+                        return Err(Error::new(
+                            list.span(),
+                            "Empty list for #[zerogc(ignore_lifetimes)]"
+                        ))
+                    }
+                    Meta::List(list) => list,
+                    _ => return Err(Error::new(
+                        meta.span(),
+                        "Expected a list attribute for #[zerogc(ignore_lifetimes)]"
+                    ))
+                };
+                for nested in list.nested {
+                    let lifetime = match nested {
+                        NestedMeta::Lit(Lit::Str(ref s)) => {
+                            s.parse::<Lifetime>()?
+                        },
+                        NestedMeta::Meta(Meta::Path(ref p)) if p.get_ident().is_some() => {
+                            let ident = p.get_ident().unwrap();
+                            Lifetime {
+                                ident: ident.clone(),
+                                // Fake the appostrophie's span as matching the ident
+                                apostrophe: ident.span()
+                            }
+                        },
+                        _ => return Err(Error::new(
+                            nested.span(),
+                            "Invalid list value for #[zerogc(ignore_lifetimes)]"
+                        ))
+                    };
+                    if !result.ignored_lifetimes.insert(lifetime.clone()) {
+                        return Err(Error::new(
+                            lifetime.span(),
+                            "Duplicate lifetime to ignore"
+                        ));
+                    }
+                }
             } else {
                 return Err(Error::new(
                     meta.span(), "Unknown type flag"
@@ -300,7 +309,7 @@ impl Parse for TypeConfig {
     }
 }
 
-#[proc_macro_derive(Trace)]
+#[proc_macro_derive(Trace, attributes(zerogc))]
 pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let res = From::from(impl_derive_trace(&input)
@@ -479,8 +488,8 @@ fn impl_brand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
             GenericParam::Lifetime(ref l) => {
                 if l.lifetime == info.config.gc_lifetime() {
                     rewritten_param = parse_quote!('new_gc);
-                    assert!(!info.lifetimes[&l.lifetime].ignored);
-                } else if info.lifetimes[&l.lifetime].ignored {
+                    assert!(!info.config.ignored_lifetimes.contains(&l.lifetime));
+                } else if info.config.ignored_lifetimes.contains(&l.lifetime) {
                     rewritten_param = GenericArgument::Lifetime(l.lifetime.clone());
                 } else {
                     return Err(Error::new(
@@ -509,11 +518,11 @@ fn impl_brand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
         }
     })
 }
-fn impl_trace(target: &DeriveInput, attrs: &GcTypeInfo) -> Result<TokenStream, Error> {
+fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
     let name = &target.ident;
     let generics = add_trait_bounds_except(
         &target.generics, parse_quote!(zerogc::Trace),
-        &attrs.ignored_params()
+        &info.config.ignore_params
     )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let field_types: Vec<&Type>;
@@ -597,7 +606,7 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
     let name = &target.ident;
     let generics = add_trait_bounds_except(
         &target.generics, parse_quote!(zerogc::GcSafe),
-        &info.ignored_params()
+        &info.config.ignore_params
     )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let field_types: Vec<&Type> = match target.data {
@@ -667,7 +676,7 @@ fn impl_nop_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream
     let name = &target.ident;
     let generics = add_trait_bounds_except(
         &target.generics, parse_quote!(zerogc::Trace),
-        &info.ignored_params()
+        &info.config.ignore_params
     )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let field_types: Vec<&Type>;

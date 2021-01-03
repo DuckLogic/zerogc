@@ -15,7 +15,6 @@ proc-macro = true
 zerogc = { version = "0.1.3", path = "../.." }
 
 [dependencies]
-indexmap = "1"
 # Proc macros
 syn = "1.0.55"
 quote = "1.0.8"
