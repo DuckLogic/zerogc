@@ -12,7 +12,7 @@ use proc_macro2::{Ident, TokenStream, Span};
 use syn::spanned::Spanned;
 use syn::parse::{ParseStream, Parse};
 use std::collections::HashSet;
-use syn::export::fmt::Display;
+use std::fmt::Display;
 use std::io::Write;
 
 struct MutableFieldOpts {
