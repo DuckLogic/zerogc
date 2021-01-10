@@ -88,6 +88,8 @@ unsafe_trace_primitive!(f32);
 unsafe_trace_primitive!(f64);
 unsafe_trace_primitive!(bool);
 unsafe_trace_primitive!(char);
+// TODO: Get proper support for unsized types (issue #15)
+unsafe_trace_primitive!(&'static str);
 
 trace_tuple! {}
 trace_tuple! { A }
