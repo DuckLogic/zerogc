@@ -30,7 +30,7 @@
 /// However, using this macro is always better than a manual implementation, since it makes your intent clearer.
 ///
 /// ## Usage
-/// ````
+/// ````no_test
 /// // You can use an arbitrary expression to acquire a lock's guard
 /// unsafe_trace_lock!(RefCell, target = T, |cell| cell.borrow());
 /// unsafe_trace_lock!(Mutex, target = T, |lock| lock.lock().unwrap());
@@ -97,7 +97,7 @@ macro_rules! unsafe_trace_lock {
 /// However, using this macro is always better than a manual implementation, since it makes your intent clearer.
 ///
 /// ## Usage
-/// ````
+/// ````no_test
 /// // Easy to use for wrappers that `Deref` to their type parameter
 /// unsafe_trace_deref!(Box, target = T);
 /// unsafe_trace_deref!(Rc, target = T);
@@ -110,7 +110,18 @@ macro_rules! unsafe_trace_lock {
 ///  */
 /// unsafe_trace_deref!(Cell, T; |cell| cell.get());
 /// unsafe_trace_deref!(Wrapping, T; |wrapping| &wrapping.0);
-/// unsafe_trace_deref!(NonZero, T; |nonzero| &nonzero.get());
+///
+/// // wrappers shouldn't need tracing if their innards don't
+/// assert!(!<Box<i32> as Trace>::NEEDS_TRACE);
+/// assert!(!<Cell<i32> as Trace>::NEEDS_TRACE);
+/// // Box needs to be dropped
+/// assert!(<Box<i32> as GcSafe>::NEEDS_DROP);
+/// // but Cell doesn't need to be dropped
+/// assert!(<Cell<i32> as GcSafe>::NEEDS_DROP);
+///
+/// // if the inside needs tracing, the outside does
+/// assert!(<Box<dummy_impl::Gc<'static, i32>> as Trace>::NEEDS_TRACE);
+/// assert!(<Cell<dummy_impl::Gc<'static, i32>> as Trace>::NEEDS_TRACE);
 /// ````
 ///
 /// ## Safety
@@ -219,10 +230,14 @@ macro_rules! unsafe_trace_deref {
 /// In order to prevent ambiguity, this always requires the type of the element being traced.
 ///
 /// ## Usage
-/// ````
+/// ````no_test
 /// unsafe_trace_iterable!(Vec, element = T);
 /// unsafe_trace_iterable!(HashMap, element = { (&K, &V) }; K, V);
 /// unsafe_trace_iterable!(HashSet, element = T);
+///
+/// assert!(!<Vec<i32> as Trace>::NEEDS_TRACE);
+/// assert!(<Vec<dummy_impl::Gc<'static, i32>> as Trace>::NEEDS_TRACE);
+/// assert!(<Vec<i32> as GcSafe>::NEEDS_DROP);
 /// ````
 ///
 /// ## Safety
@@ -348,14 +363,14 @@ macro_rules! unsafe_gc_brand {
     };
     ($target:ident, $($param:ident),+) => {
         unsafe impl<'new_gc, Id, $($param),*> $crate::GcBrand<'new_gc, Id> for $target<$($param),*>
-            where Id: crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id>,)*
+            where Id: $crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id>,)*
                   $(<$param as $crate::GcBrand<'new_gc, Id>>::Branded: Trace,)* {
             type Branded = $target<$(<$param as $crate::GcBrand<'new_gc, Id>>::Branded),*>;
         }
     };
     ($target:tt, immut = required; $($param:ident),+) => {
         unsafe impl<'new_gc, Id, $($param),*> $crate::GcBrand<'new_gc, Id> for $target<$($param),*>
-            where Id: crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id> + TraceImmutable,)*
+            where Id: $crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id> + TraceImmutable,)*
                   $(<$param as $crate::GcBrand<'new_gc, Id>>::Branded: TraceImmutable,)* {
             type Branded = $target<$(<$param as $crate::GcBrand<'new_gc, Id>>::Branded),*>;
         }

@@ -34,6 +34,7 @@ use core::fmt::{self, Debug, Formatter};
 mod manually_traced;
 pub mod cell;
 pub mod prelude;
+pub mod dummy_impl;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.
@@ -92,10 +93,11 @@ macro_rules! safepoint_recurse {
 
 /// Create a new sub-context for the duration of the closure
 ///
-/// The specified `root` object will be appended to the shadowstack
-/// and is guarenteed to live for the entire lifetime of the closure (and the created sub-context).
+/// The specified `root` object will be appended to the shadow-stack
+/// and is guarenteed to live for the entire lifetime of the closure
+/// (and the created sub-context).
 ///
-/// Unlike `safepoint_recurse!` this doesn't imply a safepoint anywhere.
+/// Unlike [safepoint_recurse!] this doesn't imply a safepoint anywhere.
 ///
 /// # Safety
 /// This doesn't actually mutate the original collector.
@@ -124,15 +126,21 @@ macro_rules! __recurse_context {
 /// Indicate it's safe to begin a garbage collection,
 /// while keeping the specified root alive.
 ///
-/// All other garbage collected pointers that aren't reachable from the root are invalidated.
-/// They have a lifetime that references the [GcRef]
+/// All other garbage collected pointers that aren't reachable
+/// from the root are invalidated.
+/// They have a lifetime that references the [GcContext]
 /// and the borrow checker considers the safepoint a 'mutation'.
 ///
 /// The root is exempted from the "mutation" and rebound to the new lifetime.
 ///
 /// ## Example
 /// ```
-/// let root = safepoint!(collector, root);
+/// # use ::zerogc::safepoint;
+/// # let mut context = zerogc::dummy_impl::DummySystem::new().new_context();
+/// # // TODO: Can we please get support for non-Sized types like `String`?!?!?!
+/// let root = zerogc::dummy_impl::leaked(String::from("potato"));
+/// let root = safepoint!(context, root);
+/// assert_eq!(**root, "potato");
 /// ```
 ///
 /// ## Safety
