@@ -18,6 +18,29 @@ pub struct BasicCopy<'gc, Id: CollectorId> {
     basic: Option<Gc<'gc, Basic<'gc, Id>, Id>>
 }
 
+
+#[derive(Copy, Clone, Trace)]
+#[zerogc(copy, ignore_params(Id))]
+pub enum BasicEnum<'gc, Id: CollectorId> {
+    Unit,
+    Tuple(i32),
+    First {
+        all: i32
+    },
+    Second {
+        you: Gc<'gc, String, Id>,
+        need: bool
+    },
+    Third {
+        is: (),
+        love: Gc<'gc, BasicEnum<'gc, Id>, Id>
+    },
+    Fifth(
+        Gc<'gc, BasicEnum<'gc, Id>, Id>,
+        Gc<'gc, Basic<'gc, Id>, Id>
+    )
+}
+
 fn assert_copy<T: Copy>() {}
 fn assert_null_trace<T: NullTrace>() {}
 fn check_id<'gc, Id: CollectorId>() {

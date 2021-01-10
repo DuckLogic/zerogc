@@ -554,14 +554,14 @@ fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
                                 )
                             },
                         };
-                        quote!(ref mut #ident)
+                        quote!(#ident)
                     }
                 );
                 let pattern = match variant.fields {
                     Fields::Named(ref fields) => {
                         let names = fields.named.iter()
                             .map(|field| field.ident.as_ref().unwrap());
-                        quote!({ #(#names,)* })
+                        quote!({ #(ref mut #names,)* })
                     },
                     Fields::Unnamed(ref fields) => {
                         let names = (0..fields.unnamed.len())
@@ -569,7 +569,7 @@ fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
                                 &format!("field{}", index),
                                 Span::call_site()
                             ));
-                        quote!(#(#names,)*)
+                        quote!(( #(ref mut #names,)* ))
                     },
                     Fields::Unit => quote!(),
                 };
@@ -783,6 +783,7 @@ fn add_trait_bounds(
 }
 
 fn debug_derive(key: &str, message: &dyn Display, value: &dyn Display) {
+    // TODO: Use proc_macro::tracked_env::var
     match ::std::env::var_os("DEBUG_DERIVE") {
         Some(var) if var == "*" ||
             var.to_string_lossy().contains(key) => {
