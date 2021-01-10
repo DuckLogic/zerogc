@@ -61,6 +61,17 @@ struct NopTrace {
     wow: Box<NopTrace>
 }
 
+#[derive(Trace)]
+#[zerogc(nop_trace, ignore_lifetimes("'a"), ignore_params(T))]
+#[allow(unused)]
+struct LifetimeTrace<'a, T: GcSafe> {
+    s: String,
+    i: i32,
+    wow: Box<NopTrace>,
+    other: &'a LifetimeTrace<'a, T>,
+    generic: Box<T>
+}
+
 
 #[test]
 fn basic() {

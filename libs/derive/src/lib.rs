@@ -1,13 +1,7 @@
 extern crate proc_macro;
 
 use quote::{quote, quote_spanned};
-use syn::{
-    parse_macro_input, parenthesized, parse_quote, DeriveInput,
-    Data, Error, Generics, GenericParam, TypeParamBound, Fields,
-    Member, Index, Type, GenericArgument, Attribute, PathArguments,
-    Meta, TypeParam, WherePredicate, PredicateType, Token, Lifetime,
-    NestedMeta, Lit
-};
+use syn::{parse_macro_input, parenthesized, parse_quote, DeriveInput, Data, Error, Generics, GenericParam, TypeParamBound, Fields, Member, Index, Type, GenericArgument, Attribute, PathArguments, Meta, TypeParam, WherePredicate, PredicateType, Token, Lifetime, NestedMeta, Lit, PredicateLifetime};
 use proc_macro2::{Ident, TokenStream, Span};
 use syn::spanned::Spanned;
 use syn::parse::{ParseStream, Parse};
@@ -696,30 +690,31 @@ fn impl_nop_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream
             ));
         },
     }
-    let const_assertions = field_types.iter()
+    let trace_assertions = field_types.iter()
         .map(|&t| {
             let ty_span = t.span();
             quote_spanned! { ty_span =>
-                #[allow(clippy::eq_op)]
-                const _: [(); 0 - !{
-                    const ASSERT: bool = !<#t as Trace>::NEEDS_TRACE;
-                    ASSERT
-                } as usize] = [];
+                assert!(
+                    !<#t as Trace>::NEEDS_TRACE,
+                    "Can't #[derive(NullTrace) with {}",
+                    stringify!(#t)
+                );
             }
         }).collect::<Vec<_>>();
     Ok(quote! {
-        #(#const_assertions)*
         unsafe impl #impl_generics ::zerogc::Trace for #name #ty_generics #where_clause {
             const NEEDS_TRACE: bool = false;
 
-            #[inline(always)] // NOP
+            #[inline] // Should be const-folded away
             fn visit<V: ::zerogc::GcVisitor>(&mut self, #[allow(unused)] visitor: &mut V) -> Result<(), V::Err> {
+                #(#trace_assertions)*
                 Ok(())
             }
         }
         unsafe impl #impl_generics ::zerogc::TraceImmutable for #name #ty_generics #where_clause {
-            #[inline(always)] // NOP
+            #[inline] // Should be const-folded away
             fn visit_immutable<V: ::zerogc::GcVisitor>(&self, #[allow(unused)] visitor: &mut V) -> Result<(), V::Err> {
+                #(#trace_assertions)*
                 Ok(())
             }
         }
