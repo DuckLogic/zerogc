@@ -86,6 +86,8 @@ unsafe_trace_primitive!(u64);
 unsafe_trace_primitive!(usize);
 unsafe_trace_primitive!(f32);
 unsafe_trace_primitive!(f64);
+unsafe_trace_primitive!(bool);
+unsafe_trace_primitive!(char);
 
 trace_tuple! {}
 trace_tuple! { A }
