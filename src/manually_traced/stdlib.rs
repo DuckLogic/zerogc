@@ -24,14 +24,24 @@ unsafe impl<K: TraceImmutable, V: Trace> Trace for HashMap<K, V> {
 unsafe impl<K: GcSafe + TraceImmutable, V: GcSafe> GcSafe for HashMap<K, V> {
     const NEEDS_DROP: bool = true; // HashMap has internal memory
 }
-unsafe impl<'new_gc, Id, K, V> GcBrand<'new_gc, Id> for HashMap<K, V>
-    where Id: CollectorId, K: TraceImmutable + GcBrand<'new_gc, Id>,
-          V: GcBrand<'new_gc, Id>,
-          <K as GcBrand<'new_gc, Id>>::Branded: TraceImmutable + Sized,
-          <V as GcBrand<'new_gc, Id>>::Branded: Sized {
+unsafe impl<'new_gc, Id, K, V> GcRebrand<'new_gc, Id> for HashMap<K, V>
+    where Id: CollectorId, K: TraceImmutable + GcRebrand<'new_gc, Id>,
+          V: GcRebrand<'new_gc, Id>,
+          <K as GcRebrand<'new_gc, Id>>::Branded: TraceImmutable + Sized,
+          <V as GcRebrand<'new_gc, Id>>::Branded: Sized {
     type Branded = HashMap<
-        <K as GcBrand<'new_gc, Id>>::Branded,
-        <V as GcBrand<'new_gc, Id>>::Branded
+        <K as GcRebrand<'new_gc, Id>>::Branded,
+        <V as GcRebrand<'new_gc, Id>>::Branded
+    >;
+}
+unsafe impl<'a, Id, K, V> GcErase<'a, Id> for HashMap<K, V>
+    where Id: CollectorId, K: TraceImmutable + GcErase<'a, Id>,
+          V: GcErase<'a, Id>,
+          <K as GcErase<'a, Id>>::Erased: TraceImmutable + Sized,
+          <V as GcErase<'a, Id>>::Erased: Sized {
+    type Erased = HashMap<
+        <K as GcErase<'a, Id>>::Erased,
+        <V as GcErase<'a, Id>>::Erased
     >;
 }
 unsafe_immutable_trace_iterable!(HashSet<V>; element = { &V });

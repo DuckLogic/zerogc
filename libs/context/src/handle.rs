@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 use std::marker::PhantomData;
 use std::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
 
-use zerogc::{Trace, GcSafe, GcBrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
+use zerogc::{Trace, GcSafe, GcErase, GcRebrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
 use crate::{Gc, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef, CollectionManager};
 use crate::collector::RawCollectorImpl;
 
@@ -434,7 +434,7 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C
     }
 }
 unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
-    where T: GcSafe, T: GcBrand<'new_gc, CollectorId<C>>,
+    where T: GcSafe, T: GcRebrand<'new_gc, CollectorId<C>>,
           T::Branded: GcSafe, C: RawHandleImpl {
     #[inline]
     fn bind_to(&self, context: &'new_gc CollectorContext<C>) -> Gc<'new_gc, T::Branded, CollectorId<C>> {
@@ -590,12 +590,12 @@ unsafe impl<T: GcSafe + Sync, C: RawHandleImpl + Sync> Send for GcHandle<T, C> {
 unsafe impl<T: GcSafe + Sync, C: RawHandleImpl + Sync> Sync for GcHandle<T, C> {}
 
 /// We support handles
-unsafe impl<'gc, T, C> GcHandleSystem<'gc, T> for CollectorRef<C>
+unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for CollectorRef<C>
     where C: RawHandleImpl,
           T: GcSafe + 'gc,
-          T: GcBrand<'static, CollectorId<C>>,
-          T::Branded: GcSafe {
-    type Handle = GcHandle<T::Branded, C>;
+          T: GcErase<'a, CollectorId<C>>,
+          T::Erased: GcSafe {
+    type Handle = GcHandle<T::Erased, C>;
 
     #[inline]
     fn create_handle(gc: Gc<'gc, T, CollectorId<C>>) -> Self::Handle {

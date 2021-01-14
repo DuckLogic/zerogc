@@ -49,7 +49,7 @@
 /// but it's still a possibility that causes the macro to be unsafe.
 ///
 ///
-/// This delegates to `unsafe_gc_brand` to provide the `GcBrand` implementation,
+/// This delegates to `unsafe_gc_brand` to provide the [GcRebrand] and [GcErase] implementation,
 /// so that could also trigger undefined behavior.
 #[macro_export]
 macro_rules! unsafe_trace_lock {
@@ -136,7 +136,7 @@ macro_rules! unsafe_trace_lock {
 /// This usually isn't the case with collections and would be somewhat rare,
 /// but it's still a possibility that causes the macro to be unsafe.
 ///
-/// This delegates to `unsafe_gc_brand` to provide the [GcBrand] implementation,
+/// This delegates to `unsafe_gc_brand` to provide the [GcRebrand] and [GcErase] implementation,
 /// so that could also trigger undefined behavior.
 #[macro_export]
 macro_rules! unsafe_trace_deref {
@@ -253,7 +253,7 @@ macro_rules! unsafe_trace_deref {
 /// but it's still a possibility that causes the macro to be unsafe.
 ///
 ///
-/// This delegates to `unsafe_gc_brand!` to provide the [GcBrand] implementation,
+/// This delegates to `unsafe_gc_brand!` to provide the [GcRebrand] and [GcErase] implementation,
 /// so that could also trigger undefined behavior.
 #[macro_export]
 macro_rules! unsafe_immutable_trace_iterable {
@@ -295,7 +295,7 @@ macro_rules! unsafe_immutable_trace_iterable {
 /// Undefined behavior only if there are garbage collected pointers in the type's interior,
 /// since the implementation assumes there's nothing to trace in the first place.
 ///
-/// This delegates to `unsafe_gc_brand!` to provide the [GcBrand] implementation,
+/// This delegates to `unsafe_gc_brand!` to provide the [GcRebrand] and [GcErase] implementation,
 /// but that will never cause undefined behavior unless you
 /// already have garbage collected pointers inside
 /// (which are already undefined behavior for tracing).
@@ -333,7 +333,7 @@ macro_rules! unsafe_trace_primitive {
 }
 
 
-/// Unsafely assume that the generic implementation of [GcBrand] is valid,
+/// Unsafely assume that the generic implementation of [GcRebrand] and [GcErase] is valid,
 /// if and only if it's valid for the generic lifetime and type parameters.
 ///
 /// Always _prefer automatically derived implementations where possible_,
@@ -344,7 +344,7 @@ macro_rules! unsafe_trace_primitive {
 /// to be used only when a safe automatically derived implementation isn't possible (like with `Vec`).
 ///
 /// This macro takes a varying number of parameters referring to the type's generic parameters,
-/// which are all properly bounded and required to implement [GcBrand] correctly.
+/// which are all properly bounded and required to implement [GcRebrand] and [GcErase] correctly.
 ///
 /// This macro can only cause undefined behavior if there are garbage collected pointers
 /// that aren't included in the type parameter.
@@ -357,22 +357,35 @@ macro_rules! unsafe_trace_primitive {
 #[macro_export]
 macro_rules! unsafe_gc_brand {
     ($target:tt) => {
-        unsafe impl<'new_gc, Id: $crate::CollectorId> $crate::GcBrand<'new_gc, Id> for $target {
+        unsafe impl<'new_gc, Id: $crate::CollectorId> $crate::GcRebrand<'new_gc, Id> for $target {
             type Branded = Self;
+        }
+        unsafe impl<'a, Id: $crate::CollectorId> $crate::GcErase<'a, Id> for $target {
+            type Erased = Self;
         }
     };
     ($target:ident, $($param:ident),+) => {
-        unsafe impl<'new_gc, Id, $($param),*> $crate::GcBrand<'new_gc, Id> for $target<$($param),*>
-            where Id: $crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id>,)*
-                  $(<$param as $crate::GcBrand<'new_gc, Id>>::Branded: Trace,)* {
-            type Branded = $target<$(<$param as $crate::GcBrand<'new_gc, Id>>::Branded),*>;
+        unsafe impl<'new_gc, Id, $($param),*> $crate::GcRebrand<'new_gc, Id> for $target<$($param),*>
+            where Id: $crate::CollectorId, $($param: $crate::GcRebrand<'new_gc, Id>,)*
+                  $(<$param as $crate::GcRebrand<'new_gc, Id>>::Branded: Trace,)* {
+            type Branded = $target<$(<$param as $crate::GcRebrand<'new_gc, Id>>::Branded),*>;
+        }
+        unsafe impl<'a, Id, $($param),*> $crate::GcErase<'a, Id> for $target<$($param),*>
+            where Id: $crate::CollectorId, $($param: $crate::GcErase<'a, Id>,)*
+                  $(<$param as $crate::GcErase<'a, Id>>::Erased: Trace,)* {
+            type Erased = $target<$(<$param as $crate::GcErase<'a, Id>>::Erased),*>;
         }
     };
     ($target:tt, immut = required; $($param:ident),+) => {
-        unsafe impl<'new_gc, Id, $($param),*> $crate::GcBrand<'new_gc, Id> for $target<$($param),*>
-            where Id: $crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id> + TraceImmutable,)*
-                  $(<$param as $crate::GcBrand<'new_gc, Id>>::Branded: TraceImmutable,)* {
-            type Branded = $target<$(<$param as $crate::GcBrand<'new_gc, Id>>::Branded),*>;
+        unsafe impl<'new_gc, Id, $($param),*> $crate::GcRebrand<'new_gc, Id> for $target<$($param),*>
+            where Id: $crate::CollectorId, $($param: $crate::GcRebrand<'new_gc, Id> + TraceImmutable,)*
+                  $(<$param as $crate::GcRebrand<'new_gc, Id>>::Branded: TraceImmutable,)* {
+            type Branded = $target<$(<$param as $crate::GcRebrand<'new_gc, Id>>::Branded),*>;
+        }
+        unsafe impl<'a, Id, $($param),*> $crate::GcErase<'a, Id> for $target<$($param),*>
+            where Id: $crate::CollectorId, $($param: $crate::GcErase<'a, Id> + TraceImmutable,)*
+                  $(<$param as $crate::GcErase<'a, Id>>::Erased: TraceImmutable,)* {
+            type Erased = $target<$(<$param as $crate::GcErase<'a, Id>>::Erased),*>;
         }
     }
 }

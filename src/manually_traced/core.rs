@@ -40,10 +40,15 @@ macro_rules! trace_tuple {
             }
         }
         unsafe impl<$($param: NullTrace),*> NullTrace for ($($param,)*) {}
-        unsafe impl<'new_gc, Id, $($param),*> $crate::GcBrand<'new_gc, Id> for ($($param,)*)
-            where Id: $crate::CollectorId, $($param: $crate::GcBrand<'new_gc, Id>,)*
-                 $(<$param as $crate::GcBrand<'new_gc, Id>>::Branded: Sized,)* {
-            type Branded = ($(<$param as $crate::GcBrand<'new_gc, Id>>::Branded,)*);
+        unsafe impl<'new_gc, Id, $($param),*> $crate::GcRebrand<'new_gc, Id> for ($($param,)*)
+            where Id: $crate::CollectorId, $($param: $crate::GcRebrand<'new_gc,     Id>,)*
+                 $(<$param as $crate::GcRebrand<'new_gc, Id>>::Branded: Sized,)* {
+            type Branded = ($(<$param as $crate::GcRebrand<'new_gc, Id>>::Branded,)*);
+        }
+        unsafe impl<'a, Id, $($param),*> $crate::GcErase<'a, Id> for ($($param,)*)
+            where Id: $crate::CollectorId, $($param: $crate::GcErase<'a, Id>,)*
+                 $(<$param as $crate::GcErase<'a, Id>>::Erased: Sized,)* {
+            type Erased = ($(<$param as $crate::GcErase<'a, Id>>::Erased,)*);
         }
         unsafe impl<$($param: GcSafe),*> GcSafe for ($($param,)*) {
             const NEEDS_DROP: bool = false $(|| <$param as GcSafe>::NEEDS_DROP)*;
@@ -121,10 +126,15 @@ macro_rules! trace_array {
         unsafe impl<T: GcSafe> GcSafe for [T; $size] {
             const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
         }
-        unsafe impl<'new_gc, Id, T> $crate::GcBrand<'new_gc, Id> for [T; $size]
-            where Id: CollectorId, T: GcBrand<'new_gc, Id>,
-                  <T as GcBrand<'new_gc, Id>>::Branded: Sized {
-            type Branded = [<T as GcBrand<'new_gc, Id>>::Branded; $size];
+        unsafe impl<'new_gc, Id, T> $crate::GcRebrand<'new_gc, Id> for [T; $size]
+            where Id: CollectorId, T: GcRebrand<'new_gc, Id>,
+                  <T as GcRebrand<'new_gc, Id>>::Branded: Sized {
+            type Branded = [<T as GcRebrand<'new_gc, Id>>::Branded; $size];
+        }
+        unsafe impl<'a, Id, T> $crate::GcErase<'a, Id> for [T; $size]
+            where Id: CollectorId, T: GcErase<'a, Id>,
+                  <T as GcErase<'a, Id>>::Erased: Sized {
+            type Erased = [<T as GcErase<'a, Id>>::Erased; $size];
         }
     };
     { $($size:tt),* } => ($(trace_array!($size);)*)
@@ -155,9 +165,22 @@ unsafe impl<'a, T: NullTrace> NullTrace for &'a T {}
 unsafe impl<'a, T: GcSafe + TraceImmutable> GcSafe for &'a T {
     const NEEDS_DROP: bool = false; // References are safe :)
 }
-/// TODO: Right now we can only rebrand unmanaged types (NullTrace)
-unsafe impl<'a: 'new_gc, 'new_gc, Id: CollectorId, T: NullTrace> GcBrand<'new_gc, Id> for &'a T {
-    type Branded = Self;
+/// TODO: Right now we require `NullTrace`
+///
+/// This is unfortunately required by our bounds, since we don't know
+///  that `T::Branded` lives for &'a making `&'a T::Branded` invalid
+///  as far as the compiler is concerned.
+///
+/// Therefore the only solution is to preserve `&'a T` as-is,
+/// which is only safe if `T: NullTrace`
+unsafe impl<'a, 'new_gc, Id, T> GcRebrand<'new_gc, Id> for &'a T
+    where Id: CollectorId, T: NullTrace, 'a: 'new_gc {
+    type Branded = &'a T;
+}
+/// See impl of `GcRebrand` for why we require `T: NullTrace`
+unsafe impl<'a, Id, T> GcErase<'a, Id> for &'a T
+    where Id: CollectorId, T: NullTrace {
+    type Erased = &'a T;
 }
 
 /// Implements tracing for mutable references.
@@ -176,12 +199,17 @@ unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a mut T {
 }
 unsafe impl<'a, T: NullTrace> NullTrace for &'a mut T {}
 unsafe impl<'a, T: GcSafe> GcSafe for &'a mut T {
-    const NEEDS_DROP: bool = false; // Referenes are Copy
+    const NEEDS_DROP: bool = false; // References are Copy
 }
-/// TODO: Right now we can only rebrand unmanaged types (NullTrace)
-unsafe impl<'a, 'new_gc, Id, T> GcBrand<'new_gc, Id> for &'a mut T
-    where 'a: 'new_gc, Id: CollectorId, T: GcBrand<'new_gc, Id> {
-    type Branded = &'new_gc mut <T as GcBrand<'new_gc, Id>>::Branded;
+/// TODO: We currently require NullTrace for `T`
+unsafe impl<'a, 'new_gc, Id, T> GcRebrand<'new_gc, Id> for &'a mut T
+    where Id: CollectorId, T: NullTrace, 'a: 'new_gc {
+    type Branded = &'a mut T;
+}
+/// TODO: We currently require NullTrace for `T`
+unsafe impl<'a, Id, T> GcErase<'a, Id> for &'a mut T
+    where Id: CollectorId, T: NullTrace {
+    type Erased = &'a mut T;
 }
 
 /// Implements tracing for slices, by tracing all the objects they refer to.

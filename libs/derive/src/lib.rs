@@ -1,3 +1,6 @@
+#![feature(
+    proc_macro_diagnostic, // NEEDED for warnings
+)]
 extern crate proc_macro;
 
 use quote::{quote, quote_spanned};
@@ -323,12 +326,14 @@ fn impl_derive_trace(input: &DeriveInput) -> Result<TokenStream, syn::Error> {
     } else {
         impl_trace(&input, &info)?
     };
-    let brand_impl = impl_brand(&input, &info)?;
+    let rebrand_impl = impl_rebrand(&input, &info)?;
+    let erase_impl = impl_erase(&input, &info)?;
     let gc_safe_impl = impl_gc_safe(&input, &info)?;
     let extra_impls = impl_extras(&input, &info)?;
     Ok(quote! {
         #trace_impl
-        #brand_impl
+        #rebrand_impl
+        #erase_impl
         #gc_safe_impl
         #extra_impls
     })
@@ -458,7 +463,7 @@ fn impl_extras(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, E
     })
 }
 
-fn impl_brand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
+fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
     let name = &target.ident;
     let mut generics: Generics = target.generics.clone();
     let mut rewritten_params = Vec::new();
@@ -468,9 +473,76 @@ fn impl_brand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
         match param {
             GenericParam::Type(ref mut type_param) => {
                 let original_bounds = type_param.bounds.iter().cloned().collect::<Vec<_>>();
-                type_param.bounds.push(parse_quote!(::zerogc::GcBrand<'new_gc, S>));
+                type_param.bounds.push(parse_quote!(::zerogc::GcErase<'max, S>));
+                type_param.bounds.push(parse_quote!('max));
                 let param_name = &type_param.ident;
-                let rewritten_type: Type = parse_quote!(<#param_name as ::zerogc::GcBrand<'new_gc, S>>::Branded);
+                let rewritten_type: Type = parse_quote!(<#param_name as ::zerogc::GcErase<'max, S>>::Erased);
+                rewritten_restrictions.push(WherePredicate::Type(PredicateType {
+                    lifetimes: None,
+                    bounded_ty: rewritten_type.clone(),
+                    colon_token: Default::default(),
+                    bounds: original_bounds.into_iter().collect()
+                }));
+                rewritten_param = GenericArgument::Type(rewritten_type);
+            },
+            GenericParam::Lifetime(ref l) => {
+                if l.lifetime == info.config.gc_lifetime() {
+                    rewritten_param = parse_quote!('static);
+                    assert!(!info.config.ignored_lifetimes.contains(&l.lifetime));
+                } else if info.config.ignored_lifetimes.contains(&l.lifetime) {
+                    let lt = l.lifetime.clone();
+                    rewritten_restrictions.push(WherePredicate::Lifetime(PredicateLifetime {
+                        lifetime: parse_quote!('max),
+                        colon_token: Default::default(),
+                        bounds: parse_quote!(#lt)
+                    }));
+                    rewritten_param = GenericArgument::Lifetime(lt);
+                } else {
+                    return Err(Error::new(
+                        l.span(),
+                        "Unable to handle lifetime"
+                    ));
+                }
+            },
+            GenericParam::Const(ref param) => {
+                let name = &param.ident;
+                rewritten_param = GenericArgument::Const(parse_quote!(#name));
+            }
+        }
+        rewritten_params.push(rewritten_param);
+    }
+    let mut impl_generics = generics.clone();
+    impl_generics.params.push(GenericParam::Lifetime(parse_quote!('max)));
+    impl_generics.params.push(GenericParam::Type(parse_quote!(S: ::zerogc::CollectorId)));
+    impl_generics.make_where_clause().predicates.extend(rewritten_restrictions);
+    let (_, ty_generics, _) = generics.split_for_impl();
+    let (impl_generics, _, where_clause) = impl_generics.split_for_impl();
+    ::proc_macro::Diagnostic::spanned(
+        ::proc_macro::Span::call_site(),
+        ::proc_macro::Level::Warning,
+        "derive(GcErase) doesn't currently verify the correctness of its fields"
+    ).emit();
+    Ok(quote! {
+        unsafe impl #impl_generics ::zerogc::GcErase<'max, S>
+            for #name #ty_generics #where_clause {
+            type Erased = #name::<#(#rewritten_params),*>;
+        }
+    })
+}
+
+fn impl_rebrand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
+    let name = &target.ident;
+    let mut generics: Generics = target.generics.clone();
+    let mut rewritten_params = Vec::new();
+    let mut rewritten_restrictions = Vec::new();
+    for param in &mut generics.params {
+        let rewritten_param: GenericArgument;
+        match param {
+            GenericParam::Type(ref mut type_param) => {
+                let original_bounds = type_param.bounds.iter().cloned().collect::<Vec<_>>();
+                type_param.bounds.push(parse_quote!(::zerogc::GcRebrand<'new_gc, S>));
+                let param_name = &type_param.ident;
+                let rewritten_type: Type = parse_quote!(<#param_name as ::zerogc::GcRebrand<'new_gc, S>>::Branded);
                 rewritten_restrictions.push(WherePredicate::Type(PredicateType {
                     lifetimes: None,
                     bounded_ty: rewritten_type.clone(),
@@ -505,8 +577,13 @@ fn impl_brand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
     impl_generics.make_where_clause().predicates.extend(rewritten_restrictions);
     let (_, ty_generics, _) = generics.split_for_impl();
     let (impl_generics, _, where_clause) = impl_generics.split_for_impl();
+    ::proc_macro::Diagnostic::spanned(
+        ::proc_macro::Span::call_site(),
+        ::proc_macro::Level::Warning,
+        "derive(GcRebrand) doesn't currently verify the correctness of its fields"
+    ).emit();
     Ok(quote! {
-        unsafe impl #impl_generics ::zerogc::GcBrand<'new_gc, S>
+        unsafe impl #impl_generics ::zerogc::GcRebrand<'new_gc, S>
             for #name #ty_generics #where_clause {
             type Branded = #name::<#(#rewritten_params),*>;
         }
