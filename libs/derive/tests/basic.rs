@@ -61,11 +61,10 @@ struct NopTrace {
     wow: Box<NopTrace>
 }
 
-#[cfg(disabled)] // TODO: Fixup
 #[derive(Trace)]
 #[zerogc(nop_trace, ignore_lifetimes("'a"), ignore_params(T))]
 #[allow(unused)]
-struct LifetimeTrace<'a, T: GcSafe> {
+struct LifetimeTrace<'a, T: GcSafe + 'a> {
     s: String,
     i: i32,
     wow: Box<NopTrace>,

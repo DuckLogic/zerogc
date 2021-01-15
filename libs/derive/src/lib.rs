@@ -5,7 +5,7 @@
 extern crate proc_macro;
 
 use quote::{quote, quote_spanned};
-use syn::{parse_macro_input, parenthesized, parse_quote, DeriveInput, Data, Error, Generics, GenericParam, TypeParamBound, Fields, Member, Index, Type, GenericArgument, Attribute, PathArguments, Meta, TypeParam, WherePredicate, PredicateType, Token, Lifetime, NestedMeta, Lit, PredicateLifetime};
+use syn::{parse_macro_input, parenthesized, parse_quote, DeriveInput, Data, Error, Generics, GenericParam, TypeParamBound, Fields, Member, Index, Type, GenericArgument, Attribute, PathArguments, Meta, TypeParam, WherePredicate, PredicateType, Token, Lifetime, NestedMeta, Lit};
 use proc_macro2::{Ident, TokenStream, Span};
 use syn::spanned::Spanned;
 use syn::parse::{ParseStream, Parse};
@@ -328,8 +328,16 @@ fn impl_derive_trace(input: &DeriveInput) -> Result<TokenStream, syn::Error> {
     } else {
         impl_trace(&input, &info)?
     };
-    let rebrand_impl = impl_rebrand(&input, &info)?;
-    let erase_impl = impl_erase(&input, &info)?;
+    let rebrand_impl = if info.config.nop_trace {
+        impl_rebrand_nop(&input, &info)?
+    } else {
+        impl_rebrand(&input, &info)?
+    };
+    let erase_impl = if info.config.nop_trace {
+        impl_erase_nop(&input, &info)?
+    } else {
+        impl_erase(&input, &info)?
+    };
     let gc_safe_impl = impl_gc_safe(&input, &info)?;
     let extra_impls = impl_extras(&input, &info)?;
     Ok(quote! {
@@ -465,6 +473,62 @@ fn impl_extras(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, E
     })
 }
 
+
+fn impl_erase_nop(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
+    let name = &target.ident;
+    let mut generics: Generics = target.generics.clone();
+    for param in &mut generics.params {
+        match param {
+            GenericParam::Type(ref mut type_param) => {
+                // Require all params are NullTrace
+                type_param.bounds.push(parse_quote!(::zerogc::NullTrace));
+            },
+            GenericParam::Lifetime(ref mut l) => {
+                if l.lifetime == info.config.gc_lifetime() {
+                    assert!(!info.config.ignored_lifetimes.contains(&l.lifetime));
+                    return Err(Error::new(
+                        l.lifetime.span(),
+                        "Unexpected GC lifetime: Expected #[zerogc(nop_trace)] during #[derive(GcErase)]"
+                    ))
+                } else if info.config.ignored_lifetimes.contains(&l.lifetime) {
+                    // Explicitly ignored is okay, as long as it outlives the `'min`
+                    l.bounds.push(parse_quote!('min));
+                } else {
+                    return Err(Error::new(
+                        l.span(),
+                        "Lifetime must be explicitly ignored"
+                    ))
+                }
+            },
+            GenericParam::Const(_) => {}
+        }
+    }
+    let mut impl_generics = generics.clone();
+    impl_generics.params.push(GenericParam::Lifetime(parse_quote!('min)));
+    impl_generics.params.push(GenericParam::Type(parse_quote!(S: ::zerogc::CollectorId)));
+    // Require that `Self: NullTrace`
+    impl_generics.make_where_clause().predicates.push(WherePredicate::Type(PredicateType {
+        lifetimes: None,
+        bounded_ty: parse_quote!(Self),
+        bounds: parse_quote!(::zerogc::NullTrace),
+        colon_token: Default::default()
+    }));
+    let (_, ty_generics, _) = generics.split_for_impl();
+    let (impl_generics, _, where_clause) = impl_generics.split_for_impl();
+    ::proc_macro::Diagnostic::spanned(
+        ::proc_macro::Span::call_site(),
+        ::proc_macro::Level::Note,
+        // We know this is safe because we know that `Self: NullTrace`
+        "derive(GcRebrand) is safe for NullTrace, unlike standard implementation"
+    ).emit();
+    Ok(quote! {
+        unsafe impl #impl_generics ::zerogc::GcErase<'min, S>
+            for #name #ty_generics #where_clause {
+            // We can pass-through because we are NullTrace
+            type Erased = Self;
+        }
+    })
+}
 fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
     let name = &target.ident;
     let mut generics: Generics = target.generics.clone();
@@ -475,10 +539,10 @@ fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
         match param {
             GenericParam::Type(ref mut type_param) => {
                 let original_bounds = type_param.bounds.iter().cloned().collect::<Vec<_>>();
-                type_param.bounds.push(parse_quote!(::zerogc::GcErase<'max, S>));
-                type_param.bounds.push(parse_quote!('max));
+                type_param.bounds.push(parse_quote!(::zerogc::GcErase<'min, S>));
+                type_param.bounds.push(parse_quote!('min));
                 let param_name = &type_param.ident;
-                let rewritten_type: Type = parse_quote!(<#param_name as ::zerogc::GcErase<'max, S>>::Erased);
+                let rewritten_type: Type = parse_quote!(<#param_name as ::zerogc::GcErase<'min, S>>::Erased);
                 rewritten_restrictions.push(WherePredicate::Type(PredicateType {
                     lifetimes: None,
                     bounded_ty: rewritten_type.clone(),
@@ -491,19 +555,11 @@ fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
                 if l.lifetime == info.config.gc_lifetime() {
                     rewritten_param = parse_quote!('static);
                     assert!(!info.config.ignored_lifetimes.contains(&l.lifetime));
-                } else if info.config.ignored_lifetimes.contains(&l.lifetime) {
-                    let lt = l.lifetime.clone();
-                    rewritten_restrictions.push(WherePredicate::Lifetime(PredicateLifetime {
-                        lifetime: parse_quote!('max),
-                        colon_token: Default::default(),
-                        bounds: parse_quote!(#lt)
-                    }));
-                    rewritten_param = GenericArgument::Lifetime(lt);
                 } else {
                     return Err(Error::new(
                         l.span(),
-                        "Unable to handle lifetime"
-                    ));
+                        "Unless Self: NullTrace, derive(GcErase) is currently unable to handle lifetimes"
+                    ))
                 }
             },
             GenericParam::Const(ref param) => {
@@ -514,7 +570,7 @@ fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
         rewritten_params.push(rewritten_param);
     }
     let mut impl_generics = generics.clone();
-    impl_generics.params.push(GenericParam::Lifetime(parse_quote!('max)));
+    impl_generics.params.push(GenericParam::Lifetime(parse_quote!('min)));
     impl_generics.params.push(GenericParam::Type(parse_quote!(S: ::zerogc::CollectorId)));
     impl_generics.make_where_clause().predicates.extend(rewritten_restrictions);
     let (_, ty_generics, _) = generics.split_for_impl();
@@ -525,13 +581,69 @@ fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
         "derive(GcErase) doesn't currently verify the correctness of its fields"
     ).emit();
     Ok(quote! {
-        unsafe impl #impl_generics ::zerogc::GcErase<'max, S>
+        unsafe impl #impl_generics ::zerogc::GcErase<'min, S>
             for #name #ty_generics #where_clause {
             type Erased = #name::<#(#rewritten_params),*>;
         }
     })
 }
 
+
+fn impl_rebrand_nop(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
+    let name = &target.ident;
+    let mut generics: Generics = target.generics.clone();
+    for param in &mut generics.params {
+        match param {
+            GenericParam::Type(ref mut type_param) => {
+                // Require all params are NullTrace
+                type_param.bounds.push(parse_quote!(::zerogc::NullTrace));
+            },
+            GenericParam::Lifetime(ref mut l) => {
+                if l.lifetime == info.config.gc_lifetime() {
+                    assert!(!info.config.ignored_lifetimes.contains(&l.lifetime));
+                    return Err(Error::new(
+                        l.lifetime.span(),
+                        "Unexpected GC lifetime: Expected #[zerogc(nop_trace)] during #[derive(GcRebrand)]"
+                    ))
+                } else if info.config.ignored_lifetimes.contains(&l.lifetime) {
+                    // Explicitly ignored is okay, as long as it outlives the `'new_gc`
+                    l.bounds.push(parse_quote!('new_gc));
+                } else {
+                    return Err(Error::new(
+                        l.span(),
+                        "Lifetime must be explicitly ignored"
+                    ))
+                }
+            },
+            GenericParam::Const(_) => {}
+        }
+    }
+    let mut impl_generics = generics.clone();
+    impl_generics.params.push(GenericParam::Lifetime(parse_quote!('new_gc)));
+    impl_generics.params.push(GenericParam::Type(parse_quote!(S: ::zerogc::CollectorId)));
+    // Require that `Self: NullTrace`
+    impl_generics.make_where_clause().predicates.push(WherePredicate::Type(PredicateType {
+        lifetimes: None,
+        bounded_ty: parse_quote!(Self),
+        bounds: parse_quote!(::zerogc::NullTrace),
+        colon_token: Default::default()
+    }));
+    let (_, ty_generics, _) = generics.split_for_impl();
+    let (impl_generics, _, where_clause) = impl_generics.split_for_impl();
+    ::proc_macro::Diagnostic::spanned(
+        ::proc_macro::Span::call_site(),
+        ::proc_macro::Level::Note,
+        // We know this is safe because we know that `Self: NullTrace`
+        "derive(GcRebrand) is safe for NullTrace, unlike standard implementation"
+    ).emit();
+    Ok(quote! {
+        unsafe impl #impl_generics ::zerogc::GcRebrand<'new_gc, S>
+            for #name #ty_generics #where_clause {
+            // We can pass-through because we are NullTrace
+            type Branded = Self;
+        }
+    })
+}
 fn impl_rebrand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
     let name = &target.ident;
     let mut generics: Generics = target.generics.clone();
@@ -557,13 +669,11 @@ fn impl_rebrand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
                 if l.lifetime == info.config.gc_lifetime() {
                     rewritten_param = parse_quote!('new_gc);
                     assert!(!info.config.ignored_lifetimes.contains(&l.lifetime));
-                } else if info.config.ignored_lifetimes.contains(&l.lifetime) {
-                    rewritten_param = GenericArgument::Lifetime(l.lifetime.clone());
                 } else {
                     return Err(Error::new(
                         l.span(),
-                        "Unable to handle lifetime"
-                    ));
+                        "Unless Self: NullTrace, derive(GcRebrand) is currently unable to handle lifetimes"
+                    ))
                 }
             },
             GenericParam::Const(ref param) => {
@@ -769,6 +879,7 @@ fn impl_nop_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream
             ));
         },
     }
+    // TODO: We should have some sort of const-assertion for this....
     let trace_assertions = field_types.iter()
         .map(|&t| {
             let ty_span = t.span();
