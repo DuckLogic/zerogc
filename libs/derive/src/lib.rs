@@ -1,5 +1,6 @@
 #![feature(
-    proc_macro_diagnostic, // NEEDED for warnings
+    proc_macro_diagnostic, // Used for warnings
+    proc_macro_tracked_env, // Used for `DEBUG_DERIVE`
 )]
 extern crate proc_macro;
 
@@ -313,6 +314,7 @@ pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         .unwrap_or_else(|e| e.to_compile_error()));
     debug_derive(
         "derive(Trace)",
+        &input.ident,
         &format_args!("#[derive(Trace) for {}", input.ident),
         &res
     );
@@ -854,12 +856,29 @@ fn add_trait_bounds(
     result
 }
 
-fn debug_derive(key: &str, message: &dyn Display, value: &dyn Display) {
+fn debug_derive(key: &str, target: &dyn ToString, message: &dyn Display, value: &dyn Display) {
+    let target = target.to_string();
     // TODO: Use proc_macro::tracked_env::var
-    match ::std::env::var_os("DEBUG_DERIVE") {
-        Some(var) if var == "*" ||
-            var.to_string_lossy().contains(key) => {
-            // Enable this debug
+    match ::proc_macro::tracked_env::var("DEBUG_DERIVE") {
+        Ok(ref var) if var == "*" => {}
+        Ok(var) => {
+            for pattern in var.split_terminator(",") {
+                let parts = pattern.split(":").collect::<Vec<_>>();
+                let (desired_key, desired_target) = match *parts {
+                    [desired_key, desired_target] => (desired_key, Some(desired_target)),
+                    [desired_key] => (desired_key, None),
+                    _ => {
+                        panic!("Invalid pattern for debug derive: {}", pattern)
+                    }
+                };
+                if desired_key != key && desired_key != "*" { return }
+                if let Some(desired_target) = desired_target {
+                   if desired_target != target && desired_target != "*" {
+                       return
+                   }
+                }
+            }
+            // Fallthrough -> enable this debug
         },
         _ => return,
     }
