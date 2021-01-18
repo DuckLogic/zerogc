@@ -16,26 +16,30 @@ unsafe impl<K, V> TraceImmutable for IndexMap<K, V>
         }
         Ok(())
     }
+    #[inline]
+    fn visit_dyn_immutable(&self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        self.visit_immutable::<GcDynVisitor>(visitor)
+    }
 }
 unsafe impl<K, V> NullTrace for IndexMap<K, V>
     where K: NullTrace + Eq + Hash, V: NullTrace {}
 unsafe impl<K, V> Trace for IndexMap<K, V>
     where K: TraceImmutable + Eq + Hash, V: Trace {
-    const NEEDS_TRACE: bool = K::NEEDS_TRACE || V::NEEDS_TRACE;
-
     fn visit<Visit: GcVisitor>(&mut self, visitor: &mut Visit) -> Result<(), Visit::Err> {
-        if !Self::NEEDS_TRACE { return Ok(()); };
+        if !crate::needs_trace::<Self>() { return Ok(()); };
         for (key, value) in self.iter_mut() {
             visitor.visit_immutable(key)?;
             visitor.visit(value)?;
         }
         Ok(())
     }
+    #[inline]
+    fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        self.visit::<GcDynVisitor>(visitor)
+    }
 }
 unsafe impl<K, V> GcSafe for IndexMap<K, V> where
-    K: GcSafe + TraceImmutable + Eq + Hash, V: GcSafe {
-    const NEEDS_DROP: bool = true; // IndexMap has internal memory
-}
+    K: GcSafe + TraceImmutable + Eq + Hash, V: GcSafe {}
 unsafe impl<'new_gc, Id, K, V> GcRebrand<'new_gc, Id> for IndexMap<K, V>
     where Id: CollectorId, K: TraceImmutable + Eq + Hash + GcRebrand<'new_gc, Id>,
           V: GcRebrand<'new_gc, Id>,
@@ -47,6 +51,12 @@ unsafe impl<'new_gc, Id, K, V> GcRebrand<'new_gc, Id> for IndexMap<K, V>
     >;
 }
 
+unsafe impl<K, V> GcTypeInfo for IndexMap<K, V>
+    where K: TraceImmutable + Eq + Hash, V: Trace {
+    /// IndexMap has internal memory
+    const NEEDS_TRACE: bool = crate::needs_trace::<K>() || crate::needs_trace::<V>();
+    const NEEDS_DROP: bool = true;
+}
 unsafe impl<'a, Id, K, V> GcErase<'a, Id> for IndexMap<K, V>
     where Id: CollectorId, K: TraceImmutable + Eq + Hash + GcErase<'a, Id>,
           V: GcErase<'a, Id>,
@@ -69,16 +79,24 @@ unsafe impl<T> TraceImmutable for IndexSet<T>
         }
         Ok(())
     }
+
+    #[inline]
+    fn visit_dyn_immutable(&self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        self.visit_immutable(visitor)
+    }
 }
 unsafe impl<V> Trace for IndexSet<V>
     where V: TraceImmutable + Eq + Hash {
-    const NEEDS_TRACE: bool = V::NEEDS_TRACE;
-
     fn visit<Visit: GcVisitor>(&mut self, visitor: &mut Visit) -> Result<(), Visit::Err> {
         for value in self.iter() {
             visitor.visit_immutable(value)?;
         }
         Ok(())
+    }
+
+    #[inline]
+    fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        self.visit(visitor)
     }
 }
 unsafe impl<'new_gc, Id, V> GcRebrand<'new_gc, Id> for IndexSet<V>
@@ -90,4 +108,10 @@ unsafe impl<'a, Id, V> GcErase<'a, Id> for IndexSet<V>
     where Id: CollectorId, V: GcErase<'a, Id> + TraceImmutable + Eq + Hash,
           <V as GcErase<'a, Id>>::Erased: TraceImmutable + Eq + Hash, {
     type Erased = IndexSet<<V as GcErase<'a, Id>>::Erased>;
+}
+unsafe impl<V> GcTypeInfo for IndexSet<V>
+    where V: TraceImmutable + Eq + Hash {
+    const NEEDS_TRACE: bool = crate::needs_trace::<V>();
+    /// IndexSet has internal memory
+    const NEEDS_DROP: bool = true;
 }

@@ -29,6 +29,7 @@ use core::ptr::NonNull;
 use core::marker::PhantomData;
 use core::hash::{Hash, Hasher};
 use core::fmt::{self, Debug, Formatter};
+use std::any::Any;
 
 #[macro_use]
 mod manually_traced;
@@ -371,13 +372,13 @@ impl<C: GcContext> FrozenContext<C> {
 ///
 /// It should be safe to assume that a collector exists
 /// if any of its pointers still do!
-pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + 'static {
+pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + ::std::any::Any + 'static {
     /// The type of the garbage collector system
     type System: GcSystem<Id=Self>;
     /// Perform a write barrier before writing to a garbage collected field
     ///
     /// ## Safety
-    /// Smilar to the [GcDirectBarrier] trait, it can be assumed that
+    /// Similar to the [GcDirectBarrier] trait, it can be assumed that
     /// the field offset is correct and the types match.
     unsafe fn gc_write_barrier<'gc, T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc>(
         owner: &Gc<'gc, T, Self>,
@@ -481,35 +482,48 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
 }
 
 /// Double-indirection is completely safe
-unsafe impl<'gc, T: GcSafe + 'gc, Id: CollectorId> GcSafe for Gc<'gc, T, Id> {
-    const NEEDS_DROP: bool = true; // We are Copy
-}
+unsafe impl<'gc, T, Id> GcSafe for Gc<'gc, T, Id>
+    where T: GcSafe + ?Sized + 'gc, Id: CollectorId {}
 /// Rebrand
 unsafe impl<'gc, 'new_gc, T, Id> GcRebrand<'new_gc, Id> for Gc<'gc, T, Id>
-    where T: GcSafe + GcRebrand<'new_gc, Id>,
+    where T: GcSafe + GcRebrand<'new_gc, Id> + ?Sized,
           <T as GcRebrand<'new_gc, Id>>::Branded: GcSafe,
           Id: CollectorId, {
     type Branded = Gc<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>;
 }
 unsafe impl<'gc, 'a, T, Id> GcErase<'a, Id> for Gc<'gc, T, Id>
-    where T: GcSafe + GcErase<'a, Id>,
+    where T: GcSafe + GcErase<'a, Id> + ?Sized,
           <T as GcErase<'a, Id>>::Erased: GcSafe,
           Id: CollectorId, {
     type Erased = Gc<'a, <T as GcErase<'a, Id>>::Erased, Id>;
 }
-unsafe impl<'gc, T: GcSafe + 'gc, Id: CollectorId> Trace for Gc<'gc, T, Id> {
-    // We always need tracing....
-    const NEEDS_TRACE: bool = true;
-
+unsafe impl<'gc, T, Id> Trace for Gc<'gc, T, Id>
+    where T: GcSafe + ?Sized + 'gc, Id: CollectorId {
     #[inline]
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> where Self: Sized {
         unsafe {
             // We're doing this correctly!
             V::visit_gc(visitor, self)
         }
     }
+
+    #[inline]
+    fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        unsafe {
+            visitor.visit_dyn_gc(
+                NonNull::new_unchecked(self.as_raw_ptr() as *mut dyn GcSafe),
+                &self.collector_id
+            )
+        }
+    }
 }
-impl<'gc, T: GcSafe + 'gc, Id: CollectorId> Deref for Gc<'gc, T, Id> {
+unsafe impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> GcTypeInfo for Gc<'gc, T, Id> {
+    /// We always need tracing....
+    const NEEDS_TRACE: bool = true;
+    /// We are Copy
+    const NEEDS_DROP: bool = false;
+}
+impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Deref for Gc<'gc, T, Id> {
     type Target = &'gc T;
 
     #[inline(always)]
@@ -518,7 +532,7 @@ impl<'gc, T: GcSafe + 'gc, Id: CollectorId> Deref for Gc<'gc, T, Id> {
     }
 }
 unsafe impl<'gc, O, V, Id> GcDirectBarrier<'gc, Gc<'gc, O, Id>> for Gc<'gc, V,Id>
-    where O: GcSafe + 'gc, V: GcSafe + 'gc, Id: CollectorId {
+    where O: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc, Id: CollectorId {
     #[inline(always)]
     unsafe fn write_barrier(&self, owner: &Gc<'gc, O, Id>, field_offset: usize) {
         Id::gc_write_barrier(owner, self, field_offset)
@@ -533,21 +547,23 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Clone for Gc<'gc, T, Id> {
     }
 }
 // Delegating impls
-impl<'gc, T: GcSafe + Hash + 'gc, Id: CollectorId> Hash for Gc<'gc, T, Id> {
+impl<'gc, T, Id> Hash for Gc<'gc, T, Id>
+    where T: GcSafe + ?Sized + Hash + 'gc, Id: CollectorId {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.value().hash(state)
     }
 }
-impl<'gc, T: GcSafe + PartialEq + 'gc, Id: CollectorId> PartialEq for Gc<'gc, T, Id> {
+impl<'gc, T, Id> PartialEq for Gc<'gc, T, Id>
+    where T: GcSafe + ?Sized + PartialEq + 'gc, Id: CollectorId {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         // NOTE: We compare by value, not identity
         self.value() == other.value()
     }
 }
-impl<'gc, T: GcSafe + Eq + 'gc, Id: CollectorId> Eq for Gc<'gc, T, Id> {}
-impl<'gc, T: GcSafe + PartialEq + 'gc, Id: CollectorId> PartialEq<T> for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe + ?Sized + Eq + 'gc, Id: CollectorId> Eq for Gc<'gc, T, Id> {}
+impl<'gc, T: GcSafe + ?Sized + PartialEq + 'gc, Id: CollectorId> PartialEq<T> for Gc<'gc, T, Id> {
     #[inline]
     fn eq(&self, other: &T) -> bool {
         self.value() == other
@@ -713,20 +729,13 @@ pub unsafe trait GcDirectBarrier<'gc, OwningRef>: Trace {
 /// and avoids a second pass over the objects
 /// to check for resurrected objects.
 pub unsafe trait GcSafe: Trace {
-    /// If this type needs a destructor run
-    ///
-    /// This is usually equivalent to `std::mem::needs_drop`.
-    /// However procedurally derived code can sometimes provide
-    /// a no-op drop implementation (for safety),
-    /// which would lead to a false positive with `std::mem::needs_drop()`
-    const NEEDS_DROP: bool;
-
     /// Assert this type is GC safe
     ///
     /// Only used by procedural derive
     #[doc(hidden)]
-    fn assert_gc_safe() {}
+    fn assert_gc_safe() where Self: Sized {}
 }
+
 /// Assert that a type implements Copy
 ///
 /// Used by the derive code
@@ -735,7 +744,7 @@ pub fn assert_copy<T: Copy>() {}
 
 /// A wrapper type that assumes its contents don't need to be traced
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Default, Hash)]
 pub struct AssumeNotTraced<T>(T);
 impl<T> AssumeNotTraced<T> {
     /// Assume the specified value doesn't need to be traced
@@ -769,9 +778,13 @@ impl<T> DerefMut for AssumeNotTraced<T> {
 }
 
 unsafe impl<T> Trace for AssumeNotTraced<T> {
-    const NEEDS_TRACE: bool = false;
     #[inline(always)] // This method does nothing and is always a win to inline
     fn visit<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
+        Ok(())
+    }
+
+    #[inline]
+    fn visit_dyn(&mut self, _visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
         Ok(())
     }
 }
@@ -780,13 +793,44 @@ unsafe impl<T> TraceImmutable for AssumeNotTraced<T> {
     fn visit_immutable<V: GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
         Ok(())
     }
+
+    #[inline]
+    fn visit_dyn_immutable(&self, _visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        Ok(())
+    }
 }
 unsafe impl<T> NullTrace for AssumeNotTraced<T> {}
 /// No tracing implies GcSafe
-unsafe impl<T> GcSafe for AssumeNotTraced<T> {
+unsafe impl<T> GcSafe for AssumeNotTraced<T> {}
+unsafe impl<T> GcTypeInfo for AssumeNotTraced<T> {
+    const NEEDS_TRACE: bool = false; // This is the whole point of the type ;)
     const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
 }
 unsafe_gc_brand!(AssumeNotTraced, T);
+
+/// Detect if the specified type needs to be traced
+///
+/// Internally this delegates to [GcTypeInfo::NEEDS_TRACE].
+/// Just because a type implements [NullTrace] doesn't mean this
+/// will return false.
+#[inline]
+pub const fn needs_trace<T: ?Sized + Trace>() -> bool {
+    <*const T as GcTypeInfo>::NEEDS_TRACE
+}
+
+/// Detects if the specified type should be dropped by the GC.
+///
+/// If this returns true than the destructor must be gc-safe,
+/// as described in the [GcSafe] trait.
+///
+/// Internally this delegates to [GcTypeInfo::NEEDS_DROP].
+/// If [std::mem::needs_drop] returns true, than this method
+/// should return true as well. It's only needed to avoid false-positives
+/// with auto-derived [Drop] implementations.
+#[inline]
+pub const fn needs_gc_drop<T: ?Sized + Trace>() -> bool {
+    <T as GcTypeInfo>::NEEDS_DROP
+}
 
 /// Changes all references to garbage collected
 /// objects to match a specific lifetime.
@@ -817,15 +861,18 @@ pub unsafe trait GcErase<'a, Id: CollectorId>: Trace {
     type Erased: 'a;
 }
 
-/// Indicates that a type can be traced by a garbage collector.
+/// Gives static type information on a GC-compatible type.
 ///
-/// This doesn't necessarily mean that the type is safe to allocate in a garbage collector ([GcSafe]).
+/// For any type `T: Trace`, this is implemented on the associated constant
+/// `[T::Info]` to work-around object safety rules.
 ///
 /// ## Safety
-/// See the documentation of the `trace` method for more info.
-/// Essentially, this object must faithfully trace anything that
-/// could contain garbage collected pointers or other `Trace` items.
-pub unsafe trait Trace {
+/// If any of the flags in this type are implemented incorrectly,
+/// *undefined behavior* will occur.
+///
+/// If [NullTrace] is implemented, then [GcTypeInfo::NEEDS_TRACE] should
+/// be true. However, one does not necessity need to imply the other.
+pub unsafe trait GcTypeInfo {
     /// Whether this type needs to be traced by the garbage collector.
     ///
     /// Some primitive types don't need to be traced at all,
@@ -835,7 +882,7 @@ pub unsafe trait Trace {
     /// claiming the need for tracing only if their elements do.
     /// For example, to decide `Vec<u32>::NEEDS_TRACE` you'd check whether `u32::NEEDS_TRACE` (false),
     /// and so then `Vec<u32>` doesn't need to be traced.
-    /// By the same logic, `Vec<Gc<u32>>` does need to be traced,
+    /// By the same logic, `Vec<Gc<u32>>` *does* need to be traced,
     /// since it contains a garbage collected pointer.
     ///
     /// If there are multiple types involved, you should check if any of them need tracing.
@@ -844,23 +891,55 @@ pub unsafe trait Trace {
     /// The fields which don't need tracing will always ignored by `GarbageCollector::trace`,
     /// while the fields that do will be properly traced.
     ///
+    ///
+    /// ## Safety
     /// False negatives will always result in completely undefined behavior.
     /// False positives could result in un-necessary tracing, but are perfectly safe otherwise.
     /// Therefore, when in doubt you always assume this is true.
     ///
     /// If this is true `NullTrace` should (but doesn't have to) be implemented.
+    /// It is always correct to conservatively return `true`.
     const NEEDS_TRACE: bool;
+    /// If this type needs a destructor run
+    ///
+    /// This is usually equivalent to `std::mem::needs_drop`.
+    /// However procedurally derived code can sometimes provide
+    /// a no-op drop implementation (for safety),
+    /// which would lead to a false positive with `std::mem::needs_drop()`
+    ///
+    /// ## Safety
+    /// This is mostly an optimization.
+    /// As long as the drop code is [gc-safe](GcSafe),
+    /// then it's okay to conservatively return `true`.
+    ///
+    /// In the worst-case scenario the GC will dynamically call a
+    /// empty implementation, or it will leak some memory.
+    ///
+    /// However, if the destructor is *not* [gc-safe](GcSafe)
+    /// then *undefined behavior* will occur.
+    const NEEDS_DROP: bool;
+}
+
+/// Indicates that a type can be traced by a garbage collector.
+///
+/// This doesn't necessarily mean that the type is safe to allocate in a garbage collector ([GcSafe]).
+///
+/// ## Safety
+/// See the documentation of the `trace` method for more info.
+/// Essentially, this object must faithfully trace anything that
+/// could contain garbage collected pointers or other `Trace` items.
+pub unsafe trait Trace: GcTypeInfo {
     /// Visit each field in this type
     ///
     /// Users should never invoke this method, and always call the `V::visit` instead.
-    /// Only the collector itself is premitted to call this method,
-    /// and **it is undefined behavior for the user to invoke this**.
+    /// Only the collector itself is permitted to call this method,
+    /// and **it is undefined behavior for the user to invoke this directly**.
     ///
     /// Structures should trace each of their fields,
     /// and collections should trace each of their elements.
     ///
     /// ### Safety
-    /// Some types (like `Gc`) need special actions taken when they're traced,
+    /// Some types (like [Gc]) need special actions taken when they're traced,
     /// but those are somewhat rare and are usually already provided by the garbage collector.
     ///
     /// Unless I explicitly document actions as legal I may decide to change i.
@@ -870,13 +949,14 @@ pub unsafe trait Trace {
     /// the collector may choose to override your memory with `0xDEADBEEF`.
     /// ## Always Permitted
     /// - Reading your own memory (includes iteration)
-    ///   - Interior mutation is undefined behavior, even if you use `GcCell`
-    /// - Calling `GcVisitor::visit` with the specified collector
-    ///   - `GarbageCollector::trace` already verifies that it owns the data, so you don't need to do that
+    ///   - Interior mutation is undefined behavior, even if you use [crate::cell::GcCell]
+    /// - Calling [crate::GcVisitor::visit] with the specified collector
+    ///   - [crate::GcVisitor::trace] already verifies that it owns the data, so you don't need to do that
+    ///   - Other visitor methods can be invoked as appropriate
     /// - Panicking
     ///   - This should be reserved for cases where you are seriously screwed up,
     ///       and can't fulfill your contract to trace your interior properly.
-    ///     - One example is `Gc<T>` which panics if the garbage collectors are mismatched
+    ///     - One example is [Gc] which panics if the garbage collectors are mismatched
     ///   - This rule may change in future versions, depending on how we deal with multi-threading.
     /// ## Never Permitted Behavior
     /// - Forgetting a element of a collection, or field of a structure
@@ -887,8 +967,18 @@ pub unsafe trait Trace {
     ///     - With an automatically derived implementation you will never miss a field
     /// - It is undefined behavior to mutate any of your own data.
     ///   - The mutable `&mut self` is just so copying collectors can relocate GC pointers
-    /// - Invoking this function directly, without delegating to `GcVisitor`
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err>;
+    /// - Invoking this function directly, without delegating to [GcVisitor]
+    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err>
+        where Self: Sized;
+    /// A dynamically dispatched version of [Trace::visit]
+    ///
+    /// Like [Trace::visit], this method must not be invoked directly.
+    /// Use [<&mut GcDynVisitor as GcVisitor>::visit] instead.
+    ///
+    /// For [Sized] types, the implementation of this type should simply delegate to
+    /// the implementation of [Trace::visit].
+    fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError>;
+
 }
 /// A type that can be safely traced/relocated
 /// without having to use a mutable reference
@@ -903,7 +993,9 @@ pub unsafe trait TraceImmutable: Trace {
     ///
     /// The visitor may want to relocate garbage collected pointers,
     /// which this type must support.
-    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err>;
+    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> where Self: Sized;
+    /// A dynamically dispatched version of [TraceImmutable::visit_immutable]
+    fn visit_dyn_immutable(&self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError>;
 }
 
 /// Marker types for types that don't need to be traced
@@ -914,26 +1006,66 @@ pub unsafe trait NullTrace: Trace + TraceImmutable {}
 /// Visits garbage collected objects
 ///
 /// This should only be used by a [GcSystem]
-pub unsafe trait GcVisitor: Sized {
+pub unsafe trait GcVisitor {
     /// The type of errors returned by this visitor
     type Err: Debug;
 
     /// Visit a reference to the specified value
     #[inline(always)]
-    fn visit<T: Trace + ?Sized>(&mut self, value: &mut T) -> Result<(), Self::Err> {
+    fn visit<T: Trace + ?Sized>(&mut self, value: &mut T) -> Result<(), Self::Err> where Self: Sized {
         value.visit(self)
     }
     /// Visit a reference to the specified value
     #[inline(always)]
-    fn visit_immutable<T: TraceImmutable + ?Sized>(&mut self, value: &T) -> Result<(), Self::Err> {
+    fn visit_immutable<T: TraceImmutable + ?Sized>(&mut self, value: &T) -> Result<(), Self::Err> where Self: Sized {
         value.visit_immutable(self)
     }
 
     /// Visit a garbage collected pointer
     ///
+    /// The type `T` is statically known in this method,
+    /// unlike [GcVisitor::visit_dyn_gc].
+    ///
     /// ## Safety
     /// Undefined behavior if the GC pointer isn't properly visited.
-    unsafe fn visit_gc<'gc, T: GcSafe + 'gc, Id: CollectorId>(
+    unsafe fn visit_gc<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId>(
         &mut self, gc: &mut Gc<'gc, T, Id>
+    ) -> Result<(), Self::Err> where Self: Sized;
+
+    /// Visit a garbage collected pointer,
+    /// whose type is not statically known
+    ///
+    /// ## Safety
+    /// Undefined behavior if the GC pointer isn't properly visited.
+    unsafe fn visit_dyn_gc(
+        &mut self, gc_ptr: NonNull<dyn GcSafe>,
+        collector_id: &dyn Any
     ) -> Result<(), Self::Err>;
+}
+
+/// An opaque-error type caused by using a [DynVistor]
+#[derive(Debug)]
+pub struct GcDynVisitError(Box<dyn Debug + 'static>);
+
+/// A dynamically-dispatched [GcVisitor]
+pub type GcDynVisitor = dyn GcVisitor<Err=GcDynVisitError>;
+/// Helper implementation that internally dispatches to
+unsafe impl GcVisitor for &mut GcDynVisitor {
+    type Err = GcDynVisitError;
+
+    #[inline]
+    unsafe fn visit_gc<'gc, T, Id>(&mut self, gc: &mut Gc<'gc, T, Id>) -> Result<(), Self::Err>
+        where Self: Sized, T: GcSafe + ?Sized + 'gc, Id: CollectorId {
+        let id = gc.collector_id();
+        (**self).visit_dyn_gc(
+            NonNull::<T>::from(gc.value())
+                as NonNull<dyn GcSafe>,
+            &id as &dyn Any
+        )
+    }
+
+    #[inline]
+    unsafe fn visit_dyn_gc(&mut self, gc_ptr: NonNull<dyn GcSafe>, collector_id: &dyn Any) -> Result<(), Self::Err> {
+        (**self).visit_dyn_gc(gc_ptr, collector_id)
+    }
 }

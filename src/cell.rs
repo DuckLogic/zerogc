@@ -15,13 +15,16 @@
 //! and it'll generate a safe wrapper.
 use core::cell::Cell;
 
-use crate::{GcSafe, Trace, GcVisitor, NullTrace, TraceImmutable, GcDirectBarrier,};
+use crate::{GcSafe, Trace, GcVisitor, NullTrace, TraceImmutable, GcDirectBarrier, GcTypeInfo, GcDynVisitError, GcDynVisitor};
 
 /// A `Cell` pointing to a garbage collected object.
 ///
-/// This only supports mutating `NullTrace` types,
-/// becuase garbage collected pointers need write barriers.
-#[derive(Default, Clone, Debug)]
+/// This only supports mutating `NullTrace` types directly,
+/// because garbage collected pointers need write barriers.
+///
+/// However, other types can be mutated through auto-generated
+/// accessors on the type (using the [GcDirectBarrier] trait).
+#[derive(Default, Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
 #[repr(transparent)]
 pub struct GcCell<T: Trace + Copy>(Cell<T>);
 impl<T: Trace + Copy> GcCell<T> {
@@ -61,6 +64,9 @@ impl<T: NullTrace + Copy> GcCell<T> {
         self.0.set(value)
     }
 }
+/// Trigger a write barrier on the inner value
+///
+/// We are a 'direct' write barrier because `Value` is stored inline
 unsafe impl<'gc, OwningRef, Value> GcDirectBarrier<'gc, OwningRef> for GcCell<Value>
     where Value: GcDirectBarrier<'gc, OwningRef> + Copy {
     #[inline]
@@ -68,7 +74,6 @@ unsafe impl<'gc, OwningRef, Value> GcDirectBarrier<'gc, OwningRef> for GcCell<Va
         &self, owner: &OwningRef,
         field_offset: usize
     ) {
-        // NOTE: We are direct write because `Value` is stored inline
         self.get().write_barrier(owner, field_offset)
     }
 }
@@ -80,11 +85,14 @@ unsafe impl<'gc, OwningRef, Value> GcDirectBarrier<'gc, OwningRef> for GcCell<Va
 /// In other words is possible to safely trace a `GcCell`
 /// with a garbage collected type, as long as it is never mutated.
 unsafe impl<T: Trace + Copy> Trace for GcCell<T> {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-
     #[inline]
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
         visitor.visit(self.get_mut())
+    }
+
+    #[inline]
+    fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        self.visit(visitor)
     }
 }
 /// See Trace documentation on the safety of mutation
@@ -98,9 +106,16 @@ unsafe impl<T: GcSafe + NullTrace + Copy> TraceImmutable for GcCell<T> {
         self.set(value);
         Ok(())
     }
+
+    #[inline]
+    fn visit_dyn_immutable(&self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        self.visit_immutable(visitor)
+    }
 }
 unsafe impl<T: GcSafe + Copy + NullTrace> NullTrace for GcCell<T> {}
-unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {
+unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {}
+unsafe impl<T: Trace + Copy> GcTypeInfo for GcCell<T> {
+    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
     /// Since T is Copy, we shouldn't need to be dropped
     const NEEDS_DROP: bool = false;
 }

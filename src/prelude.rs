@@ -15,11 +15,12 @@ pub use crate::{
 // Basic collector types
 pub use crate::{
     GcSystem, GcContext, GcSimpleAlloc,
-    Gc, GcHandle, GcVisitor
+    Gc, GcHandle, GcVisitor, GcDynVisitor, GcDynVisitError
 };
 // Traits for user code to implement
 pub use crate::{
-    GcSafe, GcErase, GcRebrand, Trace, TraceImmutable, NullTrace
+    GcSafe, GcErase, GcRebrand, Trace, TraceImmutable,
+    NullTrace, GcTypeInfo
 };
 // Hack traits
 pub use crate::{GcBindHandle};

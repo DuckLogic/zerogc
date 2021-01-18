@@ -28,17 +28,31 @@ pub const MAXIMUM_SMALL_WORDS: usize = 32;
 /// The alignment of elements in the arena
 pub const ARENA_ELEMENT_ALIGN: usize = mem::align_of::<GcHeader>();
 
-#[inline]
-pub const fn small_object_size<T>() -> usize {
-    let header_layout = Layout::new::<GcHeader>();
-    header_layout.size() + header_layout
-        .padding_needed_for(std::mem::align_of::<T>())
-        + mem::size_of::<T>()
+#[derive(Copy, Clone)]
+pub struct SmallObjectSize {
+    pub val_size: usize,
+    pub val_align: usize
 }
-#[inline]
-pub const fn is_small_object<T>() -> bool {
-    small_object_size::<T>() <= MAXIMUM_SMALL_WORDS * 8
-        && mem::align_of::<T>() <= ARENA_ELEMENT_ALIGN
+impl SmallObjectSize {
+    #[inline]
+    pub const fn of<T>() -> SmallObjectSize {
+        SmallObjectSize {
+            val_size: std::mem::size_of::<T>(),
+            val_align: std::mem::align_of::<T>()
+        }
+    }
+    #[inline]
+    pub const fn is_small(&self) -> bool {
+        self.object_size() <= MAXIMUM_SMALL_WORDS * 8
+            && self.val_align <= ARENA_ELEMENT_ALIGN
+    }
+    #[inline]
+    pub const fn object_size(&self) -> usize {
+        let header_layout = Layout::new::<GcHeader>();
+        header_layout.size() + header_layout
+            .padding_needed_for(self.val_align) + self.val_size
+    }
+
 }
 
 pub(crate) struct Chunk {

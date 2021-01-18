@@ -13,6 +13,20 @@ macro_rules! trace_tuple {
     { $($param:ident)* } => {
         unsafe impl<$($param),*> Trace for ($($param,)*)
             where $($param: Trace),* {
+            #[inline]
+            fn visit<Visit: $crate::GcVisitor>(&mut self, #[allow(unused)] visitor: &mut Visit) -> Result<(), Visit::Err> {
+                #[allow(non_snake_case)]
+                let ($(ref mut $param,)*) = *self;
+                $(visitor.visit::<$param>($param)?;)*
+                Ok(())
+            }
+            #[inline]
+            fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+                self.visit(visitor)
+            }
+        }
+        unsafe impl<$($param),*> GcTypeInfo for ($($param,)*)
+            where $($param: Trace),* {
             /*
              * HACK: Macros don't allow using `||` as separator,
              * so we use it as a terminator, causing there to be an illegal trailing `||`.
@@ -21,13 +35,7 @@ macro_rules! trace_tuple {
              * This also correctly handles the empty unit tuple by making it false
              */
             const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
-            #[inline]
-            fn visit<Visit: $crate::GcVisitor>(&mut self, #[allow(unused)] visitor: &mut Visit) -> Result<(), Visit::Err> {
-                #[allow(non_snake_case)]
-                let ($(ref mut $param,)*) = *self;
-                $(visitor.visit::<$param>($param)?;)*
-                Ok(())
-            }
+            const NEEDS_DROP: bool = $(<$param as GcTypeInfo>::NEEDS_DROP ||)* false;
         }
         unsafe impl<$($param),*> TraceImmutable for ($($param,)*)
             where $($param: TraceImmutable),* {
@@ -37,6 +45,10 @@ macro_rules! trace_tuple {
                 let ($(ref $param,)*) = *self;
                 $(visitor.visit_immutable::<$param>($param)?;)*
                 Ok(())
+            }
+            #[inline]
+            fn visit_dyn_immutable(&self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+                self.visit_immutable(visitor)
             }
         }
         unsafe impl<$($param: NullTrace),*> NullTrace for ($($param,)*) {}
@@ -50,9 +62,7 @@ macro_rules! trace_tuple {
                  $(<$param as $crate::GcErase<'a, Id>>::Erased: Sized,)* {
             type Erased = ($(<$param as $crate::GcErase<'a, Id>>::Erased,)*);
         }
-        unsafe impl<$($param: GcSafe),*> GcSafe for ($($param,)*) {
-            const NEEDS_DROP: bool = false $(|| <$param as GcSafe>::NEEDS_DROP)*;
-        }
+        unsafe impl<$($param: GcSafe),*> GcSafe for ($($param,)*) {}
         unsafe impl<'gc, OwningRef, $($param),*> $crate::GcDirectBarrier<'gc, OwningRef> for ($($param,)*)
             where $($param: $crate::GcDirectBarrier<'gc, OwningRef>),* {
             #[inline]
@@ -110,22 +120,31 @@ trace_tuple! { A B C D E F G H I }
 macro_rules! trace_array {
     ($size:tt) => {
         unsafe impl<T: Trace> Trace for [T; $size] {
-            const NEEDS_TRACE: bool = T::NEEDS_TRACE;
             #[inline]
             fn visit<V: $crate::GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
                 visitor.visit::<[T]>(self as &mut [T])
             }
+            #[inline]
+            fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+                visitor.visit::<[T]>(self as &mut [T])
+            }
+        }
+        unsafe impl<T: Trace> GcTypeInfo for [T; $size] {
+            const NEEDS_TRACE: bool = $crate::needs_trace::<T>();
+            const NEEDS_DROP: bool = $crate::needs_gc_drop::<T>();
         }
         unsafe impl<T: $crate::TraceImmutable> $crate::TraceImmutable for [T; $size] {
             #[inline]
             fn visit_immutable<V: $crate::GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
                 visitor.visit_immutable::<[T]>(self as &[T])
             }
+            #[inline]
+            fn visit_dyn_immutable(&self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+                visitor.visit_immutable::<[T]>(self as &[T])
+            }
         }
         unsafe impl<T: $crate::NullTrace> $crate::NullTrace for [T; $size] {}
-        unsafe impl<T: GcSafe> GcSafe for [T; $size] {
-            const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
-        }
+        unsafe impl<T: GcSafe> GcSafe for [T; $size] {}
         unsafe impl<'new_gc, Id, T> $crate::GcRebrand<'new_gc, Id> for [T; $size]
             where Id: CollectorId, T: GcRebrand<'new_gc, Id>,
                   <T as GcRebrand<'new_gc, Id>>::Branded: Sized {
@@ -149,9 +168,13 @@ trace_array! {
 /// The underlying data must support `TraceImmutable` since we
 /// only have an immutable reference.
 unsafe impl<'a, T: TraceImmutable> Trace for &'a T {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
     #[inline(always)]
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+        visitor.visit_immutable::<T>(*self)
+    }
+
+    #[inline]
+    fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
         visitor.visit_immutable::<T>(*self)
     }
 }
@@ -160,10 +183,17 @@ unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a T {
     fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
         visitor.visit_immutable::<T>(*self)
     }
+
+    #[inline]
+    fn visit_dyn_immutable(&self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        visitor.visit_immutable::<T>(*self)
+    }
 }
 unsafe impl<'a, T: NullTrace> NullTrace for &'a T {}
-unsafe impl<'a, T: GcSafe + TraceImmutable> GcSafe for &'a T {
-    const NEEDS_DROP: bool = false; // References are safe :)
+unsafe impl<'a, T: GcSafe + TraceImmutable> GcSafe for &'a T {}
+unsafe impl<'a, T: TraceImmutable> GcTypeInfo for &'a T {
+    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
+    const NEEDS_DROP: bool = false; // References never need to be dropped :)
 }
 /// TODO: Right now we require `NullTrace`
 ///
@@ -185,9 +215,12 @@ unsafe impl<'a, Id, T> GcErase<'a, Id> for &'a T
 
 /// Implements tracing for mutable references.
 unsafe impl<'a, T: Trace> Trace for &'a mut T {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
     #[inline(always)]
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+        visitor.visit::<T>(*self)
+    }
+    #[inline]
+    fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
         visitor.visit::<T>(*self)
     }
 }
@@ -196,10 +229,19 @@ unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a mut T {
     fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
         visitor.visit_immutable::<T>(&**self)
     }
+
+    #[inline]
+    fn visit_dyn_immutable(&self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        visitor.visit_immutable::<T>(&**self)
+    }
 }
 unsafe impl<'a, T: NullTrace> NullTrace for &'a mut T {}
-unsafe impl<'a, T: GcSafe> GcSafe for &'a mut T {
-    const NEEDS_DROP: bool = false; // References are Copy
+unsafe impl<'a, T: GcSafe> GcSafe for &'a mut T {}
+unsafe impl<'a, T: Trace> GcTypeInfo for &'a mut T {
+    const NEEDS_TRACE: bool = crate::needs_trace::<T>();
+    /// Although not [Copy], mutable references
+    /// never need to be dropped
+    const NEEDS_DROP: bool = false;
 }
 /// TODO: We currently require NullTrace for `T`
 unsafe impl<'a, 'new_gc, Id, T> GcRebrand<'new_gc, Id> for &'a mut T
@@ -212,10 +254,9 @@ unsafe impl<'a, Id, T> GcErase<'a, Id> for &'a mut T
     type Erased = &'a mut T;
 }
 
-/// Implements tracing for slices, by tracing all the objects they refer to.
+/// Implements tracing for slices, by tracing all
+/// the objects they refer to.
 unsafe impl<T: Trace> Trace for [T] {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE ;
-
     #[inline]
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
         if !T::NEEDS_TRACE { return Ok(()) };
@@ -223,6 +264,11 @@ unsafe impl<T: Trace> Trace for [T] {
             visitor.visit(value)?;
         }
         Ok(())
+    }
+
+    #[inline]
+    fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        self.visit::<GcDynVisitor>(visitor)
     }
 }
 unsafe impl<T: TraceImmutable> TraceImmutable for [T] {
@@ -234,21 +280,31 @@ unsafe impl<T: TraceImmutable> TraceImmutable for [T] {
         }
         Ok(())
     }
+
+    #[inline]
+    fn visit_dyn_immutable(&self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        self.visit_immutable::<GcDynVisitor>(visitor)
+    }
 }
 unsafe impl<T: NullTrace> NullTrace for [T] {}
-unsafe impl<T: GcSafe> GcSafe for [T] {
-    const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
+unsafe impl<T: GcSafe> GcSafe for [T] {}
+unsafe impl<T: Trace> GcTypeInfo for [T] {
+    const NEEDS_TRACE: bool = crate::needs_trace::<T>();
+    const NEEDS_DROP: bool = crate::needs_gc_drop::<T>();
 }
 
 unsafe impl<T: Trace> Trace for Option<T> {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-
     #[inline]
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
         match *self {
             None => Ok(()),
             Some(ref mut value) => visitor.visit(value),
         }
+    }
+
+    #[inline]
+    fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        self.visit(visitor)
     }
 }
 unsafe impl<T: TraceImmutable> TraceImmutable for Option<T> {
@@ -259,10 +315,17 @@ unsafe impl<T: TraceImmutable> TraceImmutable for Option<T> {
             Some(ref value) => visitor.visit_immutable(value),
         }
     }
+
+    #[inline]
+    fn visit_dyn_immutable(&self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        self.visit_immutable(visitor)
+    }
 }
 unsafe impl<T: NullTrace> NullTrace for Option<T> {}
-unsafe impl<T: GcSafe> GcSafe for Option<T> {
-    const NEEDS_DROP: bool = T::NEEDS_DROP;
+unsafe impl<T: GcSafe> GcSafe for Option<T> {}
+unsafe impl<T: Trace> GcTypeInfo for Option<T> {
+    const NEEDS_TRACE: bool = crate::needs_trace::<T>();
+    const NEEDS_DROP: bool = crate::needs_gc_drop::<T>();
 }
 unsafe impl<'gc, OwningRef, V> GcDirectBarrier<'gc, OwningRef> for Option<V>
     where V: GcDirectBarrier<'gc, OwningRef> {
@@ -292,5 +355,9 @@ unsafe impl<T: TraceImmutable> TraceImmutable for Wrapping<T> {
     #[inline]
     fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
         visitor.visit_immutable(&self.0)
+    }
+
+    fn visit_dyn_immutable(&self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        self.visit_immutable(visitor)
     }
 }

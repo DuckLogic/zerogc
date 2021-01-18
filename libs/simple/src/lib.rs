@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use std::sync::atomic::AtomicPtr;
 #[cfg(not(feature = "multiple-collectors"))]
 use std::marker::PhantomData;
-use std::any::TypeId;
+use std::any::{TypeId, Any};
 
 use slog::{Logger, FnValue, debug};
 
@@ -49,11 +49,27 @@ use zerogc_context::{
 mod alloc;
 #[cfg(not(feature = "small-object-arenas"))]
 mod alloc {
-    pub const fn is_small_object<T>() -> bool {
-        false
+    #[derive(Copy, Clone)]
+    pub struct SmallObjectSize {
+        pub val_size: usize,
+        pub val_align: usize
     }
-    pub const fn small_object_size<T>() -> usize {
-        unimplemented!()
+    impl SmallObjectSize {
+        #[inline]
+        pub const fn of<T>() -> SmallObjectSize {
+            SmallObjectSize {
+                val_size: std::mem::size_of::<T>(),
+                val_align: std::mem::align_of::<T>()
+            }
+        }
+        #[inline]
+        pub const fn is_small(&self) -> bool {
+            false
+        }
+        #[inline]
+        pub const fn object_size(&self) -> usize {
+            unimplemented!()
+        }
     }
     pub struct FakeArena;
     impl FakeArena {
@@ -125,7 +141,7 @@ unsafe impl DynTrace for GcHandleListWrapper {
     fn trace(&mut self, visitor: &mut MarkVisitor) {
         unsafe {
             let Ok(()) = self.0.trace::<_, !>(|raw_ptr, type_info| {
-                let header = &mut *GcHeader::from_value_ptr(raw_ptr, type_info);
+                let header = &mut *GcHeader::from_value_ptr(raw_ptr as *mut u8, type_info);
                 // Mark grey
                 header.update_raw_state(MarkState::Grey.
                     to_raw(visitor.inverted_mark));
@@ -701,6 +717,32 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
             Ok(())
         }
     }
+
+    #[inline]
+    unsafe fn visit_dyn_gc(&mut self, gc_ptr: NonNull<dyn GcSafe>, collector_id: &dyn Any) -> Result<(), Self::Err> where Self: Sized {
+        if let Some(&id) = collector_id.downcast_ref::<crate::CollectorId>() {
+            assert!(id, self.expected_collector);
+            // This MUST match self._visit_own_gc
+            assert!()
+            let header = GcHeader::from_value_ptr(
+                gc_ptr.as_ptr() as *mut u8,
+                &GcType {
+                    /*
+                     * TODO: Is this possibly correct?
+                     * How do we handle dropping dynamically-dispatched types
+                     */
+                    drop_func: Some(std::mem::transmute::<
+                        unsafe fn(*mut dyn GcSafe),
+                        unsafe fn(*mut c_void)
+                    >(std::ptr::drop_in_place::<dyn GcSafe>)),
+
+                }
+            )
+        } else {
+            // Just ignore ids from other collectors
+            Ok(())
+        }
+    }
 }
 impl MarkVisitor<'_> {
     /// Visit a GC type whose [::zerogc::CollectorId] matches our own
@@ -710,7 +752,7 @@ impl MarkVisitor<'_> {
         // Verify this again (should be checked by caller)
         debug_assert_eq!(gc.collector_id(), self.expected_collector);
         let header = GcHeader::from_value_ptr(
-            gc.as_raw_ptr(),
+            gc.as_raw_ptr() as *mut u8,
             T::STATIC_TYPE
         );
         self.visit_raw_gc(&mut *header, |obj, visitor| {
@@ -804,7 +846,14 @@ impl<T: GcSafe> StaticGcType for T {
 /// and fallback alloc vis `BigGcObject`
 #[repr(C)]
 struct GcHeader {
-    type_info: &'static GcType,
+    /// If this type is a `Sized` type whose info was
+    /// statically known at allocation, this type-info will be present
+    ///
+    /// Otherwise, if the object is a trait-object, a slice, or a `str`
+    /// this will be missing. The other field of the fat-pointer
+    /// will be one past the end. The data-pointer part of the fat-pointer
+    /// can be reconstructed from from [Gc::as_raw_ptr]
+    type_info: Option<&'static GcType>,
     /*
      * NOTE: State byte should come last
      * If the value is small `(u32)`, we could reduce
@@ -829,8 +878,8 @@ impl GcHeader {
         }
     }
     #[inline]
-    pub unsafe fn from_value_ptr<T>(ptr: *mut T, static_type: &GcType) -> *mut GcHeader {
-        (ptr as *mut u8).sub(static_type.value_offset).cast()
+    pub unsafe fn from_value_ptr(ptr: *mut u8, static_type: &GcType) -> *mut GcHeader {
+        ptr.sub(static_type.value_offset).cast()
     }
     #[inline]
     fn raw_state(&self) -> RawMarkState {

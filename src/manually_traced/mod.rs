@@ -153,6 +153,10 @@ macro_rules! unsafe_trace_deref {
                 let extracted: &$target_type = &**self;
                 visitor.visit_immutable(extracted)
             }
+            #[inline]
+            fn visit_dyn_immutable(&self, visitor: &mut $crate::GcDynVisitor) -> Result<(), $crate::GcDynVisitError> {
+                self.visit_immutable::<$crate::GcDynVisitor>(visitor)
+            }
         }
         unsafe_trace_deref!($target, $($param),*; immut = false; |value| {
             // I wish we had type ascription -_-
@@ -164,8 +168,6 @@ macro_rules! unsafe_trace_deref {
         unsafe_gc_brand!($target, immut = required; $($param),*);
         unsafe impl<$($param),*> Trace for $target<$($param),*>
             where $($param: TraceImmutable),* {
-
-            const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
             #[inline]
             fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
                 let extracted = {
@@ -174,6 +176,24 @@ macro_rules! unsafe_trace_deref {
                 };
                 visitor.visit_immutable(extracted)
             }
+            #[inline]
+            fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), $crate::GcDynVisitError> {
+                self.visit::<GcDynVisitor>(visitor)
+            }
+        }
+        unsafe impl<$($param),*> GcTypeInfo for $target<$($param),*>
+            where $($param: TraceImmutable),* {
+            const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
+            /*
+             * NOTE: Because we are a wrapper class, we may have a custom drop.
+             * Therefore we (more conservatively) base our drop decisions
+             * on [core::mem::needs_drop] instead of [crate::needs_gc_drop].
+             *
+             * This may result in false positives for types like
+             * Wrapper<AutoDerivedFakeDrop>
+             * but it is acceptable for now.
+             */
+            const NEEDS_DROP: bool = core::mem::needs_drop::<Self>();
         }
         unsafe impl<$($param),*> TraceImmutable for $target<$($param),*>
             where $($param: TraceImmutable),* {
@@ -186,20 +206,21 @@ macro_rules! unsafe_trace_deref {
                 };
                 visitor.visit_immutable(extracted)
             }
+            #[inline]
+            fn visit_dyn_immutable(&self, visitor: &mut $crate::GcDynVisitor) -> Result<(), $crate::GcDynVisitError> {
+                self.visit_immutable::<$crate::GcDynVisitor>(visitor)
+            }
         }
         unsafe impl<$($param: NullTrace),*> NullTrace for $target<$($param),*> {}
-        /// We trust ourselves to not do anything bad as long as our paramaters don't
+        /// We trust ourselves to not do anything bad
+        /// as long as our parameters don't
         unsafe impl<$($param),*> GcSafe for $target<$($param),*>
-            where $($param: GcSafe + TraceImmutable),*  {
-            const NEEDS_DROP: bool = core::mem::needs_drop::<Self>();
-        }
+            where $($param: GcSafe + TraceImmutable),*  {}
     };
     ($target:ident, $($param:ident),*; immut = false; |$value:ident| $extract:expr) => {
         unsafe_gc_brand!($target, $($param),*);
         unsafe impl<$($param),*> Trace for $target<$($param),*>
             where $($param: Trace),* {
-
-            const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
             #[inline]
             fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
                 let extracted = {
@@ -208,11 +229,29 @@ macro_rules! unsafe_trace_deref {
                 };
                 visitor.visit(extracted)
             }
+            #[inline]
+            fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+                self.visit(visitor)
+            }
         }
         unsafe impl<$($param: NullTrace),*> NullTrace for $target<$($param),*> {}
         /// We trust ourselves to not do anything bad as long as our paramaters don't
         unsafe impl<$($param),*> GcSafe for $target<$($param),*>
-            where $($param: GcSafe),*  {
+            where $($param: GcSafe),*  {}
+        unsafe impl<$($param),*> GcTypeInfo for $target<$($param),*>
+            where $($param: Trace),* {
+            const NEEDS_TRACE: bool = $($crate::needs_trace::<$param>() || )* false;
+            /*
+             * NOTE: Because we are a wrapper class, we may have a custom drop.
+             * Therefore we (more conservatively) base our drop decisions
+             * on [core::mem::needs_drop] instead of [crate::needs_gc_drop].
+             *
+             * This may result in false positives for types like
+             * Wrapper<AutoDerivedFakeDrop>
+             * but it is acceptable for now.
+             *
+             * TODO: Duplicate comment!!!
+             */
             const NEEDS_DROP: bool = core::mem::needs_drop::<Self>();
         }
     };
@@ -272,6 +311,10 @@ macro_rules! unsafe_immutable_trace_iterable {
                 }
                 Ok(())
             }
+            #[inline]
+            fn visit_dyn_immutable(&self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+                self.visit_immutable::<GcDynVisitor>(self)
+            }
         }
         unsafe impl<$($param: $crate::NullTrace),*> NullTrace for $target<$($param),*> {}
     };
@@ -304,9 +347,12 @@ macro_rules! unsafe_trace_primitive {
     ($target:ty) => {
         unsafe_gc_brand!($target);
         unsafe impl Trace for $target {
-            const NEEDS_TRACE: bool = false;
             #[inline(always)] // This method does nothing and is always a win to inline
             fn visit<V: $crate::GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
+                Ok(())
+            }
+            #[inline]
+            fn visit_dyn(&mut self, _visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
                 Ok(())
             }
         }
@@ -315,10 +361,16 @@ macro_rules! unsafe_trace_primitive {
             fn visit_immutable<V: $crate::GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
                 Ok(())
             }
+            #[inline]
+            fn visit_dyn_immutable(&self, _visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+                Ok(())
+            }
         }
         unsafe impl $crate::NullTrace for $target {}
         /// No drop/custom behavior -> GcSafe
-        unsafe impl GcSafe for $target {
+        unsafe impl GcSafe for $target {}
+        unsafe impl GcTypeInfo for $target {
+            const NEEDS_TRACE: bool = false;
             const NEEDS_DROP: bool = core::mem::needs_drop::<$target>();
         }
         unsafe impl<'gc, OwningRef> $crate::GcDirectBarrier<'gc, OwningRef> for $target {

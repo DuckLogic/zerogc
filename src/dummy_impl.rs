@@ -1,9 +1,6 @@
 //! Dummy collector implementation for testing
 
-use crate::{
-    Trace, TraceImmutable, GcVisitor, NullTrace, CollectorId,
-    GcSafe, GcSystem, GcContext,
-};
+use crate::{Trace, TraceImmutable, GcVisitor, NullTrace, CollectorId, GcSafe, GcSystem, GcContext, GcTypeInfo, GcDynVisitError, GcDynVisitor};
 use std::ptr::NonNull;
 
 /// Fake a [Gc] that points to the specified value
@@ -103,9 +100,11 @@ pub struct DummyCollectorId {
     _priv: ()
 }
 unsafe impl Trace for DummyCollectorId {
-    const NEEDS_TRACE: bool = false;
-
     fn visit<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
+        Ok(())
+    }
+    #[inline]
+    fn visit_dyn(&mut self, _visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
         Ok(())
     }
 }
@@ -113,6 +112,15 @@ unsafe impl TraceImmutable for DummyCollectorId {
     fn visit_immutable<V: GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
         Ok(())
     }
+
+    #[inline]
+    fn visit_dyn_immutable(&self, _visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+        Ok(())
+    }
+}
+unsafe impl GcTypeInfo for DummyCollectorId {
+    const NEEDS_TRACE: bool = false;
+    const NEEDS_DROP: bool = false;
 }
 
 unsafe impl NullTrace for DummyCollectorId {}
