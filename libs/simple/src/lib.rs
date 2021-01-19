@@ -881,27 +881,45 @@ enum RawMarkState {
     /// Normally this marks the white state
     ///
     /// If we're inverted, this marks black
-    Red,
+    Red = 0,
     /// This always marks the grey state
     ///
     /// Inverting the mark bit doesn't affect the
     /// grey state
-    Grey,
+    Grey = 3,
     /// Normally this marks the blue state
     ///
     /// If we're inverted, this marks white
-    Blue
+    Blue = 1
 }
 impl RawMarkState {
     #[inline]
     fn resolve(self, inverted_mark: bool) -> MarkState {
-        match (self, inverted_mark) {
-            (RawMarkState::Red, false) => MarkState::White,
-            (RawMarkState::Red, true) => MarkState::Black,
-            (RawMarkState::Grey, _) => MarkState::Grey,
-            (RawMarkState::Blue, false) => MarkState::Black,
-            (RawMarkState::Blue, true) => MarkState::White
+        let expected: MarkState;
+        #[cfg(debug_assertions)] {
+            expected = match (self, inverted_mark) {
+                (RawMarkState::Red, false) => MarkState::White,
+                (RawMarkState::Red, true) => MarkState::Black,
+                (RawMarkState::Grey, _) => MarkState::Grey,
+                (RawMarkState::Blue, false) => MarkState::Black,
+                (RawMarkState::Blue, true) => MarkState::White
+            };
         }
+        /*
+         * Bit magic works as expected (both ways):
+         * (self as u8) ^ (inverted_mark as u8) => (res_bits as MarkState)
+         * (Red => 0u8) ^ (false as 0u8) => (0u8 as White)
+         * (Red => 0u8) ^ (true as 1u8) => (1u8 as Black)
+         * (Grey => 3u8) ^ (false as 0u8) => (3u8 as Grey)
+         * (Grey => 3u8) ^ (true as 1u8) => (3u8 as Grey)
+         * (Blue => 1u8) ^ (false as 0u8) => (1u8 as Black)
+         * (Blue => 1u8) ^ (true as 1u8) => (0u8 as White)
+         */
+        let bits = (self as u8) ^ (inverted_mark as u8);
+        #[cfg(debug_assertions)] {
+            debug_assert_eq!(expected as u8, bits);
+        }
+        unsafe { std::mem::transmute::<u8, MarkState>(bits) }
     }
 }
 
@@ -915,25 +933,37 @@ enum MarkState {
     ///
     /// Once all the objects have been marked,
     /// all remaining white objects will be freed.
-    White,
+    White = 0,
     /// The object is in the gray set and needs to be traversed to look for reachable memory
     ///
     /// After being scanned this object will end up in the black set.
-    Grey,
+    Grey = 3,
     /// The object is in the black set and is reachable from the roots.
     ///
     /// This object cannot be freed.
-    Black
+    Black = 1
 }
 impl MarkState {
     #[inline]
     fn to_raw(self, inverted_mark: bool) -> RawMarkState {
-        match (self, inverted_mark) {
-            (MarkState::White, false) => RawMarkState::Red,
-            (MarkState::White, true) => RawMarkState::Blue,
-            (MarkState::Grey, _) => RawMarkState::Grey,
-            (MarkState::Black, false) => RawMarkState::Blue,
-            (MarkState::Black, true) => RawMarkState::Red,
+        let expected: RawMarkState;
+        #[cfg(debug_assertions)] {
+            expected = match (self, inverted_mark) {
+                (MarkState::White, false) => RawMarkState::Red,
+                (MarkState::White, true) => RawMarkState::Blue,
+                (MarkState::Grey, _) => RawMarkState::Grey,
+                (MarkState::Black, false) => RawMarkState::Blue,
+                (MarkState::Black, true) => RawMarkState::Red,
+            };
         }
+        /*
+         * Bit magic is reverse of `RawMarkState::resolved`
+         * The justification there works two ways
+         */
+        let bits = (self as u8) ^ (inverted_mark as u8);
+        #[cfg(debug_assertions)] {
+            debug_assert_eq!(expected as u8, bits);
+        }
+        unsafe { std::mem::transmute::<u8, RawMarkState>(bits) }
     }
 }
