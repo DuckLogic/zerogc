@@ -1,6 +1,6 @@
 [package]
 name = "zerogc"
-version = "0.1.3"
+version = "0.2.0-alpha.1"
 authors = ["Techcable <Techcable@techcable.net>"]
 description = "Zero overhead tracing garbage collection for rust"
 repository = "https://github.com/DuckLogic/zerogc"
