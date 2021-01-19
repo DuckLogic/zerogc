@@ -1,9 +1,16 @@
-use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, dummy_impl};
+use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, dummy_impl::{self, DummyCollectorId}};
 
 use zerogc_derive::Trace;
 
 #[derive(Trace)]
-#[zerogc(ignore_params(Id))]
+#[zerogc(collector_id(DummyCollectorId))]
+pub struct SpecificCollector<'gc> {
+    gc: Gc<'gc, i32, DummyCollectorId>,
+    rec: Gc<'gc, SpecificCollector<'gc>, DummyCollectorId>
+}
+
+#[derive(Trace)]
+#[zerogc(collector_id(Id))]
 pub struct Basic<'gc, Id: CollectorId> {
     parent: Option<Gc<'gc, Basic<'gc, Id>, Id>>,
     children: Vec<Gc<'gc, Basic<'gc, Id>, Id>>,
@@ -11,7 +18,7 @@ pub struct Basic<'gc, Id: CollectorId> {
 }
 
 #[derive(Copy, Clone, Trace)]
-#[zerogc(copy, ignore_params(Id))]
+#[zerogc(copy, collector_id(Id))]
 pub struct BasicCopy<'gc, Id: CollectorId> {
     test: i32,
     value: i32,
@@ -20,7 +27,7 @@ pub struct BasicCopy<'gc, Id: CollectorId> {
 
 
 #[derive(Copy, Clone, Trace)]
-#[zerogc(copy, ignore_params(Id))]
+#[zerogc(copy, collector_id(Id))]
 pub enum BasicEnum<'gc, Id: CollectorId> {
     Unit,
     Tuple(i32),

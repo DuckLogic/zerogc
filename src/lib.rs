@@ -801,6 +801,12 @@ pub unsafe trait GcRebrand<'new_gc, Id: CollectorId>: Trace {
     /// This must have the same in-memory repr as `Self`,
     /// so that it's safe to transmute.
     type Branded: Trace + 'new_gc;
+
+    /// Assert this type can be rebranded
+    ///
+    /// Only used by procedural derive
+    #[doc(hidden)]
+    fn assert_rebrand() {}
 }
 /// Indicates that it's safe to erase all GC lifetimes
 /// and change them to 'static (logically an 'unsafe)
@@ -815,6 +821,12 @@ pub unsafe trait GcErase<'a, Id: CollectorId>: Trace {
     /// This must have the same in-memory repr as `Self`,
     /// so that it's safe to transmute.
     type Erased: 'a;
+
+    /// Assert this type can be erased
+    ///
+    /// Only used by procedural derive
+    #[doc(hidden)]
+    fn assert_erase() {}
 }
 
 /// Indicates that a type can be traced by a garbage collector.
