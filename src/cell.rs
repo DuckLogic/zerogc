@@ -15,7 +15,7 @@
 //! and it'll generate a safe wrapper.
 use core::cell::Cell;
 
-use crate::{GcSafe, Trace, GcVisitor, NullTrace, TraceImmutable, GcDirectBarrier,};
+use crate::{GcSafe, Trace, GcVisitor, NullTrace, TraceImmutable, GcDirectBarrier, CollectorId, GcErase, GcRebrand};
 
 /// A `Cell` pointing to a garbage collected object.
 ///
@@ -103,4 +103,14 @@ unsafe impl<T: GcSafe + Copy + NullTrace> NullTrace for GcCell<T> {}
 unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {
     /// Since T is Copy, we shouldn't need to be dropped
     const NEEDS_DROP: bool = false;
+}
+unsafe impl<'min, T, Id> GcErase<'min, Id> for GcCell<T>
+    where T: Trace + Copy + GcErase<'min, Id>, Id: CollectorId,
+          T::Erased: Copy + Trace {
+    type Erased = GcCell<T::Erased>;
+}
+unsafe impl<'new_gc, T, Id> GcRebrand<'new_gc, Id> for GcCell<T>
+    where T: Trace + Copy + GcRebrand<'new_gc, Id>, Id: CollectorId,
+          T::Branded: Copy + Trace {
+    type Branded = GcCell<T::Branded>;
 }
