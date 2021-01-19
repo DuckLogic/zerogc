@@ -18,6 +18,14 @@ parking_lot = { version = "0.11", features = ["nightly"], optional = true }
 # Logging
 slog = "2.7"
 
+# Allocation
+[dependencies.zerogc-alloc]
+path = "../alloc"
+version = "0.1.3"
+default-features = false
+features = ["malloc"]
+
+
 [features]
 default = [
     "small-object-arenas", # Without this, allocating small objects is slow
@@ -33,7 +41,7 @@ default = [
 # agressive (memory wise) then delegating all work to std::alloc
 # TODO: Return unused memory to the operating systems
 # TODO: Thread-local caching (make arenas fast again)
-small-object-arenas = ["once_cell"]
+small-object-arenas = ["zerogc-alloc/small-objects"]
 # Use recursion to implicitly track the grey stack
 # This risks stack overflow at a possible performance gain
 # See commit 9a9634d68a4933d
@@ -42,7 +50,7 @@ implicit-grey-stack = []
 # by creating a seperate context for each.
 #
 # This can increase overhead by requiring communication between threads.
-sync = ["zerogc-context/sync", "parking_lot"]
+sync = ["zerogc-context/sync", "parking_lot", "zerogc-alloc/sync"]
 # Allow multiple collectors to exist at once
 # Otherwise, there's a single global collector (useful in VMs)
 #

@@ -36,38 +36,12 @@ use zerogc::{GcSafe, Trace, GcVisitor};
 
 use zerogc_context::utils::{ThreadId, AtomicCell, MemorySize};
 
-use crate::alloc::{SmallArenaList, small_object_size};
-
 use zerogc_context::collector::{RawSimpleAlloc};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 use zerogc_context::{
     CollectionManager as AbstractCollectionManager,
     RawContext as AbstractRawContext
 };
-
-#[cfg(feature = "small-object-arenas")]
-mod alloc;
-#[cfg(not(feature = "small-object-arenas"))]
-mod alloc {
-    pub const fn is_small_object<T>() -> bool {
-        false
-    }
-    pub const fn small_object_size<T>() -> usize {
-        unimplemented!()
-    }
-    pub struct FakeArena;
-    impl FakeArena {
-        pub(crate) fn alloc(&self) -> std::ptr::NonNull<super::GcHeader> {
-            unimplemented!()
-        }
-    }
-    pub struct SmallArenaList;
-    impl SmallArenaList {
-        // Create dummy
-        pub fn new() -> Self { SmallArenaList }
-        pub fn find<T>(&self) -> Option<FakeArena> { None }
-    }
-}
 
 #[cfg(feature = "sync")]
 type RawContext<C> = zerogc_context::state::sync::RawContext<C>;

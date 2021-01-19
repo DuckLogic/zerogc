@@ -15,7 +15,7 @@ readme = "README.md"
 indexmap = { version = "1.6", optional = true }
 
 [workspace]
-members = ["libs/simple", "libs/derive", "libs/context"]
+members = ["libs/simple", "libs/derive", "libs/context", "libs/alloc"]
 
 [profile.dev]
 opt-level = 1
