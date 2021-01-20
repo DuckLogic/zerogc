@@ -47,7 +47,7 @@ unsafe impl<'new_gc, Id, K, V> GcRebrand<'new_gc, Id> for IndexMap<K, V>
     >;
 }
 
-unsafe impl<K, V> GcTypeInfo for IndexMap<K, V>
+unsafe impl<K, V> GcType for IndexMap<K, V>
     where K: TraceImmutable + Eq + Hash, V: Trace {
     /// IndexMap has internal memory
     const NEEDS_TRACE: bool = K::NEEDS_TRACE | V::NEEDS_TRACE;
@@ -100,7 +100,7 @@ unsafe impl<'a, Id, V> GcErase<'a, Id> for IndexSet<V>
           <V as GcErase<'a, Id>>::Erased: TraceImmutable + Eq + Hash, {
     type Erased = IndexSet<<V as GcErase<'a, Id>>::Erased>;
 }
-unsafe impl<V> GcTypeInfo for IndexSet<V>
+unsafe impl<V> GcType for IndexSet<V>
     where V: TraceImmutable + Eq + Hash {
     const NEEDS_TRACE: bool = V::NEEDS_TRACE;
     /// IndexSet has internal memory

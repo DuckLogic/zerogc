@@ -15,7 +15,7 @@
 //! and it'll generate a safe wrapper.
 use core::cell::Cell;
 
-use crate::{GcSafe, Trace, GcVisitor, NullTrace, TraceImmutable, GcDirectBarrier, GcTypeInfo, GcDynVisitError, GcDynVisitor};
+use crate::prelude::*;
 
 /// A `Cell` pointing to a garbage collected object.
 ///
@@ -67,8 +67,8 @@ impl<T: NullTrace + Copy> GcCell<T> {
 /// Trigger a write barrier on the inner value
 ///
 /// We are a 'direct' write barrier because `Value` is stored inline
-unsafe impl<'gc, OwningRef, Value> GcDirectBarrier<'gc, OwningRef> for GcCell<Value>
-    where Value: GcDirectBarrier<'gc, OwningRef> + Copy {
+unsafe impl<'gc, OwningRef, Value> crate::GcDirectBarrier<'gc, OwningRef> for GcCell<Value>
+    where Value: crate::GcDirectBarrier<'gc, OwningRef> + Copy {
     #[inline]
     unsafe fn write_barrier(
         &self, owner: &OwningRef,
@@ -109,7 +109,7 @@ unsafe impl<T: GcSafe + NullTrace + Copy> TraceImmutable for GcCell<T> {
 }
 unsafe impl<T: GcSafe + Copy + NullTrace> NullTrace for GcCell<T> {}
 unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {}
-unsafe impl<T: Trace + Copy> GcTypeInfo for GcCell<T> {
+unsafe impl<T: GcType + Copy> GcType for GcCell<T> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
     /// Since T is Copy, we shouldn't need to be dropped
     const NEEDS_DROP: bool = false;

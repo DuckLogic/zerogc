@@ -177,7 +177,7 @@ macro_rules! unsafe_trace_deref {
                 visitor.visit_immutable(extracted)
             }
         }
-        unsafe impl<$($param),*> GcTypeInfo for $target<$($param),*>
+        unsafe impl<$($param),*> GcType for $target<$($param),*>
             where $($param: TraceImmutable),* {
             const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
             /*
@@ -230,7 +230,7 @@ macro_rules! unsafe_trace_deref {
         /// We trust ourselves to not do anything bad as long as our paramaters don't
         unsafe impl<$($param),*> GcSafe for $target<$($param),*>
             where $($param: GcSafe),*  {}
-        unsafe impl<$($param),*> GcTypeInfo for $target<$($param),*>
+        unsafe impl<$($param),*> GcType for $target<$($param),*>
             where $($param: Trace),* {
             const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
             /*
@@ -357,7 +357,7 @@ macro_rules! unsafe_trace_primitive {
         unsafe impl $crate::NullTrace for $target {}
         /// No drop/custom behavior -> GcSafe
         unsafe impl GcSafe for $target {}
-        unsafe impl GcTypeInfo for $target {
+        unsafe impl GcType for $target {
             const NEEDS_TRACE: bool = false;
             const NEEDS_DROP: bool = core::mem::needs_drop::<$target>();
         }

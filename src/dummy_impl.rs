@@ -1,6 +1,6 @@
 //! Dummy collector implementation for testing
 
-use crate::{Trace, TraceImmutable, GcVisitor, NullTrace, CollectorId, GcSafe, GcSystem, GcContext, GcTypeInfo, GcDynVisitError, GcDynVisitor};
+use crate::{Trace, TraceImmutable, GcVisitor, NullTrace, CollectorId, GcSafe, GcSystem, GcContext, GcType, GcDynVisitError, GcDynVisitor};
 use std::ptr::NonNull;
 
 /// Fake a [Gc] that points to the specified value
@@ -114,7 +114,7 @@ unsafe impl TraceImmutable for DummyCollectorId {
         Ok(())
     }
 }
-unsafe impl GcTypeInfo for DummyCollectorId {
+unsafe impl GcType for DummyCollectorId {
     const NEEDS_TRACE: bool = false;
     const NEEDS_DROP: bool = false;
 }

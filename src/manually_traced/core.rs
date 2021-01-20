@@ -7,7 +7,7 @@
 use core::num::Wrapping;
 
 use crate::prelude::*;
-use crate::{GcDirectBarrier, CollectorId, DynTrace};
+use crate::{GcDirectBarrier, CollectorId};
 
 macro_rules! trace_tuple {
     { $($param:ident)* } => {
@@ -21,7 +21,7 @@ macro_rules! trace_tuple {
                 Ok(())
             }
         }
-        unsafe impl<$($param),*> GcTypeInfo for ($($param,)*)
+        unsafe impl<$($param),*> GcType for ($($param,)*)
             where $($param: Trace),* {
             /*
              * HACK: Macros don't allow using `||` as separator,
@@ -31,7 +31,7 @@ macro_rules! trace_tuple {
              * This also correctly handles the empty unit tuple by making it false
              */
             const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
-            const NEEDS_DROP: bool = $(<$param as GcTypeInfo>::NEEDS_DROP ||)* false;
+            const NEEDS_DROP: bool = $(<$param as GcType>::NEEDS_DROP ||)* false;
         }
         unsafe impl<$($param),*> TraceImmutable for ($($param,)*)
             where $($param: TraceImmutable),* {
@@ -121,7 +121,7 @@ macro_rules! trace_array {
                 visitor.visit::<[T]>(self as &mut [T])
             }
         }
-        unsafe impl<T: Trace> GcTypeInfo for [T; $size] {
+        unsafe impl<T: Trace> GcType for [T; $size] {
             const NEEDS_TRACE: bool = T::NEEDS_TRACE;
             const NEEDS_DROP: bool = T::NEEDS_DROP;
         }
@@ -159,15 +159,15 @@ trace_array! {
 ///
 /// The underlying data must support `TraceImmutable` since we
 /// only have an immutable reference.
-unsafe impl<'a, T: TraceImmutable> Trace for &'a T {
+unsafe impl<'a, T: TraceImmutable + ?Sized> Trace for &'a T {
     #[inline(always)]
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+    fn visit<V: GcVisitor + ?Sized>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
         visitor.visit_immutable::<T>(*self)
     }
 }
-unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a T {
+unsafe impl<'a, T: TraceImmutable + ?Sized> TraceImmutable for &'a T {
     #[inline(always)]
-    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
+    fn visit_immutable<V: GcVisitor + ?Sized>(&self, visitor: &mut V) -> Result<(), V::Err> {
         visitor.visit_immutable::<T>(*self)
     }
 
@@ -176,9 +176,9 @@ unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a T {
         visitor.visit_immutable::<T>(*self)
     }
 }
-unsafe impl<'a, T: NullTrace> NullTrace for &'a T {}
-unsafe impl<'a, T: GcSafe + TraceImmutable> GcSafe for &'a T {}
-unsafe impl<'a, T: TraceImmutable> GcTypeInfo for &'a T {
+unsafe impl<'a, T: NullTrace + ?Sized> NullTrace for &'a T {}
+unsafe impl<'a, T: GcSafe + TraceImmutable + ?Sized> GcSafe for &'a T {}
+unsafe impl<'a, T: GcType + TraceImmutable> GcType for &'a T {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
     const NEEDS_DROP: bool = false; // References never need to be dropped :)
 }
@@ -220,7 +220,7 @@ unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a mut T {
 }
 unsafe impl<'a, T: NullTrace> NullTrace for &'a mut T {}
 unsafe impl<'a, T: GcSafe> GcSafe for &'a mut T {}
-unsafe impl<'a, T: Trace> GcTypeInfo for &'a mut T {
+unsafe impl<'a, T: Trace> GcType for &'a mut T {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
     /// Although not [Copy], mutable references
     /// never need to be dropped
@@ -249,8 +249,8 @@ unsafe impl<T: Trace> Trace for [T] {
         Ok(())
     }
 }
-unsafe impl<T: Trace> DynTrace for [T] {
-    fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
+unsafe impl<T: Trace> crate::DynTrace for [T] {
+    fn visit_dynamically(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
         if !T::NEEDS_TRACE { return Ok(()) };
         for value in self {
             visitor.visit(value)?;
@@ -275,10 +275,6 @@ unsafe impl<T: TraceImmutable> TraceImmutable for [T] {
 }
 unsafe impl<T: NullTrace> NullTrace for [T] {}
 unsafe impl<T: GcSafe> GcSafe for [T] {}
-unsafe impl<T: Trace> GcTypeInfo for [T] {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-    const NEEDS_DROP: bool = T::NEEDS_DROP;
-}
 
 unsafe impl<T: Trace> Trace for Option<T> {
     #[inline]
@@ -305,7 +301,7 @@ unsafe impl<T: TraceImmutable> TraceImmutable for Option<T> {
 }
 unsafe impl<T: NullTrace> NullTrace for Option<T> {}
 unsafe impl<T: GcSafe> GcSafe for Option<T> {}
-unsafe impl<T: Trace> GcTypeInfo for Option<T> {
+unsafe impl<T: Trace> GcType for Option<T> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
     const NEEDS_DROP: bool = T::NEEDS_DROP;
 }

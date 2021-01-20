@@ -20,7 +20,7 @@ unsafe impl<K: TraceImmutable, V: Trace> Trace for HashMap<K, V> {
     }
 }
 unsafe impl<K: GcSafe + TraceImmutable, V: GcSafe> GcSafe for HashMap<K, V> {}
-unsafe impl<K: TraceImmutable, V: Trace> GcTypeInfo for HashMap<K, V> {
+unsafe impl<K: TraceImmutable, V: Trace> GcType for HashMap<K, V> {
     const NEEDS_TRACE: bool = K::NEEDS_TRACE || V::NEEDS_TRACE;
     const NEEDS_DROP: bool = true; // HashMap has native-allocated internal memory
 }
@@ -55,7 +55,7 @@ unsafe impl<V: TraceImmutable> Trace for HashSet<V> {
     }
 }
 unsafe_gc_brand!(HashSet, immut = required; V);
-unsafe impl<V: TraceImmutable> GcTypeInfo for HashSet<V> {
+unsafe impl<V: TraceImmutable> GcType for HashSet<V> {
     const NEEDS_TRACE: bool = V::NEEDS_TRACE;
     const NEEDS_DROP: bool = true; // We have internal memory
 }
