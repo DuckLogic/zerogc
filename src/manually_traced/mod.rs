@@ -176,10 +176,6 @@ macro_rules! unsafe_trace_deref {
                 };
                 visitor.visit_immutable(extracted)
             }
-            #[inline]
-            fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), $crate::GcDynVisitError> {
-                self.visit::<GcDynVisitor>(visitor)
-            }
         }
         unsafe impl<$($param),*> GcTypeInfo for $target<$($param),*>
             where $($param: TraceImmutable),* {
@@ -229,10 +225,6 @@ macro_rules! unsafe_trace_deref {
                 };
                 visitor.visit(extracted)
             }
-            #[inline]
-            fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
-                self.visit(visitor)
-            }
         }
         unsafe impl<$($param: NullTrace),*> NullTrace for $target<$($param),*> {}
         /// We trust ourselves to not do anything bad as long as our paramaters don't
@@ -240,7 +232,7 @@ macro_rules! unsafe_trace_deref {
             where $($param: GcSafe),*  {}
         unsafe impl<$($param),*> GcTypeInfo for $target<$($param),*>
             where $($param: Trace),* {
-            const NEEDS_TRACE: bool = $($crate::needs_trace::<$param>() || )* false;
+            const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
             /*
              * NOTE: Because we are a wrapper class, we may have a custom drop.
              * Therefore we (more conservatively) base our drop decisions
@@ -349,10 +341,6 @@ macro_rules! unsafe_trace_primitive {
         unsafe impl Trace for $target {
             #[inline(always)] // This method does nothing and is always a win to inline
             fn visit<V: $crate::GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
-                Ok(())
-            }
-            #[inline]
-            fn visit_dyn(&mut self, _visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
                 Ok(())
             }
         }

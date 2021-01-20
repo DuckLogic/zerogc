@@ -89,11 +89,6 @@ unsafe impl<T: Trace + Copy> Trace for GcCell<T> {
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
         visitor.visit(self.get_mut())
     }
-
-    #[inline]
-    fn visit_dyn(&mut self, visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
-        self.visit(visitor)
-    }
 }
 /// See Trace documentation on the safety of mutation
 ///

@@ -103,10 +103,6 @@ unsafe impl Trace for DummyCollectorId {
     fn visit<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
         Ok(())
     }
-    #[inline]
-    fn visit_dyn(&mut self, _visitor: &mut GcDynVisitor) -> Result<(), GcDynVisitError> {
-        Ok(())
-    }
 }
 unsafe impl TraceImmutable for DummyCollectorId {
     fn visit_immutable<V: GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
