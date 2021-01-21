@@ -12,6 +12,8 @@ use std::collections::HashSet;
 use std::fmt::Display;
 use std::io::Write;
 
+mod macros;
+
 struct MutableFieldOpts {
     public: bool
 }
@@ -333,6 +335,22 @@ impl Parse for TypeAttrs {
         Ok(result)
     }
 }
+
+#[proc_macro]
+pub fn unsafe_gc_impl(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let cloned_impl = input.clone();
+    let parsed = parse_macro_input!(input as macros::MacroInput);
+    let res = parsed.expand_output()
+        .unwrap_or_else(|e| e.to_compile_error());
+    debug_derive(
+        "unsafe_gc_impl!",
+        &"",
+        &format_args!("#[unsafe_gc_impl {{ {} }}", cloned_impl),
+        &res
+    );
+    res.into()
+}
+
 
 #[proc_macro_derive(Trace, attributes(zerogc))]
 pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {

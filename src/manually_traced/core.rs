@@ -9,10 +9,15 @@ use core::num::Wrapping;
 use crate::prelude::*;
 use crate::{GcDirectBarrier, CollectorId};
 
+use zerogc_derive::unsafe_gc_impl;
+
 macro_rules! trace_tuple {
     { $($param:ident)* } => {
-        unsafe impl<$($param),*> Trace for ($($param,)*)
-            where $($param: Trace),* {
+        unsafe_gc_impl! {
+            target => Option<T>,
+            params => [T],
+            null_trace => { where T: NullTrace },
+            simple_branded_bounds => [Sized],
             /*
              * HACK: Macros don't allow using `||` as separator,
              * so we use it as a terminator, causing there to be an illegal trailing `||`.
@@ -20,38 +25,20 @@ macro_rules! trace_tuple {
              * since `a || false` is always `a`.
              * This also correctly handles the empty unit tuple by making it false
              */
-            const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
-            #[inline]
-            fn visit<Visit: $crate::GcVisitor>(&mut self, #[allow(unused)] visitor: &mut Visit) -> Result<(), Visit::Err> {
+            NEEDS_TRACE => $($param::NEEDS_TRACE || )* false,
+            NEEDS_DROP => $($param::NEEDS_DROP || )* false,
+            trace_immutable => |$visitor, $target| {
                 #[allow(non_snake_case)]
                 let ($(ref mut $param,)*) = *self;
-                $(visitor.visit::<$param>($param)?;)*
+                $($visitor.trace($param)?;)*
                 Ok(())
-            }
-        }
-        unsafe impl<$($param),*> TraceImmutable for ($($param,)*)
-            where $($param: TraceImmutable),* {
-            #[inline]
-            fn visit_immutable<V: $crate::GcVisitor>(&self, #[allow(unused)] visitor: &mut V) -> Result<(), V::Err> {
+            },
+            trace_immutable => |$visitor, $target| {
                 #[allow(non_snake_case)]
                 let ($(ref $param,)*) = *self;
-                $(visitor.visit_immutable::<$param>($param)?;)*
+                $($visitor.trace_immutable($param)?;)*
                 Ok(())
-            }
-        }
-        unsafe impl<$($param: NullTrace),*> NullTrace for ($($param,)*) {}
-        unsafe impl<'new_gc, Id, $($param),*> $crate::GcRebrand<'new_gc, Id> for ($($param,)*)
-            where Id: $crate::CollectorId, $($param: $crate::GcRebrand<'new_gc,     Id>,)*
-                 $(<$param as $crate::GcRebrand<'new_gc, Id>>::Branded: Sized,)* {
-            type Branded = ($(<$param as $crate::GcRebrand<'new_gc, Id>>::Branded,)*);
-        }
-        unsafe impl<'a, Id, $($param),*> $crate::GcErase<'a, Id> for ($($param,)*)
-            where Id: $crate::CollectorId, $($param: $crate::GcErase<'a, Id>,)*
-                 $(<$param as $crate::GcErase<'a, Id>>::Erased: Sized,)* {
-            type Erased = ($(<$param as $crate::GcErase<'a, Id>>::Erased,)*);
-        }
-        unsafe impl<$($param: GcSafe),*> GcSafe for ($($param,)*) {
-            const NEEDS_DROP: bool = false $(|| <$param as GcSafe>::NEEDS_DROP)*;
+            },
         }
         unsafe impl<'gc, OwningRef, $($param),*> $crate::GcDirectBarrier<'gc, OwningRef> for ($($param,)*)
             where $($param: $crate::GcDirectBarrier<'gc, OwningRef>),* {
@@ -109,32 +96,15 @@ trace_tuple! { A B C D E F G H I }
 
 macro_rules! trace_array {
     ($size:tt) => {
-        unsafe impl<T: Trace> Trace for [T; $size] {
-            const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-            #[inline]
-            fn visit<V: $crate::GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
-                visitor.visit::<[T]>(self as &mut [T])
-            }
-        }
-        unsafe impl<T: $crate::TraceImmutable> $crate::TraceImmutable for [T; $size] {
-            #[inline]
-            fn visit_immutable<V: $crate::GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
-                visitor.visit_immutable::<[T]>(self as &[T])
-            }
-        }
-        unsafe impl<T: $crate::NullTrace> $crate::NullTrace for [T; $size] {}
-        unsafe impl<T: GcSafe> GcSafe for [T; $size] {
-            const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
-        }
-        unsafe impl<'new_gc, Id, T> $crate::GcRebrand<'new_gc, Id> for [T; $size]
-            where Id: CollectorId, T: GcRebrand<'new_gc, Id>,
-                  <T as GcRebrand<'new_gc, Id>>::Branded: Sized {
-            type Branded = [<T as GcRebrand<'new_gc, Id>>::Branded; $size];
-        }
-        unsafe impl<'a, Id, T> $crate::GcErase<'a, Id> for [T; $size]
-            where Id: CollectorId, T: GcErase<'a, Id>,
-                  <T as GcErase<'a, Id>>::Erased: Sized {
-            type Erased = [<T as GcErase<'a, Id>>::Erased; $size];
+        unsafe_impl_gc! {
+            target => [T; $size],
+            params => [T],
+            null_trace => { where T: NullTrace },
+            NEEDS_TRACE => T::NEEDS_TRACE,
+            NEEDS_DROP => T::NEEDS_DROP,
+            visit => |$visit:expr, $target:ident| {
+                visit(*$target as [T]);
+            },
         }
     };
     { $($size:tt),* } => ($(trace_array!($size);)*)
@@ -148,40 +118,38 @@ trace_array! {
 ///
 /// The underlying data must support `TraceImmutable` since we
 /// only have an immutable reference.
-unsafe impl<'a, T: TraceImmutable> Trace for &'a T {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-    #[inline(always)]
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
-        visitor.visit_immutable::<T>(*self)
+unsafe_impl_gc! {
+    target => &'a T,
+    params => [T],
+    bounds = {
+        Trace => { where T: TraceImmmutable },
+        TraceImmutable => { where T: TraceImmutable },
+        /*
+         * TODO: Right now we require `NullTrace`
+         *
+         * This is unfortunately required by our bounds, since we don't know
+         * that `T::Branded` lives for &'a making `&'a T::Branded` invalid
+         * as far as the compiler is concerned.
+         *
+         * Therefore the only solution is to preserve `&'a T` as-is,
+         * which is only safe if `T: NullTrace`
+         */
+        GcRebrand => { where T: NullTrace, 'a: 'new_gc },
+        GcErase => { where T: NullTrace }
+    },
+    Branded => &'a T,
+    Erased => &'a T,
+    null_trace => { where T: NullTrace },
+    NEEDS_TRACE => T::NEEDS_TRACE,
+    NEEDS_DROP => false, // We never need to be dropped
+    trace => |$visitor:ident, $target:ident| {
+        $visitor.visit_immutable::<T>(*$target)
+    },
+    trace_immutable => |$visitor:ident, $target:ident| {
+        $visitor.visit_immutable::<T>(*$target)
     }
 }
-unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a T {
-    #[inline(always)]
-    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
-        visitor.visit_immutable::<T>(*self)
-    }
-}
-unsafe impl<'a, T: NullTrace> NullTrace for &'a T {}
-unsafe impl<'a, T: GcSafe + TraceImmutable> GcSafe for &'a T {
-    const NEEDS_DROP: bool = false; // References are safe :)
-}
-/// TODO: Right now we require `NullTrace`
-///
-/// This is unfortunately required by our bounds, since we don't know
-///  that `T::Branded` lives for &'a making `&'a T::Branded` invalid
-///  as far as the compiler is concerned.
-///
-/// Therefore the only solution is to preserve `&'a T` as-is,
-/// which is only safe if `T: NullTrace`
-unsafe impl<'a, 'new_gc, Id, T> GcRebrand<'new_gc, Id> for &'a T
-    where Id: CollectorId, T: NullTrace, 'a: 'new_gc {
-    type Branded = &'a T;
-}
-/// See impl of `GcRebrand` for why we require `T: NullTrace`
-unsafe impl<'a, Id, T> GcErase<'a, Id> for &'a T
-    where Id: CollectorId, T: NullTrace {
-    type Erased = &'a T;
-}
+
 
 /// Implements tracing for mutable references.
 unsafe impl<'a, T: Trace> Trace for &'a mut T {
@@ -240,29 +208,18 @@ unsafe impl<T: GcSafe> GcSafe for [T] {
     const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
 }
 
-unsafe impl<T: Trace> Trace for Option<T> {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-
-    #[inline]
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+unsafe_impl_gc! {
+    target => Option<T>,
+    params => [T],
+    null_trace => { where T: NullTrace },
+    NEEDS_TRACE => T::NEEDS_TRACE,
+    NEEDS_DROP => T::NEEDS_DROP,
+    visit => |$visit, $mutability, $target:ident| {
         match *self {
             None => Ok(()),
-            Some(ref mut value) => visitor.visit(value),
+            Some(ref $mutability value) => $visit($target),
         }
-    }
-}
-unsafe impl<T: TraceImmutable> TraceImmutable for Option<T> {
-    #[inline]
-    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
-        match *self {
-            None => Ok(()),
-            Some(ref value) => visitor.visit_immutable(value),
-        }
-    }
-}
-unsafe impl<T: NullTrace> NullTrace for Option<T> {}
-unsafe impl<T: GcSafe> GcSafe for Option<T> {
-    const NEEDS_DROP: bool = T::NEEDS_DROP;
+    },
 }
 unsafe impl<'gc, OwningRef, V> GcDirectBarrier<'gc, OwningRef> for Option<V>
     where V: GcDirectBarrier<'gc, OwningRef> {

@@ -12,6 +12,28 @@ use crate::prelude::*;
 
 // NOTE: Delegate to slice to avoid code duplication
 unsafe_trace_deref!(Vec, target = { [T] }; T);
+unsafe_impl_gc! {
+    target => Vec<T>,
+    params => [T],
+    null_trace => { where T: NullTrace },
+    NEEDS_TRACE => T::NEEDS_TRACE,
+    NEEDS_DROP => true, // Internal memory
+    visit => |$visit:expr, $target:ident| {
+        // Delegate to slice
+        visit(**$target as [T]);
+    }
+}
+unsafe_impl_gc! {
+    target => Box<T>,
+    params => [T],
+    null_trace => { where T: NullTrace },
+    NEEDS_TRACE => T::NEEDS_TRACE,
+    NEEDS_DROP => true, // Internal memory
+    visit => |$visit:expr, $target:ident| {
+        // Delegate to slice
+        visit(**$target);
+    }
+}
 unsafe_trace_deref!(Box, target = T);
 // We can only trace `Rc` and `Arc` if the inner type implements `TraceImmutable`
 unsafe_trace_deref!(Rc, T; immut = required; |rc| &**rc);
