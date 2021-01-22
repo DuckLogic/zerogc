@@ -11,20 +11,25 @@ use crate::GcDirectBarrier;
 
 use zerogc_derive::unsafe_gc_impl;
 
-macro_rules! __rec_trace_tuple {
-    ($($param:ident),*) => {
-        // Nothing remaining
+macro_rules! trace_tuple {
+    { $single_param:ident } => {
+        trace_tuple_impl!($single_param);
     };
-    ($first_param:ident, $($param:ident),+) => {
-        trace_tuple!($($param),*);
+    { $first_param:ident, $($param:ident),* } => {
+        trace_tuple! { $($param),* }
+        trace_tuple_impl!( $first_param, $($param),*);
     };
 }
-macro_rules! trace_tuple {
-    { $($param:ident),* } => {
-        __rec_trace_tuple!($($param),* );
+
+macro_rules! trace_tuple_impl {
+    {  $($param:ident),* } => {
         unsafe_gc_impl! {
             target => ( $($param,)* ),
             params => [$($param),*],
+            bounds => {
+                GcRebrand => { where $($param: GcRebrand<'new_gc, Id>),* },
+                GcErase => { where $($param: GcErase<'min, Id>),* },
+            }
             null_trace => { where $($param: NullTrace,)* i32: Sized },
             /*
              * HACK: Macros don't allow using `||` as separator,
@@ -275,5 +280,31 @@ unsafe_gc_impl! {
     visit => |self, visitor| {
         // We can trace `Wrapping` by simply tracing its interior
         visitor.#visit_func(#b self.0)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::dummy_impl::Gc;
+    use zerogc_derive::Trace;
+    use crate::prelude::*;
+    #[test]
+    fn test_null_trace() {
+        assert!(!<Option<i32> as Trace>::NEEDS_TRACE);
+        assert!(!<Option<(i32, char)> as Trace>::NEEDS_TRACE)
+    }
+    #[derive(Trace)]
+    struct Rec<'gc> {
+        inner: Gc<'gc, Rec<'gc>>,
+        inner_tuple: (Gc<'gc, Rec<'gc>>, Gc<'gc, Option<i32>>),
+        inner_opt: Option<Gc<'gc, Rec<'gc>>>,
+        inner_opt_tuple: Option<(Gc<'gc, Rec<'gc>>, Gc<'gc, char>)>,
+    }
+    #[test]
+    fn test_trace<'gc>() {
+        assert!(<Option<Gc<'gc, i32>> as Trace>::NEEDS_TRACE);
+        assert!(<Option<(Gc<'gc, i32>, char)> as Trace>::NEEDS_TRACE);
+        assert!(<Rec<'gc> as Trace>::NEEDS_TRACE);
+        assert!(<Gc<'gc, Rec<'gc>> as Trace>::NEEDS_TRACE);
     }
 }

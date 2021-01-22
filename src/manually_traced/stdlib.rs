@@ -3,11 +3,11 @@
 //! Types that are in `libcore` and are `#![no_std]` should go in the core module,
 //! but anything that requires the rest of the stdlib (including collections and allocations),
 //! should go in this module.
-use crate::prelude::*;
-
 use std::collections::{HashMap, HashSet};
 
 use zerogc_derive::unsafe_gc_impl;
+
+use crate::prelude::*;
 
 
 unsafe_gc_impl! {
