@@ -285,7 +285,7 @@ unsafe_gc_impl! {
 
 #[cfg(test)]
 mod test {
-    use crate::dummy_impl::Gc;
+    use crate::dummy_impl::{DummyCollectorId, Gc};
     use zerogc_derive::Trace;
     use crate::prelude::*;
     #[test]
@@ -294,6 +294,7 @@ mod test {
         assert!(!<Option<(i32, char)> as Trace>::NEEDS_TRACE)
     }
     #[derive(Trace)]
+    #[zerogc(collector_id(DummyCollectorId))]
     struct Rec<'gc> {
         inner: Gc<'gc, Rec<'gc>>,
         inner_tuple: (Gc<'gc, Rec<'gc>>, Gc<'gc, Option<i32>>),
