@@ -13,6 +13,7 @@ use zerogc_derive::unsafe_gc_impl;
 
 macro_rules! trace_tuple {
     { $single_param:ident } => {
+        trace_tuple_impl!();
         trace_tuple_impl!($single_param);
     };
     { $first_param:ident, $($param:ident),* } => {
