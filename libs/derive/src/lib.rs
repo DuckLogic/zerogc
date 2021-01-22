@@ -15,6 +15,24 @@ use std::io::Write;
 
 mod macros;
 
+/// Magic const that expands to either `::zerogc` or `crate::`
+/// depending on whether we are currently bootstraping (compiling `zerogc` itself)
+///
+/// This is equivalant to `$crate` for regular macros
+pub(crate) fn zerogc_crate() -> TokenStream {
+    if is_bootstraping() {
+        quote!(crate)
+    } else {
+        quote!(::zerogc)
+    }
+}
+
+/// If we are currently compiling the base crate `zerogc` itself
+pub(crate) fn is_bootstraping() -> bool {
+    ::proc_macro::tracked_env::var("CARGO_CRATE_NAME")
+        .expect("Expected `CARGO_CRATE_NAME`") == "zerogc"
+}
+
 struct MutableFieldOpts {
     public: bool
 }
@@ -410,6 +428,7 @@ fn impl_derive_trace(input: &DeriveInput) -> Result<TokenStream, syn::Error> {
 }
 
 fn trace_fields(fields: &Fields, access_ref: &mut dyn FnMut(Member) -> TokenStream) -> TokenStream {
+    let zerogc_crate = zerogc_crate();
     // TODO: Detect if we're a unit struct and implement `NullTrace`
     let mut result = Vec::new();
     for (index, field) in fields.iter().enumerate() {
@@ -417,7 +436,7 @@ fn trace_fields(fields: &Fields, access_ref: &mut dyn FnMut(Member) -> TokenStre
             Some(ref ident) => Member::Named(ident.clone()),
             None => Member::Unnamed(Index::from(index))
         });
-        result.push(quote!(::zerogc::Trace::visit(#val, &mut *visitor)?));
+        result.push(quote!(#zerogc_crate::Trace::visit(#val, &mut *visitor)?));
     }
     quote!(#(#result;)*)
 }
@@ -426,6 +445,7 @@ fn trace_fields(fields: &Fields, access_ref: &mut dyn FnMut(Member) -> TokenStre
 ///
 /// 1. Implement setters for `GcCell` fields using a write barrier
 fn impl_extras(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
+    let zerogc_crate = zerogc_crate();
     let name = &target.ident;
     let mut extra_items = Vec::new();
     let gc_lifetime = info.config.gc_lifetime();
@@ -482,13 +502,13 @@ fn impl_extras(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, E
                         ))
                     };
                     // NOTE: Specially quoted since we want to blame the field for errors
-                    let field_as_ptr = quote_spanned!(field.span() => GcCell::as_ptr(&(*self.value()).#original_name));
-                    let barrier = quote_spanned!(field.span() => ::zerogc::GcDirectBarrier::write_barrier(&value, &self, offset));
+                    let field_as_ptr = quote_spanned!(field.span() => #zerogc_crate::cell::GcCell::as_ptr(&(*self.value()).#original_name));
+                    let barrier = quote_spanned!(field.span() => #zerogc_crate::GcDirectBarrier::write_barrier(&value, &self, offset));
                     extra_items.push(quote! {
                         #[inline] // TODO: Implement `GcDirectBarrier` ourselves
-                        #mutator_vis fn #mutator_name<Id>(self: ::zerogc::Gc<#gc_lifetime, Self, Id>, value: #value_ref_type)
-                            where Id: ::zerogc::CollectorId,
-                                   #value_ref_type: ::zerogc::GcDirectBarrier<#gc_lifetime, ::zerogc::Gc<#gc_lifetime, Self, Id>> {
+                        #mutator_vis fn #mutator_name<Id>(self: #zerogc_crate::Gc<#gc_lifetime, Self, Id>, value: #value_ref_type)
+                            where Id: #zerogc_crate::CollectorId,
+                                   #value_ref_type: #zerogc_crate::GcDirectBarrier<#gc_lifetime, #zerogc_crate::Gc<#gc_lifetime, Self, Id>> {
                             unsafe {
                                 let target_ptr = #field_as_ptr;
                                 let offset = target_ptr as usize - self.as_raw_ptr() as usize;
@@ -535,13 +555,14 @@ fn impl_extras(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, E
 
 
 fn impl_erase_nop(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
+    let zerogc_crate = zerogc_crate();
     let name = &target.ident;
     let mut generics: Generics = target.generics.clone();
     for param in &mut generics.params {
         match param {
             GenericParam::Type(ref mut type_param) => {
                 // Require all params are NullTrace
-                type_param.bounds.push(parse_quote!(::zerogc::NullTrace));
+                type_param.bounds.push(parse_quote!(#zerogc_crate::NullTrace));
             },
             GenericParam::Lifetime(ref mut l) => {
                 if l.lifetime == info.config.gc_lifetime() {
@@ -568,7 +589,7 @@ fn impl_erase_nop(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream
     let collector_id = match info.config.collector_id {
         Some(ref id) => id.clone(),
         None => {
-            impl_generics.params.push(GenericParam::Type(parse_quote!(Id: ::zerogc::CollectorId)));
+            impl_generics.params.push(GenericParam::Type(parse_quote!(Id: #zerogc_crate::CollectorId)));
             parse_quote!(Id)
         }
     };
@@ -576,13 +597,13 @@ fn impl_erase_nop(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream
     impl_generics.make_where_clause().predicates.push(WherePredicate::Type(PredicateType {
         lifetimes: None,
         bounded_ty: parse_quote!(Self),
-        bounds: parse_quote!(::zerogc::NullTrace),
+        bounds: parse_quote!(#zerogc_crate::NullTrace),
         colon_token: Default::default()
     }));
     let (_, ty_generics, _) = generics.split_for_impl();
     let (impl_generics, _, where_clause) = impl_generics.split_for_impl();
     Ok(quote! {
-        unsafe impl #impl_generics ::zerogc::GcErase<'min, #collector_id>
+        unsafe impl #impl_generics #zerogc_crate::GcErase<'min, #collector_id>
             for #name #ty_generics #where_clause {
             // We can pass-through because we are NullTrace
             type Erased = Self;
@@ -590,6 +611,7 @@ fn impl_erase_nop(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream
     })
 }
 fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
+    let zerogc_crate = zerogc_crate();
     let name = &target.ident;
     let mut generics: Generics = target.generics.clone();
     let mut rewritten_params = Vec::new();
@@ -603,10 +625,10 @@ fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
         match param {
             GenericParam::Type(ref mut type_param) => {
                 let original_bounds = type_param.bounds.iter().cloned().collect::<Vec<_>>();
-                type_param.bounds.push(parse_quote!(::zerogc::GcErase<'min, #collector_id>));
+                type_param.bounds.push(parse_quote!(#zerogc_crate::GcErase<'min, #collector_id>));
                 type_param.bounds.push(parse_quote!('min));
                 let param_name = &type_param.ident;
-                let rewritten_type: Type = parse_quote!(<#param_name as ::zerogc::GcErase<'min, #collector_id>>::Erased);
+                let rewritten_type: Type = parse_quote!(<#param_name as #zerogc_crate::GcErase<'min, #collector_id>>::Erased);
                 rewritten_restrictions.push(WherePredicate::Type(PredicateType {
                     lifetimes: None,
                     bounded_ty: rewritten_type.clone(),
@@ -654,17 +676,17 @@ fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
     let mut impl_generics = generics.clone();
     impl_generics.params.push(GenericParam::Lifetime(parse_quote!('min)));
     if info.config.collector_id.is_none() {
-        impl_generics.params.push(GenericParam::Type(parse_quote!(Id: ::zerogc::CollectorId)));
+        impl_generics.params.push(GenericParam::Type(parse_quote!(Id: #zerogc_crate::CollectorId)));
     }
     impl_generics.make_where_clause().predicates.extend(rewritten_restrictions);
     let (_, ty_generics, _) = generics.split_for_impl();
     let (impl_generics, _, where_clause) = impl_generics.split_for_impl();
     let assert_erase = field_types.iter().map(|field_type| {
         let span = field_type.span();
-        quote_spanned!(span => <#field_type as ::zerogc::GcErase<'min, #collector_id>>::assert_erase();)
+        quote_spanned!(span => <#field_type as #zerogc_crate::GcErase<'min, #collector_id>>::assert_erase();)
     }).collect::<Vec<_>>();
     Ok(quote! {
-        unsafe impl #impl_generics ::zerogc::GcErase<'min, #collector_id>
+        unsafe impl #impl_generics #zerogc_crate::GcErase<'min, #collector_id>
             for #name #ty_generics #where_clause {
             type Erased = #name::<#(#rewritten_params),*>;
 
@@ -677,13 +699,14 @@ fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
 
 
 fn impl_rebrand_nop(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
+    let zerogc_crate = zerogc_crate();
     let name = &target.ident;
     let mut generics: Generics = target.generics.clone();
     for param in &mut generics.params {
         match param {
             GenericParam::Type(ref mut type_param) => {
                 // Require all params are NullTrace
-                type_param.bounds.push(parse_quote!(::zerogc::NullTrace));
+                type_param.bounds.push(parse_quote!(#zerogc_crate::NullTrace));
             },
             GenericParam::Lifetime(ref mut l) => {
                 if l.lifetime == info.config.gc_lifetime() {
@@ -710,7 +733,7 @@ fn impl_rebrand_nop(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStre
     let collector_id = match info.config.collector_id {
         Some(ref id) => id.clone(),
         None => {
-            impl_generics.params.push(GenericParam::Type(parse_quote!(Id: ::zerogc::CollectorId)));
+            impl_generics.params.push(GenericParam::Type(parse_quote!(Id: #zerogc_crate::CollectorId)));
             parse_quote!(Id)
         }
     };
@@ -718,13 +741,13 @@ fn impl_rebrand_nop(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStre
     impl_generics.make_where_clause().predicates.push(WherePredicate::Type(PredicateType {
         lifetimes: None,
         bounded_ty: parse_quote!(Self),
-        bounds: parse_quote!(::zerogc::NullTrace),
+        bounds: parse_quote!(#zerogc_crate::NullTrace),
         colon_token: Default::default()
     }));
     let (_, ty_generics, _) = generics.split_for_impl();
     let (impl_generics, _, where_clause) = impl_generics.split_for_impl();
     Ok(quote! {
-        unsafe impl #impl_generics ::zerogc::GcRebrand<'new_gc, #collector_id>
+        unsafe impl #impl_generics #zerogc_crate::GcRebrand<'new_gc, #collector_id>
             for #name #ty_generics #where_clause {
             // We can pass-through because we are NullTrace
             type Branded = Self;
@@ -732,6 +755,7 @@ fn impl_rebrand_nop(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStre
     })
 }
 fn impl_rebrand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
+    let zerogc_crate = zerogc_crate();
     let name = &target.ident;
     let mut generics: Generics = target.generics.clone();
     let mut rewritten_params = Vec::new();
@@ -745,9 +769,9 @@ fn impl_rebrand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
         match param {
             GenericParam::Type(ref mut type_param) => {
                 let original_bounds = type_param.bounds.iter().cloned().collect::<Vec<_>>();
-                type_param.bounds.push(parse_quote!(::zerogc::GcRebrand<'new_gc, #collector_id>));
+                type_param.bounds.push(parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #collector_id>));
                 let param_name = &type_param.ident;
-                let rewritten_type: Type = parse_quote!(<#param_name as ::zerogc::GcRebrand<'new_gc, #collector_id>>::Branded);
+                let rewritten_type: Type = parse_quote!(<#param_name as #zerogc_crate::GcRebrand<'new_gc, #collector_id>>::Branded);
                 rewritten_restrictions.push(WherePredicate::Type(PredicateType {
                     lifetimes: None,
                     bounded_ty: rewritten_type.clone(),
@@ -795,17 +819,17 @@ fn impl_rebrand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
     let mut impl_generics = generics.clone();
     impl_generics.params.push(GenericParam::Lifetime(parse_quote!('new_gc)));
     if info.config.collector_id.is_none() {
-        impl_generics.params.push(GenericParam::Type(parse_quote!(Id: ::zerogc::CollectorId)));
+        impl_generics.params.push(GenericParam::Type(parse_quote!(Id: #zerogc_crate::CollectorId)));
     }
     let assert_rebrand = field_types.iter().map(|field_type| {
         let span = field_type.span();
-        quote_spanned!(span => <#field_type as ::zerogc::GcRebrand<'new_gc, #collector_id>>::assert_rebrand();)
+        quote_spanned!(span => <#field_type as #zerogc_crate::GcRebrand<'new_gc, #collector_id>>::assert_rebrand();)
     }).collect::<Vec<_>>();
     impl_generics.make_where_clause().predicates.extend(rewritten_restrictions);
     let (_, ty_generics, _) = generics.split_for_impl();
     let (impl_generics, _, where_clause) = impl_generics.split_for_impl();
     Ok(quote! {
-        unsafe impl #impl_generics ::zerogc::GcRebrand<'new_gc, #collector_id>
+        unsafe impl #impl_generics #zerogc_crate::GcRebrand<'new_gc, #collector_id>
             for #name #ty_generics #where_clause {
             type Branded = #name::<#(#rewritten_params),*>;
 
@@ -816,6 +840,7 @@ fn impl_rebrand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
     })
 }
 fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
+    let zerogc_crate = zerogc_crate();
     let name = &target.ident;
     let generics = add_trait_bounds_except(
         &target.generics, parse_quote!(zerogc::Trace),
@@ -884,15 +909,15 @@ fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
         },
     }
     Ok(quote! {
-        unsafe impl #impl_generics ::zerogc::Trace for #name #ty_generics #where_clause {
-            const NEEDS_TRACE: bool = false #(|| <#field_types as ::zerogc::Trace>::NEEDS_TRACE)*;
+        unsafe impl #impl_generics #zerogc_crate::Trace for #name #ty_generics #where_clause {
+            const NEEDS_TRACE: bool = false #(|| <#field_types as #zerogc_crate::Trace>::NEEDS_TRACE)*;
 
             /*
              * The inline annotation adds this function's MIR to the metadata.
              * Without it cross-crate inlining is impossible (without LTO).
              */
             #[inline]
-            fn visit<V: ::zerogc::GcVisitor>(&mut self, #[allow(unused)] visitor: &mut V) -> Result<(), V::Err> {
+            fn visit<Visitor: #zerogc_crate::GcVisitor + ?Sized>(&mut self, #[allow(unused)] visitor: &mut Visitor) -> Result<(), Visitor::Err> {
                 #trace_impl
                 Ok(())
             }
@@ -900,10 +925,11 @@ fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
     })
 }
 fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
+    let zerogc_crate = zerogc_crate();
     let name = &target.ident;
     let collector_id = &info.config.collector_id;
     let generics = add_trait_bounds_except(
-        &target.generics, parse_quote!(zerogc::GcSafe),
+        &target.generics, parse_quote!(#zerogc_crate::GcSafe),
         &info.config.ignore_params,
         Some(&mut |other: &Ident| {
             if let Some(ref collector_id) = *collector_id {
@@ -936,7 +962,7 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
         quote!(false)
     } else {
         // We need to be dropped if any of our fields need to be dropped
-        quote!(false #(|| <#field_types as ::zerogc::GcSafe>::NEEDS_DROP)*)
+        quote!(false #(|| <#field_types as #zerogc_crate::GcSafe>::NEEDS_DROP)*)
     };
     let fake_drop_impl = if info.config.is_copy {
         /*
@@ -959,12 +985,12 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
         })
     };
     let verify_gc_safe = if info.config.is_copy {
-        quote!(::zerogc::assert_copy::<Self>())
+        quote!(#zerogc_crate::assert_copy::<Self>())
     } else {
-        quote!(#(<#field_types as GcSafe>::assert_gc_safe();)*)
+        quote!(#(<#field_types as #zerogc_crate::GcSafe>::assert_gc_safe();)*)
     };
     Ok(quote! {
-        unsafe impl #impl_generics ::zerogc::GcSafe
+        unsafe impl #impl_generics #zerogc_crate::GcSafe
             for #name #ty_generics #where_clause {
             const NEEDS_DROP: bool = #does_need_drop;
 
@@ -978,9 +1004,10 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
 
 
 fn impl_nop_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
+    let zerogc_crate = zerogc_crate();
     let name = &target.ident;
     let generics = add_trait_bounds_except(
-        &target.generics, parse_quote!(zerogc::Trace),
+        &target.generics, parse_quote!(#zerogc_crate::Trace),
         &info.config.ignore_params, None
     )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -1007,30 +1034,30 @@ fn impl_nop_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream
             let ty_span = t.span();
             quote_spanned! { ty_span =>
                 assert!(
-                    !<#t as Trace>::NEEDS_TRACE,
+                    !<#t as #zerogc_crate::Trace>::NEEDS_TRACE,
                     "Can't #[derive(NullTrace) with {}",
                     stringify!(#t)
                 );
             }
         }).collect::<Vec<_>>();
     Ok(quote! {
-        unsafe impl #impl_generics ::zerogc::Trace for #name #ty_generics #where_clause {
+        unsafe impl #impl_generics #zerogc_crate::Trace for #name #ty_generics #where_clause {
             const NEEDS_TRACE: bool = false;
 
             #[inline] // Should be const-folded away
-            fn visit<V: ::zerogc::GcVisitor>(&mut self, #[allow(unused)] visitor: &mut V) -> Result<(), V::Err> {
+            fn visit<Visitor: #zerogc_crate::GcVisitor + ?Sized>(&mut self, #[allow(unused)] visitor: &mut Visitor) -> Result<(), Visitor::Err> {
                 #(#trace_assertions)*
                 Ok(())
             }
         }
-        unsafe impl #impl_generics ::zerogc::TraceImmutable for #name #ty_generics #where_clause {
+        unsafe impl #impl_generics #zerogc_crate::TraceImmutable for #name #ty_generics #where_clause {
             #[inline] // Should be const-folded away
-            fn visit_immutable<V: ::zerogc::GcVisitor>(&self, #[allow(unused)] visitor: &mut V) -> Result<(), V::Err> {
+            fn visit_immutable<Visitor: #zerogc_crate::GcVisitor + ?Sized>(&self, #[allow(unused)] visitor: &mut Visitor) -> Result<(), Visitor::Err> {
                 #(#trace_assertions)*
                 Ok(())
             }
         }
-        unsafe impl #impl_generics ::zerogc::NullTrace for #name #ty_generics #where_clause {}
+        unsafe impl #impl_generics #zerogc_crate::NullTrace for #name #ty_generics #where_clause {}
     })
 }
 

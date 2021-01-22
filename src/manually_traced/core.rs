@@ -7,7 +7,7 @@
 use core::num::Wrapping;
 
 use crate::prelude::*;
-use crate::{GcDirectBarrier, CollectorId};
+use crate::GcDirectBarrier;
 
 use zerogc_derive::unsafe_gc_impl;
 

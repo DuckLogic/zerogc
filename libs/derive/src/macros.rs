@@ -16,6 +16,7 @@ use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 
 use quote::{quote, quote_spanned};
+use super::zerogc_crate;
 
 #[derive(Debug)]
 struct GenericParamInput(Vec<GenericParam>);
@@ -64,6 +65,7 @@ impl MacroInput {
         generics
     }
     pub fn expand_output(&self) -> Result<TokenStream, Error> {
+        let zerogc_crate = zerogc_crate();
         let target_type = &self.target_type;
         let trace_impl = self.expand_trace_impl(true)?
             .expect("Trace impl required");
@@ -80,7 +82,7 @@ impl MacroInput {
             generics.make_where_clause().predicates.extend(null_trace_clause.predicates.clone());
             let (impl_generics, _, where_clause) = generics.split_for_impl();
             quote! {
-                unsafe impl #impl_generics NullTrace for #target_type
+                unsafe impl #impl_generics #zerogc_crate::NullTrace for #target_type
                     #where_clause {}
             }
         } else {
@@ -98,6 +100,7 @@ impl MacroInput {
         })
     }
     fn expand_trace_impl(&self, mutable: bool) -> Result<Option<TokenStream>, Error> {
+        let zerogc_crate = zerogc_crate();
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
         let clause = if mutable {
@@ -112,11 +115,15 @@ impl MacroInput {
             .extend(clause.predicates);
         let visit_impl = self.visit.expand_impl(mutable)?;
         let (impl_generics, _, where_clause) = generics.split_for_impl();
-        let trait_name = if mutable { quote!(Trace) } else { quote!(TraceImmutable) };
+        let trait_name = if mutable { quote!(#zerogc_crate::Trace) } else { quote!(#zerogc_crate::TraceImmutable) };
         let visit_method_name = if mutable { quote!(visit) } else { quote!(visit_immutable) };
         let needs_trace_const = if mutable {
             let expr = &self.options.needs_trace;
-            Some(quote!(const NEEDS_TRACE: bool = #expr;))
+            Some(quote!(const NEEDS_TRACE: bool = {
+                // Import the trait so we can access `T::NEEDS_TRACE`
+                use #zerogc_crate::Trace;
+                #expr
+            };))
         } else {
             None
         };
@@ -129,13 +136,14 @@ impl MacroInput {
             unsafe impl #impl_generics #trait_name for #target_type #where_clause {
                 #needs_trace_const
                 #[inline] // TODO: Should this be unconditional?
-                fn #visit_method_name<Visitor: GcVisitor + ?Sized>(&#mutability self, visitor: &mut Visitor) -> Result<(), Visitor::Err> {
+                fn #visit_method_name<Visitor: #zerogc_crate::GcVisitor + ?Sized>(&#mutability self, visitor: &mut Visitor) -> Result<(), Visitor::Err> {
                     #visit_impl
                 }
             }
         }))
     }
     fn expand_gcsafe_impl(&self) -> Option<TokenStream> {
+        let zerogc_crate = zerogc_crate();
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
         generics.make_where_clause().predicates
@@ -146,12 +154,17 @@ impl MacroInput {
         let needs_drop = &self.options.needs_drop;
         let (impl_generics, _, where_clause) = generics.split_for_impl();
         Some(quote! {
-            unsafe impl #impl_generics GcSafe for #target_type #where_clause {
-                const NEEDS_DROP: bool = #needs_drop;
+            unsafe impl #impl_generics #zerogc_crate::GcSafe for #target_type #where_clause {
+                const NEEDS_DROP: bool = {
+                    // Import the trait so we can access `T::NEEDS_DROP`
+                    use #zerogc_crate::GcSafe;
+                    #needs_drop
+                };
             }
         })
     }
     fn expand_brand_impl(&self, rebrand: bool /* true => rebrand, false => erase */) -> Result<Option<TokenStream>, Error> {
+        let zerogc_crate = zerogc_crate();
         let requirements = if rebrand { self.bounds.rebrand.clone() } else { self.bounds.erase.clone() };
         if let Some(TraitRequirements::Never) = requirements  {
             // They are requesting that we dont implement
@@ -172,9 +185,9 @@ impl MacroInput {
             Some(TraitRequirements::Never) => unreachable!(),
             None => {
                 if rebrand {
-                    vec![parse_quote!(GcRebrand<'new_gc, Id>)]
+                    vec![parse_quote!(#zerogc_crate::GcRebrand<'new_gc, Id>)]
                 } else {
-                    vec![parse_quote!(GcErase<'min, Id>)]
+                    vec![parse_quote!(#zerogc_crate::GcErase<'min, Id>)]
                 }
             }
         };
@@ -194,11 +207,11 @@ impl MacroInput {
                         lifetimes: None,
                         bounded_ty: if rebrand {
                             self.options.branded_type.clone().unwrap_or_else(|| {
-                                parse_quote!(<#type_name as GcRebrand<'new_gc, Id>>::Branded)
+                                parse_quote!(<#type_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded)
                             })
                         } else {
                             self.options.erased_type.clone().unwrap_or_else(|| {
-                                parse_quote!(<#type_name as GcErase<'min, Id>>::Erased)
+                                parse_quote!(<#type_name as #zerogc_crate::GcErase<'min, Id>>::Erased)
                             })
                         },
                         colon_token: Default::default(),
@@ -223,7 +236,7 @@ impl MacroInput {
          */
         generics.make_where_clause().predicates
             .extend(self.bounds.trace_where_clause(&self.params).predicates);
-        generics.params.push(parse_quote!(Id: CollectorId));
+        generics.params.push(parse_quote!(Id: #zerogc_crate::CollectorId));
         if rebrand {
             generics.params.push(parse_quote!('new_gc));
         } else {
@@ -231,9 +244,9 @@ impl MacroInput {
         }
         let (impl_generics, _, where_clause) = generics.split_for_impl();
         let target_trait = if rebrand {
-            quote!(GcRebrand<'new_gc, Id>)
+            quote!(#zerogc_crate::GcRebrand<'new_gc, Id>)
         } else {
-            quote!(GcErase<'min, Id>)
+            quote!(#zerogc_crate::GcErase<'min, Id>)
         };
         fn rewrite_brand_trait(
             target: &Type, trait_name: &str, target_params: &HashSet<Ident>,
@@ -265,7 +278,7 @@ impl MacroInput {
                 rewrite_brand_trait(
                     &self.target_type, "GcRebrand",
                     &target_params,
-                    parse_quote!(GcRebrand<'new_gc, Id>),
+                    parse_quote!(#zerogc_crate::GcRebrand<'new_gc, Id>),
                     parse_quote!(Branded)
                 )
             }, Ok)?;
@@ -275,7 +288,7 @@ impl MacroInput {
                 rewrite_brand_trait(
                     &self.target_type, "GcErase",
                     &target_params,
-                    parse_quote!(GcErase<'min, Id>),
+                    parse_quote!(#zerogc_crate::GcErase<'min, Id>),
                     parse_quote!(Erased)
                 )
             })?;
@@ -489,21 +502,24 @@ pub struct CustomBounds {
 }
 impl CustomBounds {
     fn trace_where_clause(&self, generic_params: &[GenericParam]) -> WhereClause {
+        let zerogc_crate = zerogc_crate();
         create_clause_with_default(
             &self.trace, generic_params,
-            vec![parse_quote!(Trace)]
+            vec![parse_quote!(#zerogc_crate::Trace)]
         ).unwrap_or_else(|| unreachable!("Trace must always be implemented"))
     }
     fn trace_immutable_clause(&self, generic_params: &[GenericParam]) -> Option<WhereClause> {
+        let zerogc_crate = zerogc_crate();
         create_clause_with_default(
             &self.trace_immutable, generic_params,
-            vec![parse_quote!(TraceImmutable)]
+            vec![parse_quote!(#zerogc_crate::TraceImmutable)]
         )
     }
     fn gcsafe_clause(&self, generic_params: &[GenericParam]) -> Option<WhereClause> {
+        let zerogc_crate = zerogc_crate();
         let mut res = create_clause_with_default(
             &self.gcsafe, generic_params,
-            vec![parse_quote!(GcSafe)]
+            vec![parse_quote!(#zerogc_crate::GcSafe)]
         );
         if self.gcsafe.is_none() {
             // Extend with the trae bounds

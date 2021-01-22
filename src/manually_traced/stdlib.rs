@@ -6,7 +6,6 @@
 use crate::prelude::*;
 
 use std::collections::{HashMap, HashSet};
-use crate::CollectorId;
 
 use zerogc_derive::unsafe_gc_impl;
 
