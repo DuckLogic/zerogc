@@ -5,7 +5,9 @@
 //! This is done for all stdlib types and some feature gated external libraries.
 #![doc(hidden)] // This is unstable
 
-use zerogc_derive::unsafe_impl_gc;
+use crate::prelude::*;
+
+use zerogc_derive::unsafe_gc_impl;
 
 /// Unsafely implement `GarbageCollected` for the specified type,
 /// by acquiring a 'lock' in order to trace the underlying value.
@@ -56,19 +58,19 @@ use zerogc_derive::unsafe_impl_gc;
 #[macro_export]
 macro_rules! unsafe_trace_lock {
     ($target:ident, target = $target_type:ident; |$get_mut:ident| $get_mut_expr:expr, |$lock:ident| $acquire_guard:expr) => {
-        unsafe_gc_brand!($target, $target_type);
-        unsafe impl<$target_type: Trace> Trace for $target<$target_type> {
-            const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-            #[inline]
-            fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+        unsafe_impl_gc!(
+            target => $target<$target_type>,
+            params = [$target_type],
+            null_trace => { where $target_type: NullTrace },
+            NEEDS_TRACE => true,
+            NEEDS_DROP => $target_type::NEEDS_DROP /* if our inner type needs a drop */
+                || core::mem::needs_drop::<$target<()>>; // Or we have unconditional drop (std-mutex)
+            trace_mut => |self, visitor| {
                 let $get_mut = self;
                 let value: &mut $target_type = $get_mut_expr;
-                visitor.visit(value)
-            }
-        }
-        unsafe impl<$target_type: Trace> $crate::TraceImmutable for $target<$target_type> {
-            #[inline]
-            fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
+                visitor.visit::<$target_type>(value)
+            },
+            trace_immutable => |self, visitor| {
                 if !Self::NEEDS_TRACE { return Ok(()) };
                 // We can immutably visit a lock by acquiring it
                 let $lock = self;
@@ -77,9 +79,7 @@ macro_rules! unsafe_trace_lock {
                 let guard_value = &mut *guard;
                 visitor.visit(guard_value)
             }
-        }
-        unsafe impl<$target_type: $crate::NullTrace> $crate::NullTrace for $target<$target_type> {}
-        unsafe impl<$target_type: $crate::GcSafe> $crate::GcSafe for $target<$target_type> {}
+        );
     };
 }
 
@@ -168,19 +168,23 @@ macro_rules! unsafe_immutable_trace_iterable {
 #[macro_export]
 macro_rules! unsafe_trace_primitive {
     ($target:ty) => {
-        unsafe_impl_gc! {
+        unsafe_gc_impl! {
             target => $target,
             params => [],
-            null_trace => { /* always */ },
+            null_trace => always,
             NEEDS_TRACE => false,
             NEEDS_DROP => core::mem::needs_drop::<$target>(),
-            visit => |$visit:expr, $target:ident| { /* nop */ }
+            visit => |self, visitor| { /* nop */ }
         }
         unsafe impl<'gc, OwningRef> $crate::GcDirectBarrier<'gc, OwningRef> for $target {
             #[inline(always)]
             unsafe fn write_barrier(
                 &self, _owner: &OwningRef, _field_offset: usize,
             ) {
+                /*
+                 * TODO: We don't have any GC fields,
+                 * so what does it mean to have a write barrier?
+                 */
                 /* NOP */
             }
         }

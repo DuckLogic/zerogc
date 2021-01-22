@@ -11,13 +11,21 @@ use crate::{GcDirectBarrier, CollectorId};
 
 use zerogc_derive::unsafe_gc_impl;
 
+macro_rules! __rec_trace_tuple {
+    ($($param:ident),*) => {
+        // Nothing remaining
+    };
+    ($first_param:ident, $($param:ident),+) => {
+        trace_tuple!($($param),*);
+    };
+}
 macro_rules! trace_tuple {
-    { $($param:ident)* } => {
+    { $($param:ident),* } => {
+        __rec_trace_tuple!($($param),* );
         unsafe_gc_impl! {
-            target => Option<T>,
-            params => [T],
-            null_trace => { where T: NullTrace },
-            simple_branded_bounds => [Sized],
+            target => ( $($param,)* ),
+            params => [$($param),*],
+            null_trace => { where $($param: NullTrace,)* i32: Sized },
             /*
              * HACK: Macros don't allow using `||` as separator,
              * so we use it as a terminator, causing there to be an illegal trailing `||`.
@@ -27,18 +35,40 @@ macro_rules! trace_tuple {
              */
             NEEDS_TRACE => $($param::NEEDS_TRACE || )* false,
             NEEDS_DROP => $($param::NEEDS_DROP || )* false,
-            trace_immutable => |$visitor, $target| {
-                #[allow(non_snake_case)]
-                let ($(ref mut $param,)*) = *self;
-                $($visitor.trace($param)?;)*
+            visit => |self, visitor| {
+                ##[allow(non_snake_case)]
+                let ($(ref #mutability $param,)*) = *self;
+                $(visitor.#visit_func($param)?;)*
                 Ok(())
-            },
-            trace_immutable => |$visitor, $target| {
+            }
+        }
+        unsafe impl<'gc, OwningRef, $($param),*> $crate::GcDirectBarrier<'gc, OwningRef> for ($($param,)*)
+            where $($param: $crate::GcDirectBarrier<'gc, OwningRef>),* {
+            #[inline]
+            unsafe fn write_barrier(
+                &self, #[allow(unused)] owner: &OwningRef,
+                #[allow(unused)] start_offset: usize
+            ) {
+                /*
+                 * We are implementing gc **direct** write.
+                 * This is safe because all the tuple's values
+                 * are stored inline. We calculate the pointer offset
+                 * using arithmetic.
+                 */
                 #[allow(non_snake_case)]
                 let ($(ref $param,)*) = *self;
-                $($visitor.trace_immutable($param)?;)*
-                Ok(())
-            },
+                $({
+                    let field_offset = ($param as *const $param as usize)
+                        - (self as *const Self as usize);
+                    $param.write_barrier(owner, field_offset + start_offset);
+                };)*
+            }
+        }
+    };
+    { $first_param:ident, $($param:ident)* ; gc_impl => { $($impls:tt)* }} => {
+        trace_tuple!($first_param:ident, $($param)*);
+        unsafe_gc_impl! {
+            $($impls)*
         }
         unsafe impl<'gc, OwningRef, $($param),*> $crate::GcDirectBarrier<'gc, OwningRef> for ($($param,)*)
             where $($param: $crate::GcDirectBarrier<'gc, OwningRef>),* {
@@ -83,27 +113,18 @@ unsafe_trace_primitive!(char);
 // TODO: Get proper support for unsized types (issue #15)
 unsafe_trace_primitive!(&'static str);
 
-trace_tuple! {}
-trace_tuple! { A }
-trace_tuple! { A B }
-trace_tuple! { A B C }
-trace_tuple! { A B C D }
-trace_tuple! { A B C D E }
-trace_tuple! { A B C D E F }
-trace_tuple! { A B C D E F G }
-trace_tuple! { A B C D E F G H }
-trace_tuple! { A B C D E F G H I }
+trace_tuple! { A, B, C, D, E, F, G, H, I }
 
 macro_rules! trace_array {
     ($size:tt) => {
-        unsafe_impl_gc! {
+        unsafe_gc_impl! {
             target => [T; $size],
             params => [T],
             null_trace => { where T: NullTrace },
             NEEDS_TRACE => T::NEEDS_TRACE,
             NEEDS_DROP => T::NEEDS_DROP,
-            visit => |$visit:expr, $target:ident| {
-                visit(*$target as [T]);
+            visit => |self, visitor| {
+                visitor.#visit_func(#b*self as #b [T]);
             },
         }
     };
@@ -118,11 +139,11 @@ trace_array! {
 ///
 /// The underlying data must support `TraceImmutable` since we
 /// only have an immutable reference.
-unsafe_impl_gc! {
+unsafe_gc_impl! {
     target => &'a T,
-    params => [T],
-    bounds = {
-        Trace => { where T: TraceImmmutable },
+    params => ['a, T],
+    bounds => {
+        Trace => { where T: TraceImmutable },
         TraceImmutable => { where T: TraceImmutable },
         /*
          * TODO: Right now we require `NullTrace`
@@ -137,16 +158,13 @@ unsafe_impl_gc! {
         GcRebrand => { where T: NullTrace, 'a: 'new_gc },
         GcErase => { where T: NullTrace }
     },
-    Branded => &'a T,
-    Erased => &'a T,
+    branded_type => &'a T,
+    erased_type => &'a T,
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => false, // We never need to be dropped
-    trace => |$visitor:ident, $target:ident| {
-        $visitor.visit_immutable::<T>(*$target)
-    },
-    trace_immutable => |$visitor:ident, $target:ident| {
-        $visitor.visit_immutable::<T>(*$target)
+    visit => |self, visitor| {
+        visitor.#visit_func::<T>(*self)
     }
 }
 
@@ -208,16 +226,16 @@ unsafe impl<T: GcSafe> GcSafe for [T] {
     const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
 }
 
-unsafe_impl_gc! {
+unsafe_gc_impl! {
     target => Option<T>,
     params => [T],
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => T::NEEDS_DROP,
-    visit => |$visit, $mutability, $target:ident| {
+    visit => |self, visitor| {
         match *self {
             None => Ok(()),
-            Some(ref $mutability value) => $visit($target),
+            Some(ref #mutability value) => visitor.#visit_func::<T>(value),
         }
     },
 }
@@ -227,7 +245,10 @@ unsafe impl<'gc, OwningRef, V> GcDirectBarrier<'gc, OwningRef> for Option<V>
     unsafe fn write_barrier(&self, owner: &OwningRef, start_offset: usize) {
         // Implementing direct write is safe because we store our value inline
         match *self {
-            None => { /* Nothing to trigger the barrier for :) */ },
+            None => {
+                /* Nothing to trigger the barrier for :) */
+                // TODO: Is this unreachable code?
+            },
             Some(ref value) => {
                 /*
                  * We must manually compute the offset
@@ -241,13 +262,15 @@ unsafe impl<'gc, OwningRef, V> GcDirectBarrier<'gc, OwningRef> for Option<V>
         }
     }
 }
-unsafe_gc_brand!(Option, T);
 
-// We can trace `Wrapping` by simply tracing its interior
-unsafe_trace_deref!(Wrapping, T; immut = false; |wrapping| &mut wrapping.0);
-unsafe impl<T: TraceImmutable> TraceImmutable for Wrapping<T> {
-    #[inline]
-    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
-        visitor.visit_immutable(&self.0)
+unsafe_gc_impl! {
+    target => Wrapping<T>,
+    params => [T],
+    null_trace => { where T: NullTrace },
+    NEEDS_TRACE => T::NEEDS_TRACE,
+    NEEDS_DROP => T::NEDS_DROP,
+    visit => |self, visitor| {
+        // We can trace `Wrapping` by simply tracing its interior
+        visitor.#visit_func(#b self.0)
     }
 }

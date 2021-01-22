@@ -14,7 +14,7 @@ readme = "README.md"
 # gives zerogc 'batteries included' support.
 indexmap = { version = "1.6", optional = true }
 # Used for macros
-zerogc-derive = { version = "0.2.0-alpha.1" }
+zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.1" }
 
 [workspace]
 members = ["libs/simple", "libs/derive", "libs/context"]

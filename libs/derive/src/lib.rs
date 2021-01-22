@@ -1,5 +1,6 @@
 #![feature(
     proc_macro_tracked_env, // Used for `DEBUG_DERIVE`
+    proc_macro_span, // Used for source file ids
 )]
 extern crate proc_macro;
 
@@ -150,6 +151,20 @@ impl Default for TypeAttrs {
             ignored_lifetimes: Default::default(),
         }
     }
+}
+fn span_file_loc(span: Span) -> String {
+    /*
+     * Source file identifiers in the form `<file_name>:<lineno>`
+     */
+    let internal = span.unwrap();
+    let sf = internal.source_file();
+    let path = sf.path();
+    let file_name = if sf.is_real() { path.file_name() } else { None }
+        .map(std::ffi::OsStr::to_string_lossy)
+        .map(String::from)
+        .unwrap_or_else(|| String::from("<fake>"));
+    let lineno = internal.start().line;
+    format!("{}:{}", file_name, lineno)
 }
 impl Parse for TypeAttrs {
     fn parse(raw_input: ParseStream) -> Result<Self, Error> {
@@ -338,14 +353,14 @@ impl Parse for TypeAttrs {
 
 #[proc_macro]
 pub fn unsafe_gc_impl(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let cloned_impl = input.clone();
     let parsed = parse_macro_input!(input as macros::MacroInput);
     let res = parsed.expand_output()
         .unwrap_or_else(|e| e.to_compile_error());
+    let span_loc = span_file_loc(Span::call_site());
     debug_derive(
         "unsafe_gc_impl!",
-        &"",
-        &format_args!("#[unsafe_gc_impl {{ {} }}", cloned_impl),
+        &span_loc,
+        &format_args!("unsafe_gc_impl! @ {}", span_loc),
         &res
     );
     res.into()
@@ -359,7 +374,7 @@ pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         .unwrap_or_else(|e| e.to_compile_error()));
     debug_derive(
         "derive(Trace)",
-        &input.ident,
+        &input.ident.to_string(),
         &format_args!("#[derive(Trace) for {}", input.ident),
         &res
     );
@@ -1084,22 +1099,22 @@ fn debug_derive(key: &str, target: &dyn ToString, message: &dyn Display, value: 
     let target = target.to_string();
     // TODO: Use proc_macro::tracked_env::var
     match ::proc_macro::tracked_env::var("DEBUG_DERIVE") {
-        Ok(ref var) if var == "*" => {}
+        Ok(ref var) if var == "*" || var == "1" || var.is_empty() => {}
+        Ok(ref var) if var == "0" => { return /* disabled */ }
         Ok(var) => {
+            let target_parts = std::iter::once(key)
+                .chain(target.split(":")).collect::<Vec<_>>();
             for pattern in var.split_terminator(",") {
-                let parts = pattern.split(":").collect::<Vec<_>>();
-                let (desired_key, desired_target) = match *parts {
-                    [desired_key, desired_target] => (desired_key, Some(desired_target)),
-                    [desired_key] => (desired_key, None),
-                    _ => {
-                        panic!("Invalid pattern for debug derive: {}", pattern)
+                let pattern_parts = pattern.split(":").collect::<Vec<_>>();
+                if pattern_parts.len() > target_parts.len() { continue }
+                for (&pattern_part, &target_part) in pattern_parts.iter()
+                    .chain(std::iter::repeat(&"*")).zip(&target_parts) {
+                    if pattern_part == "*" {
+                        continue // Wildcard matches anything: Keep checking
                     }
-                };
-                if desired_key != key && desired_key != "*" { return }
-                if let Some(desired_target) = desired_target {
-                   if desired_target != target && desired_target != "*" {
-                       return
-                   }
+                    if pattern_part != target_part {
+                        return // Pattern mismatch
+                    }
                 }
             }
             // Fallthrough -> enable this debug
