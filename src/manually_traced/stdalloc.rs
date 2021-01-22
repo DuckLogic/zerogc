@@ -30,17 +30,13 @@ unsafe_gc_impl! {
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
     visit => |self, visitor| {
-        visitor.#visit_func::<T>(#b **self);
+        visitor.#visit_func::<T>(#b **self)
     }
 }
 // We can only trace `Rc` and `Arc` if the inner type implements `TraceImmutable`
 unsafe_gc_impl! {
     target => Rc<T>,
-    params => [T],
-    bounds => {
-        Trace => { where T: TraceImmutable },
-        TraceImmutable => { where T: TraceImmutable }
-    },
+    params => [T: TraceImmutable],
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
@@ -51,11 +47,7 @@ unsafe_gc_impl! {
 }
 unsafe_gc_impl! {
     target => Arc<T>,
-    params => [T],
-    bounds => {
-        Trace => { where T: TraceImmutable },
-        TraceImmutable => { where T: TraceImmutable }
-    },
+    params => [T: TraceImmutable],
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory

@@ -35,6 +35,8 @@ macro_rules! trace_tuple {
              */
             NEEDS_TRACE => $($param::NEEDS_TRACE || )* false,
             NEEDS_DROP => $($param::NEEDS_DROP || )* false,
+            branded_type => ( $(<$param as GcRebrand<'new_gc, Id>>::Branded,)* ),
+            erased_type => ( $(<$param as GcErase<'min, Id>>::Erased,)* ),
             visit => |self, visitor| {
                 ##[allow(non_snake_case)]
                 let ($(ref #mutability $param,)*) = *self;
@@ -123,8 +125,10 @@ macro_rules! trace_array {
             null_trace => { where T: NullTrace },
             NEEDS_TRACE => T::NEEDS_TRACE,
             NEEDS_DROP => T::NEEDS_DROP,
+            branded_type => [<T as GcRebrand<'new_gc, Id>>::Branded; $size],
+            erased_type => [<T as GcErase<'min, Id>>::Erased; $size],
             visit => |self, visitor| {
-                visitor.#visit_func(#b*self as #b [T]);
+                visitor.#visit_func(#b*self as #b [T])
             },
         }
     };
@@ -135,13 +139,15 @@ trace_array! {
     24, 32, 48, 64, 100, 128, 256, 512, 1024, 2048, 4096
 }
 
-/// Implements tracing for references.
-///
-/// The underlying data must support `TraceImmutable` since we
-/// only have an immutable reference.
+/*
+ * Implements tracing for references.
+ *
+ * The underlying data must support `TraceImmutable` since we
+ * only have an immutable reference.
+ */
 unsafe_gc_impl! {
     target => &'a T,
-    params => ['a, T],
+    params => ['a, T: 'a],
     bounds => {
         Trace => { where T: TraceImmutable },
         TraceImmutable => { where T: TraceImmutable },
@@ -156,7 +162,7 @@ unsafe_gc_impl! {
          * which is only safe if `T: NullTrace`
          */
         GcRebrand => { where T: NullTrace, 'a: 'new_gc },
-        GcErase => { where T: NullTrace }
+        GcErase => { where T: NullTrace, 'a: 'min }
     },
     branded_type => &'a T,
     erased_type => &'a T,
@@ -164,66 +170,63 @@ unsafe_gc_impl! {
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => false, // We never need to be dropped
     visit => |self, visitor| {
-        visitor.#visit_func::<T>(*self)
-    }
-}
-
-
-/// Implements tracing for mutable references.
-unsafe impl<'a, T: Trace> Trace for &'a mut T {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-    #[inline(always)]
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
-        visitor.visit::<T>(*self)
-    }
-}
-unsafe impl<'a, T: TraceImmutable> TraceImmutable for &'a mut T {
-    #[inline(always)]
-    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
         visitor.visit_immutable::<T>(&**self)
     }
 }
-unsafe impl<'a, T: NullTrace> NullTrace for &'a mut T {}
-unsafe impl<'a, T: GcSafe> GcSafe for &'a mut T {
-    const NEEDS_DROP: bool = false; // References are Copy
-}
-/// TODO: We currently require NullTrace for `T`
-unsafe impl<'a, 'new_gc, Id, T> GcRebrand<'new_gc, Id> for &'a mut T
-    where Id: CollectorId, T: NullTrace, 'a: 'new_gc {
-    type Branded = &'a mut T;
-}
-/// TODO: We currently require NullTrace for `T`
-unsafe impl<'a, Id, T> GcErase<'a, Id> for &'a mut T
-    where Id: CollectorId, T: NullTrace {
-    type Erased = &'a mut T;
+
+
+/*
+ * Implements tracing for mutable references.
+ *
+ * See also: Implementation for `&'a T`
+ */
+unsafe_gc_impl! {
+    target => &'a mut T,
+    params => ['a, T: 'a],
+    bounds => {
+        /*
+         * TODO: Right now we require `NullTrace`
+         *
+         * This is the same reasoning as the requirements for `&'a T`.
+         * See their comments for details.....
+         */
+        GcRebrand => { where T: NullTrace, 'a: 'new_gc },
+        GcErase => { where T: NullTrace, 'a: 'min }
+    },
+    branded_type => &'a mut T,
+    erased_type => &'a mut T,
+    null_trace => { where T: NullTrace },
+    NEEDS_TRACE => T::NEEDS_TRACE,
+    NEEDS_DROP => false, // Although not `Copy`, mut references don't need to be dropped
+    visit => |self, visitor| {
+        visitor.#visit_func::<T>(#b **self)
+    }
 }
 
-/// Implements tracing for slices, by tracing all the objects they refer to.
-unsafe impl<T: Trace> Trace for [T] {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE ;
 
-    #[inline]
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
-        if !T::NEEDS_TRACE { return Ok(()) };
-        for value in self {
-            visitor.visit(value)?;
+
+/*
+ * Implements tracing for slices, by tracing all the objects they refer to.
+ *
+ * NOTE: We cannot currently implement `GcRebrand` + `GcErase`
+ * because we are unsized :((
+ */
+unsafe_gc_impl! {
+    target => [T],
+    params => [T],
+    bounds => {
+        GcRebrand => never,
+        GcErase => never
+    },
+    null_trace => { where T: NullTrace },
+    NEEDS_TRACE => T::NEEDS_TRACE,
+    NEEDS_DROP => ::core::mem::needs_drop::<T>(),
+    visit => |self, visitor| {
+        for val in self.#iter() {
+            visitor.#visit_func(val)?;
         }
         Ok(())
     }
-}
-unsafe impl<T: TraceImmutable> TraceImmutable for [T] {
-    #[inline]
-    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
-        if !T::NEEDS_TRACE { return Ok(()) };
-        for value in self {
-            visitor.visit_immutable(value)?;
-        }
-        Ok(())
-    }
-}
-unsafe impl<T: NullTrace> NullTrace for [T] {}
-unsafe impl<T: GcSafe> GcSafe for [T] {
-    const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
 }
 
 unsafe_gc_impl! {
@@ -268,7 +271,7 @@ unsafe_gc_impl! {
     params => [T],
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
-    NEEDS_DROP => T::NEDS_DROP,
+    NEEDS_DROP => T::NEEDS_DROP,
     visit => |self, visitor| {
         // We can trace `Wrapping` by simply tracing its interior
         visitor.#visit_func(#b self.0)

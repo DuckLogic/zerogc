@@ -1,93 +1,35 @@
 use indexmap::{IndexMap, IndexSet};
 
 use crate::prelude::*;
-use std::hash::Hash;
-use crate::CollectorId;
 
-// Maps
+use zerogc_derive::unsafe_gc_impl;
 
-unsafe impl<K, V> TraceImmutable for IndexMap<K, V>
-    where K: TraceImmutable + Eq + Hash, V: TraceImmutable {
-    fn visit_immutable<Visit: GcVisitor>(&self, visitor: &mut Visit) -> Result<(), Visit::Err> {
-        if !Self::NEEDS_TRACE { return Ok(()); };
-        for (key, value) in self.iter() {
-            visitor.visit_immutable(key)?;
-            visitor.visit_immutable(value)?;
+unsafe_gc_impl! {
+    target => IndexMap<K, V>,
+    params => [K: TraceImmutable, V],
+    null_trace => { where K: NullTrace, V: NullTrace },
+    NEEDS_TRACE => K::NEEDS_TRACE || V::NEEDS_TRACE,
+    NEEDS_DROP => true, // Internal memory
+    visit => |self, visitor| {
+        for (key, value) in self.#iter() {
+            visitor.visit_immutable::<K>(key)?;
+            visitor.#visit_func::<V>(value)?;
         }
         Ok(())
     }
 }
-unsafe impl<K, V> NullTrace for IndexMap<K, V>
-    where K: NullTrace + Eq + Hash, V: NullTrace {}
-unsafe impl<K, V> Trace for IndexMap<K, V>
-    where K: TraceImmutable + Eq + Hash, V: Trace {
-    const NEEDS_TRACE: bool = K::NEEDS_TRACE || V::NEEDS_TRACE;
 
-    fn visit<Visit: GcVisitor>(&mut self, visitor: &mut Visit) -> Result<(), Visit::Err> {
-        if !Self::NEEDS_TRACE { return Ok(()); };
-        for (key, value) in self.iter_mut() {
-            visitor.visit_immutable(key)?;
-            visitor.visit(value)?;
+
+unsafe_gc_impl! {
+    target => IndexSet<T>,
+    params => [T: TraceImmutable],
+    null_trace => { where T: NullTrace },
+    NEEDS_TRACE => T::NEEDS_TRACE,
+    NEEDS_DROP => true, // Internal memory
+    visit => |self, visitor| {
+        for val in self.iter() {
+            visitor.visit_immutable::<T>(val)?;
         }
         Ok(())
     }
-}
-unsafe impl<K, V> GcSafe for IndexMap<K, V> where
-    K: GcSafe + TraceImmutable + Eq + Hash, V: GcSafe {
-    const NEEDS_DROP: bool = true; // IndexMap has internal memory
-}
-unsafe impl<'new_gc, Id, K, V> GcRebrand<'new_gc, Id> for IndexMap<K, V>
-    where Id: CollectorId, K: TraceImmutable + Eq + Hash + GcRebrand<'new_gc, Id>,
-          V: GcRebrand<'new_gc, Id>,
-          <K as GcRebrand<'new_gc, Id>>::Branded: TraceImmutable + Eq + Hash + Sized,
-          <V as GcRebrand<'new_gc, Id>>::Branded: Sized {
-    type Branded = IndexMap<
-        <K as GcRebrand<'new_gc, Id>>::Branded,
-        <V as GcRebrand<'new_gc, Id>>::Branded
-    >;
-}
-
-unsafe impl<'a, Id, K, V> GcErase<'a, Id> for IndexMap<K, V>
-    where Id: CollectorId, K: TraceImmutable + Eq + Hash + GcErase<'a, Id>,
-          V: GcErase<'a, Id>,
-          <K as GcErase<'a, Id>>::Erased: TraceImmutable + Eq + Hash + Sized,
-          <V as GcErase<'a, Id>>::Erased: Sized {
-    type Erased = IndexMap<
-        <K as GcErase<'a, Id>>::Erased,
-        <V as GcErase<'a, Id>>::Erased
-    >;
-}
-
-// Sets
-
-unsafe impl<T> TraceImmutable for IndexSet<T>
-    where T: TraceImmutable + Eq + Hash {
-    fn visit_immutable<Visit: GcVisitor>(&self, visitor: &mut Visit) -> Result<(), Visit::Err> {
-        if !Self::NEEDS_TRACE { return Ok(()); };
-        for element in self.iter() {
-            visitor.visit_immutable(element)?;
-        }
-        Ok(())
-    }
-}
-unsafe impl<V> Trace for IndexSet<V>
-    where V: TraceImmutable + Eq + Hash {
-    const NEEDS_TRACE: bool = V::NEEDS_TRACE;
-
-    fn visit<Visit: GcVisitor>(&mut self, visitor: &mut Visit) -> Result<(), Visit::Err> {
-        for value in self.iter() {
-            visitor.visit_immutable(value)?;
-        }
-        Ok(())
-    }
-}
-unsafe impl<'new_gc, Id, V> GcRebrand<'new_gc, Id> for IndexSet<V>
-    where Id: CollectorId, V: GcRebrand<'new_gc, Id> + TraceImmutable + Eq + Hash,
-          <V as GcRebrand<'new_gc, Id>>::Branded: TraceImmutable + Eq + Hash, {
-    type Branded = IndexSet<<V as GcRebrand<'new_gc, Id>>::Branded>;
-}
-unsafe impl<'a, Id, V> GcErase<'a, Id> for IndexSet<V>
-    where Id: CollectorId, V: GcErase<'a, Id> + TraceImmutable + Eq + Hash,
-          <V as GcErase<'a, Id>>::Erased: TraceImmutable + Eq + Hash, {
-    type Erased = IndexSet<<V as GcErase<'a, Id>>::Erased>;
 }

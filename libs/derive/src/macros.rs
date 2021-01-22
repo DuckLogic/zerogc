@@ -86,8 +86,8 @@ impl MacroInput {
         } else {
             quote!()
         };
-        let rebrand_impl = self.expand_brand_impl(true);
-        let erase_impl = self.expand_brand_impl(false);
+        let rebrand_impl = self.expand_brand_impl(true)?;
+        let erase_impl = self.expand_brand_impl(false)?;
         Ok(quote! {
             #trace_impl
             #trace_immutable_impl
@@ -129,7 +129,7 @@ impl MacroInput {
             unsafe impl #impl_generics #trait_name for #target_type #where_clause {
                 #needs_trace_const
                 #[inline] // TODO: Should this be unconditional?
-                fn #visit_method_name<V: GcVisitor + ?Sized>(&#mutability self, visitor: &mut V) -> Result<(), V::Err> {
+                fn #visit_method_name<Visitor: GcVisitor + ?Sized>(&#mutability self, visitor: &mut Visitor) -> Result<(), Visitor::Err> {
                     #visit_impl
                 }
             }
@@ -151,16 +151,18 @@ impl MacroInput {
             }
         })
     }
-    fn expand_brand_impl(&self, rebrand: bool /* true => rebrand, false => erase */) -> Option<TokenStream> {
+    fn expand_brand_impl(&self, rebrand: bool /* true => rebrand, false => erase */) -> Result<Option<TokenStream>, Error> {
         let requirements = if rebrand { self.bounds.rebrand.clone() } else { self.bounds.erase.clone() };
         if let Some(TraitRequirements::Never) = requirements  {
             // They are requesting that we dont implement
-            return None;
+            return Ok(None);
         }
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
         let default_bounds: Vec<TypeParamBound> = match requirements {
-            Some(TraitRequirements::Where(_)) => {
+            Some(TraitRequirements::Where(ref explicit_requirements)) => {
+                generics.make_where_clause().predicates
+                    .extend(explicit_requirements.predicates.iter().cloned());
                 // they have explicit requirements -> no default bounds
                 vec![]
             }
@@ -185,6 +187,8 @@ impl MacroInput {
             match param {
                 GenericParam::Type(ref tp) => {
                     let type_name = &tp.ident;
+                    let mut bounds = tp.bounds.clone();
+                    bounds.extend(default_bounds.iter().cloned());
                     generics.make_where_clause()
                         .predicates.push(WherePredicate::Type(PredicateType {
                         lifetimes: None,
@@ -193,19 +197,19 @@ impl MacroInput {
                                 parse_quote!(<#type_name as GcRebrand<'new_gc, Id>>::Branded)
                             })
                         } else {
-                            self.options.branded_type.clone().unwrap_or_else(|| {
+                            self.options.erased_type.clone().unwrap_or_else(|| {
                                 parse_quote!(<#type_name as GcErase<'min, Id>>::Erased)
                             })
                         },
                         colon_token: Default::default(),
-                        bounds: default_bounds.iter().cloned().collect()
+                        bounds: bounds.clone(),
                     }));
                     generics.make_where_clause()
                         .predicates.push(WherePredicate::Type(PredicateType {
                         lifetimes: None,
                         bounded_ty: parse_quote!(#type_name),
                         colon_token: Default::default(),
-                        bounds: default_bounds.iter().cloned().collect()
+                        bounds
                     }))
                 }
                 _ => {}
@@ -231,56 +235,6 @@ impl MacroInput {
         } else {
             quote!(GcErase<'min, Id>)
         };
-        fn rewrite_type(target: &Type, target_type_name: &str, rewriter: &mut dyn FnMut(&Type) -> Option<Type>) -> Result<Type, Error> {
-            if let Some(explicitly_rewritten) = rewriter(target) {
-                return Ok(explicitly_rewritten)
-            }
-            match target {
-                ::syn::Type::Path(::syn::TypePath { ref qself, ref path }) => {
-                    let new_qself = qself.clone().map(|mut qself| {
-                        qself.ty = Box::new(rewrite_type(
-                            &*qself.ty, target_type_name,
-                            &mut *rewriter
-                        )?);
-                        Ok(qself)
-                    }).transpose()?;
-                    let new_path = ::syn::Path {
-                        leading_colon: path.leading_colon,
-                        segments: path.segments.iter().cloned().map(|segment| {
-                            // old_segment.ident is ignored...
-                            for arg in &mut segment.arguments {
-                                match arg {
-                                    ::syn::PathArguments::None => {}, // Nothing to do here
-                                    ::syn::PathArguments::AngleBracketed(ref mut generic_args) => {
-                                        for arg in &mut generic_args {
-                                            match arg {
-                                                GenericArgument::Lifetime(_) | GenericArgument::Const(_) => {},
-                                                GenericArgument::Type(ref mut generic_type) => {
-                                                    *generic_type = rewrite_type(generic_type, target_type_name, &mut *rewriter)?;
-                                                }
-                                                GenericArgument::Constraint(_) | GenericArgument::Binding(_) => {
-                                                    return Err(Error::new(
-                                                        arg.span(), format!(
-                                                            "Unable to handle generic arg while rewriting as a {}",
-                                                            target_type_name
-                                                        )
-                                                    ))
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }).collect()
-                    };
-                    Ok(::syn::Type::Path(::syn::TypePath { qself: new_qself, path: new_path }))
-                }
-                _ => return Err(Error::new(target.span(), format!(
-                    "Unable to rewrite type as a `{}`: {}",
-                    target_type_name, target
-                )))
-            }
-        }
         fn rewrite_brand_trait(
             target: &Type, trait_name: &str, target_params: &HashSet<Ident>,
             target_trait: TokenStream, associated_type: Ident
@@ -307,17 +261,17 @@ impl MacroInput {
             _ => None
         }).collect::<HashSet<_>>();
         let associated_type = if rebrand {
-            let branded = Ok(self.options.branded_type.clone()).transpose().unwrap_or_else(|| {
+            let branded = self.options.branded_type.clone().map_or_else(|| {
                 rewrite_brand_trait(
                     &self.target_type, "GcRebrand",
                     &target_params,
                     parse_quote!(GcRebrand<'new_gc, Id>),
                     parse_quote!(Branded)
                 )
-            })?;
+            }, Ok)?;
             quote!(type Branded = #branded;)
         } else {
-            let erased = Ok(self.options.branded_type.clone()).transpose().unwrap_or_else(|| {
+            let erased = Ok(self.options.erased_type.clone()).transpose().unwrap_or_else(|| {
                 rewrite_brand_trait(
                     &self.target_type, "GcErase",
                     &target_params,
@@ -327,11 +281,11 @@ impl MacroInput {
             })?;
             quote!(type Erased = #erased;)
         };
-        Some(quote! {
+        Ok(Some(quote! {
             unsafe impl #impl_generics #target_trait for #target_type #where_clause {
-                const
+                #associated_type
             }
-        })
+        }))
     }
 }
 
@@ -585,14 +539,7 @@ fn create_clause_with_default(
                     }))
                 }
             }
-            let type_idents = generic_params.iter()
-                .filter_map(|param| match param {
-                    GenericParam::Type(ref t) => {
-                        Some(t.ident.clone())
-                    },
-                    _ => None
-                }).collect::<Vec<_>>();
-            parse_quote!(where #(#type_idents: Trace),*)
+            where_clause
         }
     })
 }
@@ -739,7 +686,7 @@ impl VisitImpl {
                             if mutable {
                                 quote!(&mut)
                             } else {
-                                quote!()
+                                quote!(&)
                             }
                         }
                     };
@@ -853,4 +800,71 @@ impl Parse for TraitRequirements {
             return Err(input.error("Invalid `TraitRequirement`"))
         }
     }
+}
+
+
+
+fn rewrite_type(target: &Type, target_type_name: &str, rewriter: &mut dyn FnMut(&Type) -> Option<Type>) -> Result<Type, Error> {
+    if let Some(explicitly_rewritten) = rewriter(target) {
+        return Ok(explicitly_rewritten)
+    }
+    let mut target = target.clone();
+    match target {
+        Type::Paren(ref mut inner) => {
+            *inner.elem = rewrite_type(&inner.elem, target_type_name, rewriter)?
+        },
+        Type::Group(ref mut inner) => {
+            *inner.elem = rewrite_type(&inner.elem, target_type_name, rewriter)?
+        },
+        Type::Reference(ref mut target) => {
+            // TODO: Lifetime safety?
+            // Rewrite reference target
+            *target.elem = rewrite_type(&target.elem, target_type_name, rewriter)?
+        }
+        Type::Path(::syn::TypePath { ref mut qself, ref mut path }) => {
+            *qself = qself.clone().map::<Result<_, Error>, _>(|mut qself| {
+                qself.ty = Box::new(rewrite_type(
+                    &*qself.ty, target_type_name,
+                    &mut *rewriter
+                )?);
+                Ok(qself)
+            }).transpose()?;
+            path.segments = path.segments.iter().cloned().map(|mut segment| {
+                // old_segment.ident is ignored...
+                match segment.arguments {
+                    ::syn::PathArguments::None => {}, // Nothing to do here
+                    ::syn::PathArguments::AngleBracketed(ref mut generic_args) => {
+                        for arg in &mut generic_args.args {
+                            match arg {
+                                GenericArgument::Lifetime(_) | GenericArgument::Const(_) => {},
+                                GenericArgument::Type(ref mut generic_type) => {
+                                    *generic_type = rewrite_type(generic_type, target_type_name, &mut *rewriter)?;
+                                }
+                                GenericArgument::Constraint(_) | GenericArgument::Binding(_) => {
+                                    return Err(Error::new(
+                                        arg.span(), format!(
+                                            "Unable to handle generic arg while rewriting as a {}",
+                                            target_type_name
+                                        )
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                    ::syn::PathArguments::Parenthesized(ref mut paran_args) => {
+                        return Err(Error::new(
+                            paran_args.span(),
+                            "TODO: Rewriting paranthesized (fn-style) args"
+                        ));
+                    }
+                }
+                Ok(segment)
+            }).collect::<Result<_, Error>>()?;
+        }
+        _ => return Err(Error::new(target.span(), format!(
+            "Unable to rewrite type as a `{}`: {}",
+            target_type_name, quote!(#target)
+        )))
+    }
+    Ok(target)
 }
