@@ -23,6 +23,8 @@ pub use crate::{
 };
 // Hack traits
 pub use crate::{GcBindHandle};
+// TODO: Should this trait be auto-imported???
+pub use crate::CollectorId;
 // Utils
 pub use crate::AssumeNotTraced;
 pub use crate::cell::GcCell;

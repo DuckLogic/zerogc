@@ -54,19 +54,19 @@
 #[macro_export]
 macro_rules! unsafe_trace_lock {
     ($target:ident, target = $target_type:ident; |$get_mut:ident| $get_mut_expr:expr, |$lock:ident| $acquire_guard:expr) => {
-        unsafe_gc_brand!($target, $target_type);
-        unsafe impl<$target_type: Trace> Trace for $target<$target_type> {
-            const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-            #[inline]
-            fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+        unsafe_impl_gc!(
+            target => $target<$target_type>,
+            params = [$target_type],
+            null_trace => { where $target_type: NullTrace },
+            NEEDS_TRACE => true,
+            NEEDS_DROP => $target_type::NEEDS_DROP /* if our inner type needs a drop */
+                || core::mem::needs_drop::<$target<()>>; // Or we have unconditional drop (std-mutex)
+            trace_mut => |self, visitor| {
                 let $get_mut = self;
                 let value: &mut $target_type = $get_mut_expr;
-                visitor.visit(value)
-            }
-        }
-        unsafe impl<$target_type: Trace> $crate::TraceImmutable for $target<$target_type> {
-            #[inline]
-            fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
+                visitor.visit::<$target_type>(value)
+            },
+            trace_immutable => |self, visitor| {
                 if !Self::NEEDS_TRACE { return Ok(()) };
                 // We can immutably visit a lock by acquiring it
                 let $lock = self;
@@ -75,207 +75,10 @@ macro_rules! unsafe_trace_lock {
                 let guard_value = &mut *guard;
                 visitor.visit(guard_value)
             }
-        }
-        unsafe impl<$target_type: $crate::NullTrace> $crate::NullTrace for $target<$target_type> {}
-        unsafe impl<$target_type: $crate::GcSafe> $crate::GcSafe for $target<$target_type> {}
+        );
     };
 }
 
-/// Unsafely implement `GarbageCollected` for the specified type,
-/// by converting the specified wrapper type in order to trace the underlying objects.
-///
-/// In addition to smart pointers, it can be used for newtype structs like `Wrapping` or `NonZero`,
-/// as long as the types can properly traced by just reading their underlying value.
-/// However, it's slightly easier to invoke if you implement `Deref`,
-/// since the expression is inferred based on the target type.
-/// However, you will always need to explicitly indicate the dereferencing output type,
-/// in order to be eplicit about the intended operation.
-///
-/// This macro is usually only useful for unsafe wrappers like `NonZero` and smart pointers like `Rc` and `Box` who use raw pointers internally,
-/// since raw pointers can't be automatically traced without additional type information.
-/// Otherwise, it's best to use an automatically derived implementation since that's always safe.
-/// However, using this macro is always better than a manual implementation, since it makes your intent clearer.
-///
-/// ## Usage
-/// ````no_test
-/// // Easy to use for wrappers that `Deref` to their type parameter
-/// unsafe_trace_deref!(Box, target = T);
-/// unsafe_trace_deref!(Rc, target = T);
-/// unsafe_trace_deref!(Arc, target = T);
-/// // The `Deref::Output` type can be declared separately from the type paremters
-/// unsafe_trace_deref!(Vec, target = { [T] }, T);
-/// /*
-///  * You can use an arbitrary expression to acquire the underlying value,
-///  * and the type doesn't need to implement `Deref` at all
-///  */
-/// unsafe_trace_deref!(Cell, T; |cell| cell.get());
-/// unsafe_trace_deref!(Wrapping, T; |wrapping| &wrapping.0);
-///
-/// // wrappers shouldn't need tracing if their innards don't
-/// assert!(!<Box<i32> as Trace>::NEEDS_TRACE);
-/// assert!(!<Cell<i32> as Trace>::NEEDS_TRACE);
-/// // Box needs to be dropped
-/// assert!(<Box<i32> as GcSafe>::NEEDS_DROP);
-/// // but Cell doesn't need to be dropped
-/// assert!(<Cell<i32> as GcSafe>::NEEDS_DROP);
-///
-/// // if the inside needs tracing, the outside does
-/// assert!(<Box<dummy_impl::Gc<'static, i32>> as Trace>::NEEDS_TRACE);
-/// assert!(<Cell<dummy_impl::Gc<'static, i32>> as Trace>::NEEDS_TRACE);
-/// ````
-///
-/// ## Safety
-/// Always prefer automatically derived implementations where possible,
-/// since they're just as fast and can never cause undefined behavior.
-/// This is basically an _unsafe automatically derived_ implementation,
-/// to be used only when a safe automatically derived implementation isn't possible (like with `Vec`).
-///
-/// Undefined behavior if there could be garbage collected objects that are not reachable via iteration,
-/// since the macro only traces objects it can iterate over,
-/// and the garbage collector will free objects that haven't been traced.
-/// This usually isn't the case with collections and would be somewhat rare,
-/// but it's still a possibility that causes the macro to be unsafe.
-///
-/// This delegates to `unsafe_gc_brand` to provide the [GcRebrand] and [GcErase] implementation,
-/// so that could also trigger undefined behavior.
-#[macro_export]
-macro_rules! unsafe_trace_deref {
-    ($target:ident, target = $target_type:ident) => {
-        unsafe_trace_deref!($target, target = $target_type; $target_type);
-    };
-    ($target:ident, target = $target_type:ident; $($param:ident),*) => {
-        unsafe_trace_deref!($target, target = { $target_type }; $($param),*);
-    };
-    ($target:ident, target = { $target_type:ty }; $($param:ident),*) => {
-        unsafe impl<$($param: TraceImmutable),*> $crate::TraceImmutable for $target<$($param),*> {
-            #[inline]
-            fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
-                let extracted: &$target_type = &**self;
-                visitor.visit_immutable(extracted)
-            }
-        }
-        unsafe_trace_deref!($target, $($param),*; immut = false; |value| {
-            // I wish we had type ascription -_-
-            let dereferenced: &mut $target_type = &mut **value;
-            dereferenced
-        });
-    };
-    ($target:ident, $($param:ident),*; immut = required; |$value:ident| $extract:expr) => {
-        unsafe_gc_brand!($target, immut = required; $($param),*);
-        unsafe impl<$($param),*> Trace for $target<$($param),*>
-            where $($param: TraceImmutable),* {
-
-            const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
-            #[inline]
-            fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
-                let extracted = {
-                    let $value = self;
-                    $extract
-                };
-                visitor.visit_immutable(extracted)
-            }
-        }
-        unsafe impl<$($param),*> TraceImmutable for $target<$($param),*>
-            where $($param: TraceImmutable),* {
-
-            #[inline]
-            fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err> {
-                let extracted = {
-                    let $value = self;
-                    $extract
-                };
-                visitor.visit_immutable(extracted)
-            }
-        }
-        unsafe impl<$($param: NullTrace),*> NullTrace for $target<$($param),*> {}
-        /// We trust ourselves to not do anything bad as long as our paramaters don't
-        unsafe impl<$($param),*> GcSafe for $target<$($param),*>
-            where $($param: GcSafe + TraceImmutable),*  {
-            const NEEDS_DROP: bool = core::mem::needs_drop::<Self>();
-        }
-    };
-    ($target:ident, $($param:ident),*; immut = false; |$value:ident| $extract:expr) => {
-        unsafe_gc_brand!($target, $($param),*);
-        unsafe impl<$($param),*> Trace for $target<$($param),*>
-            where $($param: Trace),* {
-
-            const NEEDS_TRACE: bool = $($param::NEEDS_TRACE || )* false;
-            #[inline]
-            fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
-                let extracted = {
-                    let $value = self;
-                    $extract
-                };
-                visitor.visit(extracted)
-            }
-        }
-        unsafe impl<$($param: NullTrace),*> NullTrace for $target<$($param),*> {}
-        /// We trust ourselves to not do anything bad as long as our paramaters don't
-        unsafe impl<$($param),*> GcSafe for $target<$($param),*>
-            where $($param: GcSafe),*  {
-            const NEEDS_DROP: bool = core::mem::needs_drop::<Self>();
-        }
-    };
-}
-
-
-/// Unsafely implement `ImmutableTrace` for the specified iterable type,
-/// by iterating over the type to trace all objects.
-///
-/// You still have to implement the regular `Trace` and `GcSafe` traits by hand.
-///
-/// This macro is only useful for unsafe collections like `Vec` and `HashMap` who use raw pointers internally,
-/// since raw pointers can't have automatically derived tracing implementations.
-/// Otherwise, it's best to use an automatically derived implementation since that's always safe.
-/// In order to prevent ambiguity, this always requires the type of the element being traced.
-///
-/// ## Usage
-/// ````no_test
-/// unsafe_trace_iterable!(Vec, element = T);
-/// unsafe_trace_iterable!(HashMap, element = { (&K, &V) }; K, V);
-/// unsafe_trace_iterable!(HashSet, element = T);
-///
-/// assert!(!<Vec<i32> as Trace>::NEEDS_TRACE);
-/// assert!(<Vec<dummy_impl::Gc<'static, i32>> as Trace>::NEEDS_TRACE);
-/// assert!(<Vec<i32> as GcSafe>::NEEDS_DROP);
-/// ````
-///
-/// ## Safety
-/// Always prefer automatically derived implementations where possible,
-/// since they're just as fast and can never cause undefined behavior.
-/// This is basically an _unsafe automatically derived_ implementation,
-/// to be used only when a safe automatically derived implementation isn't possible (like with `Vec`).
-///
-/// Undefined behavior if there could be garbage collected objects that are not reachable via iteration,
-/// since the macro only traces objects it can iterate over,
-/// and the garbage collector will free objects that haven't been traced.
-/// This usually isn't the case with collections and would be somewhat rare,
-/// but it's still a possibility that causes the macro to be unsafe.
-///
-///
-/// This delegates to `unsafe_gc_brand!` to provide the [GcRebrand] and [GcErase] implementation,
-/// so that could also trigger undefined behavior.
-#[macro_export]
-macro_rules! unsafe_immutable_trace_iterable {
-    ($target:ident, element = $element_type:ident) => {
-        unsafe_trace_iterable!($target, element = &$element_type; $element_type);
-    };
-    ($target:ident<$($param:ident),*>; element = { $element_type:ty }) => {
-        unsafe impl<$($param),*> TraceImmutable for $target<$($param),*>
-            where $($param: TraceImmutable),* {
-            fn visit_immutable<Visit: GcVisitor>(&self, visitor: &mut Visit) -> Result<(), Visit::Err> {
-                if !Self::NEEDS_TRACE { return Ok(()) };
-                let iter = IntoIterator::into_iter(self);
-                for element in iter {
-                    let element: $element_type = element;
-                    visitor.visit_immutable(&element)?;
-                }
-                Ok(())
-            }
-        }
-        unsafe impl<$($param: $crate::NullTrace),*> NullTrace for $target<$($param),*> {}
-    };
-}
 
 
 /// Unsafely implement `GarbageCollected` for the specified type,
@@ -302,92 +105,27 @@ macro_rules! unsafe_immutable_trace_iterable {
 #[macro_export]
 macro_rules! unsafe_trace_primitive {
     ($target:ty) => {
-        unsafe_gc_brand!($target);
-        unsafe impl Trace for $target {
-            const NEEDS_TRACE: bool = false;
-            #[inline(always)] // This method does nothing and is always a win to inline
-            fn visit<V: $crate::GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
-                Ok(())
-            }
-        }
-        unsafe impl $crate::TraceImmutable for $target {
-            #[inline(always)]
-            fn visit_immutable<V: $crate::GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
-                Ok(())
-            }
-        }
-        unsafe impl $crate::NullTrace for $target {}
-        /// No drop/custom behavior -> GcSafe
-        unsafe impl GcSafe for $target {
-            const NEEDS_DROP: bool = core::mem::needs_drop::<$target>();
+        unsafe_gc_impl! {
+            target => $target,
+            params => [],
+            null_trace => always,
+            NEEDS_TRACE => false,
+            NEEDS_DROP => core::mem::needs_drop::<$target>(),
+            visit => |self, visitor| { /* nop */ Ok(()) }
         }
         unsafe impl<'gc, OwningRef> $crate::GcDirectBarrier<'gc, OwningRef> for $target {
             #[inline(always)]
             unsafe fn write_barrier(
                 &self, _owner: &OwningRef, _field_offset: usize,
             ) {
+                /*
+                 * TODO: We don't have any GC fields,
+                 * so what does it mean to have a write barrier?
+                 */
                 /* NOP */
             }
         }
     };
-}
-
-
-/// Unsafely assume that the generic implementation of [GcRebrand] and [GcErase] is valid,
-/// if and only if it's valid for the generic lifetime and type parameters.
-///
-/// Always _prefer automatically derived implementations where possible_,
-/// since they can never cause undefined behavior.
-/// This macro is only necessary if you have raw pointers internally,
-/// which can't have automatically derived safe implementations.
-/// This is basically an _unsafe automatically derived_ implementation,
-/// to be used only when a safe automatically derived implementation isn't possible (like with `Vec`).
-///
-/// This macro takes a varying number of parameters referring to the type's generic parameters,
-/// which are all properly bounded and required to implement [GcRebrand] and [GcErase] correctly.
-///
-/// This macro can only cause undefined behavior if there are garbage collected pointers
-/// that aren't included in the type parameter.
-/// For example including `Gc<u32>` would be completely undefined behavior,
-/// since we'd blindly erase its lifetime.
-///
-/// However, generally this macro provides the correct implementation
-/// for straighrtforward wrapper/collection types.
-/// Currently the only exception is when you have garbage collected lifetimes like `Gc`.
-#[macro_export]
-macro_rules! unsafe_gc_brand {
-    ($target:tt) => {
-        unsafe impl<'new_gc, Id: $crate::CollectorId> $crate::GcRebrand<'new_gc, Id> for $target {
-            type Branded = Self;
-        }
-        unsafe impl<'a, Id: $crate::CollectorId> $crate::GcErase<'a, Id> for $target {
-            type Erased = Self;
-        }
-    };
-    ($target:ident, $($param:ident),+) => {
-        unsafe impl<'new_gc, Id, $($param),*> $crate::GcRebrand<'new_gc, Id> for $target<$($param),*>
-            where Id: $crate::CollectorId, $($param: $crate::GcRebrand<'new_gc, Id>,)*
-                  $(<$param as $crate::GcRebrand<'new_gc, Id>>::Branded: Trace,)* {
-            type Branded = $target<$(<$param as $crate::GcRebrand<'new_gc, Id>>::Branded),*>;
-        }
-        unsafe impl<'a, Id, $($param),*> $crate::GcErase<'a, Id> for $target<$($param),*>
-            where Id: $crate::CollectorId, $($param: $crate::GcErase<'a, Id>,)*
-                  $(<$param as $crate::GcErase<'a, Id>>::Erased: Trace,)* {
-            type Erased = $target<$(<$param as $crate::GcErase<'a, Id>>::Erased),*>;
-        }
-    };
-    ($target:tt, immut = required; $($param:ident),+) => {
-        unsafe impl<'new_gc, Id, $($param),*> $crate::GcRebrand<'new_gc, Id> for $target<$($param),*>
-            where Id: $crate::CollectorId, $($param: $crate::GcRebrand<'new_gc, Id> + TraceImmutable,)*
-                  $(<$param as $crate::GcRebrand<'new_gc, Id>>::Branded: TraceImmutable,)* {
-            type Branded = $target<$(<$param as $crate::GcRebrand<'new_gc, Id>>::Branded),*>;
-        }
-        unsafe impl<'a, Id, $($param),*> $crate::GcErase<'a, Id> for $target<$($param),*>
-            where Id: $crate::CollectorId, $($param: $crate::GcErase<'a, Id> + TraceImmutable,)*
-                  $(<$param as $crate::GcErase<'a, Id>>::Erased: TraceImmutable,)* {
-            type Erased = $target<$(<$param as $crate::GcErase<'a, Id>>::Erased),*>;
-        }
-    }
 }
 
 mod core;
