@@ -449,11 +449,38 @@ pub fn unsafe_gc_impl(input: proc_macro::TokenStream) -> proc_macro::TokenStream
     res.into()
 }
 
+#[proc_macro_derive(NullTrace, attributes(zerogc))]
+pub fn derive_null_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let mut info = match GcTypeInfo::parse(&input) {
+        Ok(info) => info,
+        Err(e) => return e.to_compile_error().into()
+    };
+    if info.config.nop_trace {
+        return quote_spanned! { input.ident.span() =>
+            compile_error!("derive(NullTrace): Can't explicitly specify #[zerogc(nop_trace)] as it's already implied")
+        }.into();
+    }
+    info.config.nop_trace = true;
+    let res = From::from(impl_derive_trace(&input, &info)
+        .unwrap_or_else(|e| e.to_compile_error()));
+    debug_derive(
+        "derive(NullTrace)",
+        &input.ident.to_string(),
+        &format_args!("#[derive(NullTrace) for {}", input.ident),
+        &res
+    );
+    res
+}
 
 #[proc_macro_derive(Trace, attributes(zerogc))]
 pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let res = From::from(impl_derive_trace(&input)
+    let info = match GcTypeInfo::parse(&input) {
+        Ok(info) => info,
+        Err(e) => return e.to_compile_error().into()
+    };
+    let res = From::from(impl_derive_trace(&input, &info)
         .unwrap_or_else(|e| e.to_compile_error()));
     debug_derive(
         "derive(Trace)",
@@ -464,8 +491,7 @@ pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     res
 }
 
-fn impl_derive_trace(input: &DeriveInput) -> Result<TokenStream, syn::Error> {
-    let info = GcTypeInfo::parse(input)?;
+fn impl_derive_trace(input: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, syn::Error> {
     let trace_impl = if info.config.nop_trace {
         impl_nop_trace(&input, &info)?
     } else {

@@ -1,6 +1,6 @@
 use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, dummy_impl::{self, DummyCollectorId}};
 
-use zerogc_derive::Trace;
+use zerogc_derive::{Trace, NullTrace};
 
 #[derive(Trace)]
 #[zerogc(collector_id(DummyCollectorId))]
@@ -75,8 +75,7 @@ fn check_id<'gc, Id: CollectorId>() {
     assert!(<Basic<'gc, Id> as GcSafe>::NEEDS_DROP);
 }
 
-#[derive(Trace)]
-#[zerogc(nop_trace)]
+#[derive(NullTrace)]
 #[allow(unused)]
 struct NopTrace {
     s: String,
