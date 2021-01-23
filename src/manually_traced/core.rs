@@ -5,6 +5,7 @@
 //! `RefCell` and `Cell` are intentionally ignored and do not have implementations.
 //! Some collectors may need write barriers to protect their internals.
 use core::num::Wrapping;
+use core::marker::PhantomData;
 
 use crate::prelude::*;
 use crate::GcDirectBarrier;
@@ -120,6 +121,24 @@ unsafe_trace_primitive!(bool);
 unsafe_trace_primitive!(char);
 // TODO: Get proper support for unsized types (issue #15)
 unsafe_trace_primitive!(&'static str);
+
+unsafe_gc_impl! {
+    target => PhantomData<T>,
+    params => [T],
+    bounds => {
+        Trace => always,
+        TraceImmutable => always,
+        GcSafe => always,
+        GcRebrand => { where T: 'new_gc },
+        GcErase => { where T: 'min }
+    },
+    branded_type => Self,
+    erased_type => Self,
+    null_trace => always,
+    NEEDS_TRACE => false,
+    NEEDS_DROP => core::mem::needs_drop::<Self>(),
+    visit => |self, visitor| { /* nop */ Ok(()) }
+}
 
 trace_tuple! { A, B, C, D, E, F, G, H, I }
 
@@ -289,10 +308,15 @@ mod test {
     use crate::dummy_impl::{DummyCollectorId, Gc};
     use zerogc_derive::Trace;
     use crate::prelude::*;
+    use std::marker::PhantomData;
+
     #[test]
-    fn test_null_trace() {
+    fn test_null_trace<'gc>() {
         assert!(!<Option<i32> as Trace>::NEEDS_TRACE);
-        assert!(!<Option<(i32, char)> as Trace>::NEEDS_TRACE)
+        assert!(!<Option<(i32, char)> as Trace>::NEEDS_TRACE);
+        // PhantomData is NullTrace regardless of inside
+        assert!(!<PhantomData<Gc<'gc, i32>> as Trace>::NEEDS_TRACE);
+
     }
     #[derive(Trace)]
     #[zerogc(collector_id(DummyCollectorId))]
