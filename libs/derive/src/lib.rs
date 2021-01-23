@@ -139,7 +139,10 @@ struct TypeAttrs {
     gc_lifetime: Option<Lifetime>,
     collector_id: Option<Ident>,
     ignore_params: HashSet<Ident>,
-    ignored_lifetimes: HashSet<Lifetime>
+    ignored_lifetimes: HashSet<Lifetime>,
+    /// Unsafely assume the type is safe to [drop]
+    /// from a GC, as consistent with the requirements of [GcSafe]
+    unsafe_drop_safe: bool
 }
 impl TypeAttrs {
     fn gc_lifetime(&self) -> Lifetime {
@@ -205,6 +208,20 @@ impl Parse for TypeAttrs {
                     ))
                 }
                 result.is_copy = true;
+            } else if meta.path().is_ident("unsafe_drop_safe") {
+                if !matches!(meta, Meta::Path(_)) {
+                    return Err(Error::new(
+                        meta.span(),
+                        "Malformed attribute for #[zerogc(unsafe_drop_safe)]"
+                    ))
+                }
+                if result.unsafe_drop_safe {
+                    return Err(Error::new(
+                        meta.span(),
+                        "Duplicate flags: #[zerogc(unsafe_drop_safe)]"
+                    ))
+                }
+                result.unsafe_drop_safe = true;
             } else if meta.path().is_ident("nop_trace") {
                 if !matches!(meta, Meta::Path(_)) {
                     return Err(Error::new(
@@ -973,7 +990,7 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
          * in the first place.
          */
         quote!()
-    } else {
+    } else if !info.config.unsafe_drop_safe {
         quote!(impl #impl_generics Drop for #name #ty_generics #where_clause {
             #[inline]
             fn drop(&mut self) {
