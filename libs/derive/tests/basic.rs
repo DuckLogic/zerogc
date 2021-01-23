@@ -69,6 +69,16 @@ struct NopTrace {
 }
 
 #[derive(Trace)]
+#[zerogc(unsafe_skip_drop, collector_id(DummyCollectorId))]
+#[allow(unused)]
+struct UnsafeSkipped<'gc> {
+    s: &'static str,
+    i: i32,
+    #[zerogc(unsafe_skip_trace)]
+    wow: Gc<'gc, i32, DummyCollectorId>
+}
+
+#[derive(Trace)]
 #[zerogc(nop_trace, ignore_lifetimes("'a"), ignore_params(T))]
 #[allow(unused)]
 struct LifetimeTrace<'a, T: GcSafe + 'a> {
@@ -81,7 +91,7 @@ struct LifetimeTrace<'a, T: GcSafe + 'a> {
 
 
 #[test]
-fn basic() {
+fn basic<'gc>() {
     let _b = Basic::<dummy_impl::DummyCollectorId> {
         value: String::new(),
         parent: None,
@@ -96,4 +106,15 @@ fn basic() {
     assert!(!<NopTrace as Trace>::NEEDS_TRACE);
 
     check_id::<dummy_impl::DummyCollectorId>();
+
+    // We explicitly skipped the only trace field
+    assert!(!<UnsafeSkipped<'gc> as Trace>::NEEDS_TRACE);
+    /*
+     * We (unsafely) claimed drop-safety, so we shouldn't generate a destructor
+     *
+     * GcSafe::NEEDS_DROP should already be false (since we have no Drop fields),
+     * however in this case `std::mem::needs_drop` is false since we have no dummy drop impl.
+     */
+    assert!(!<UnsafeSkipped<'gc> as GcSafe>::NEEDS_DROP);
+    assert!(!std::mem::needs_drop::<UnsafeSkipped<'gc>>());
 }
