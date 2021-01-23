@@ -202,7 +202,7 @@ impl TypeAttrs {
             },
             (Some((_, parsed)), None) => {
                 parsed
-            }
+            },
             (None, None) => Ok(TypeAttrs::default()),
             (None, Some(_)) => unreachable!()
         }
@@ -1071,6 +1071,14 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
         quote!()
     } else if info.config.unsafe_skip_drop {
         quote!() // Skip generating drop at user's request
+    } else if info.config.nop_trace {
+        /*
+         * A NullTrace type is implicitly drop safe.
+         *
+         * No tracing needed implies there are no reachable GC references.
+         * Therefore there is nothing to fear about finalizers resurrecting things
+         */
+        quote!()
     } else {
         quote!(impl #impl_generics Drop for #name #ty_generics #where_clause {
             #[inline]

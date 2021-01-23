@@ -48,6 +48,22 @@ pub enum BasicEnum<'gc, Id: CollectorId> {
     )
 }
 
+/// A testing type that has no destructor
+///
+/// It doesn't implement copy, but shouldn't need
+/// to be dropped.
+///
+/// We shouldn't need to annotate with `unsafe_skip_drop`.
+/// The dummy destructor shouldn't be generated because of `#[zerogc(nop_trace)]`
+#[derive(Trace)]
+#[zerogc(nop_trace)]
+#[allow(unused)]
+struct NoDestructorNullTrace {
+    val: i32,
+    s: &'static str,
+    f: f32
+}
+
 fn assert_copy<T: Copy>() {}
 fn assert_null_trace<T: NullTrace>() {}
 fn check_id<'gc, Id: CollectorId>() {
@@ -110,11 +126,22 @@ fn basic<'gc>() {
     // We explicitly skipped the only trace field
     assert!(!<UnsafeSkipped<'gc> as Trace>::NEEDS_TRACE);
     /*
-     * We (unsafely) claimed drop-safety, so we shouldn't generate a destructor
+     * We (unsafely) claimed drop-safety (w/ `unsafe_skip_drop`),
+     * so we shouldn't generate a destructor
      *
      * GcSafe::NEEDS_DROP should already be false (since we have no Drop fields),
      * however in this case `std::mem::needs_drop` is false since we have no dummy drop impl.
      */
     assert!(!<UnsafeSkipped<'gc> as GcSafe>::NEEDS_DROP);
     assert!(!std::mem::needs_drop::<UnsafeSkipped<'gc>>());
+
+    /*
+     * Ensure that `NoDestructorNullTrace` doesn't need to be dropped
+     *
+     * The `nop_trace` automatically implies `unsafe_skip_drop` (safely)
+     */
+    assert_null_trace::<NoDestructorNullTrace>();
+    assert!(!<NoDestructorNullTrace as GcSafe>::NEEDS_DROP);
+    assert!(!std::mem::needs_drop::<NoDestructorNullTrace>());
+
 }
