@@ -2,11 +2,15 @@
 //! that doesn't support multiple threads/contexts.
 //!
 //! In exchange, there is no locking :)
+//!
+//! Also, there is `#![no_std]` support
 
-use std::cell::{Cell, UnsafeCell, RefCell};
-use std::mem::ManuallyDrop;
-use std::fmt::{self, Debug, Formatter};
-use std::marker::PhantomData;
+use core::cell::{Cell, UnsafeCell, RefCell};
+use core::mem::ManuallyDrop;
+use core::fmt::{self, Debug, Formatter};
+use core::marker::PhantomData;
+
+use alloc::boxed::Box;
 
 use slog::{Logger, FnValue, trace, o};
 
@@ -125,7 +129,7 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
         let context = ManuallyDrop::new(Box::new(RawContext {
             logger: logger.clone(), collector,
             shadow_stack: UnsafeCell::new(ShadowStack {
-                last: std::ptr::null_mut(),
+                last: core::ptr::null_mut(),
             }),
             state: Cell::new(ContextState::Active)
         }));
@@ -165,7 +169,7 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
         trace!(
             self.logger, "Beginning collection";
             "ptr" => ?ptr,
-            "shadow_stack" => FnValue(|_| format!("{:?}", shadow_stack.as_vec())),
+            "shadow_stack" => FnValue(|_| alloc::format!("{:?}", shadow_stack.as_vec())),
             "state" => ?self.state,
             "collection_id" => collection_id,
             "original_size" => %self.collector.as_raw().allocated_size(),

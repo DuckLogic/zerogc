@@ -2,12 +2,13 @@
     arbitrary_self_types, // Unfortunately this is required for methods on Gc refs
 )]
 use zerogc::prelude::*;
-use zerogc_simple::{SimpleCollector, SimpleCollectorContext, Gc};
+use zerogc_simple::{SimpleCollector, SimpleCollectorContext, Gc, CollectorId as SimpleCollectorId};
 use zerogc_derive::Trace;
 
 use slog::{Logger, Drain, o};
 
 #[derive(Trace)]
+#[zerogc(collector_id(SimpleCollectorId))]
 struct Tree<'gc> {
     #[zerogc(mutable(public))]
     children: GcCell<Option<(Gc<'gc, Tree<'gc>>, Gc<'gc, Tree<'gc>>)>>,

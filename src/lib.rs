@@ -30,6 +30,8 @@ use core::marker::PhantomData;
 use core::hash::{Hash, Hasher};
 use core::fmt::{self, Debug, Formatter};
 
+use zerogc_derive::unsafe_gc_impl;
+
 #[macro_use]
 mod manually_traced;
 pub mod cell;
@@ -767,26 +769,24 @@ impl<T> DerefMut for AssumeNotTraced<T> {
         &mut self.0
     }
 }
-
-unsafe impl<T> Trace for AssumeNotTraced<T> {
-    const NEEDS_TRACE: bool = false;
-    #[inline(always)] // This method does nothing and is always a win to inline
-    fn visit<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
-        Ok(())
-    }
+unsafe_gc_impl! {
+    target => AssumeNotTraced<T>,
+    params => [T],
+    bounds => {
+        // Unconditionally implement all traits
+        Trace => always,
+        TraceImmutable => always,
+        GcSafe => always,
+        GcRebrand => { where T: 'new_gc },
+        GcErase => { where T: 'min }
+    },
+    null_trace => always,
+    branded_type => AssumeNotTraced<T>,
+    erased_type => AssumeNotTraced<T>,
+    NEEDS_TRACE => false,
+    NEEDS_DROP => core::mem::needs_drop::<T>(),
+    visit => |self, visitor| { /* nop */ Ok(()) }
 }
-unsafe impl<T> TraceImmutable for AssumeNotTraced<T> {
-    #[inline(always)]
-    fn visit_immutable<V: GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
-        Ok(())
-    }
-}
-unsafe impl<T> NullTrace for AssumeNotTraced<T> {}
-/// No tracing implies GcSafe
-unsafe impl<T> GcSafe for AssumeNotTraced<T> {
-    const NEEDS_DROP: bool = core::mem::needs_drop::<T>();
-}
-unsafe_gc_brand!(AssumeNotTraced, T);
 
 /// Changes all references to garbage collected
 /// objects to match a specific lifetime.
@@ -801,6 +801,12 @@ pub unsafe trait GcRebrand<'new_gc, Id: CollectorId>: Trace {
     /// This must have the same in-memory repr as `Self`,
     /// so that it's safe to transmute.
     type Branded: Trace + 'new_gc;
+
+    /// Assert this type can be rebranded
+    ///
+    /// Only used by procedural derive
+    #[doc(hidden)]
+    fn assert_rebrand() {}
 }
 /// Indicates that it's safe to erase all GC lifetimes
 /// and change them to 'static (logically an 'unsafe)
@@ -815,6 +821,12 @@ pub unsafe trait GcErase<'a, Id: CollectorId>: Trace {
     /// This must have the same in-memory repr as `Self`,
     /// so that it's safe to transmute.
     type Erased: 'a;
+
+    /// Assert this type can be erased
+    ///
+    /// Only used by procedural derive
+    #[doc(hidden)]
+    fn assert_erase() {}
 }
 
 /// Indicates that a type can be traced by a garbage collector.

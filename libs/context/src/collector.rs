@@ -1,9 +1,10 @@
 //! The interface to a collector
 
-use std::fmt::{self, Debug, Formatter};
-use std::sync::Arc;
-use std::ptr::NonNull;
-use std::marker::PhantomData;
+use core::fmt::{self, Debug, Formatter};
+use core::ptr::NonNull;
+use core::marker::PhantomData;
+
+use alloc::sync::Arc;
 
 use slog::{Logger, o};
 
@@ -137,7 +138,7 @@ pub unsafe trait CollectorPtr<C: RawCollectorImpl<Ptr=Self>>: Copy + Eq
 /// This is implemented as a
 /// raw pointer via [Arc::into_raw]
 unsafe impl<C: RawCollectorImpl<Ptr=Self>> CollectorPtr<C> for NonNull<C> {
-    type Weak = std::sync::Weak<C>;
+    type Weak = alloc::sync::Weak<C>;
 
     #[inline]
     unsafe fn from_raw(ptr: *mut C) -> Self {
@@ -150,7 +151,7 @@ unsafe impl<C: RawCollectorImpl<Ptr=Self>> CollectorPtr<C> for NonNull<C> {
     unsafe fn clone_owned(&self) -> Self {
         let original = Arc::from_raw(self.as_ptr());
         let cloned = Arc::clone(&original);
-        std::mem::forget(original);
+        core::mem::forget(original);
         NonNull::new_unchecked(Arc::into_raw(cloned) as *mut _)
     }
 
@@ -189,7 +190,7 @@ unsafe impl<C: RawCollectorImpl<Ptr=Self>> CollectorPtr<C> for NonNull<C> {
     unsafe fn create_weak(&self) -> Self::Weak {
         let arc = Arc::from_raw(self.as_ptr());
         let weak = Arc::downgrade(&arc);
-        std::mem::forget(arc);
+        core::mem::forget(arc);
         weak
     }
 }
@@ -288,8 +289,8 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     unsafe fn assume_valid_system(&self) -> &Self::System {
         // TODO: Make the API nicer? (avoid borrowing and indirection)
         assert_eq!(
-            std::mem::size_of::<Self>(),
-            std::mem::size_of::<CollectorRef<C>>()
+            core::mem::size_of::<Self>(),
+            core::mem::size_of::<CollectorRef<C>>()
         );
         &*(self as *const CollectorId<C> as *const CollectorRef<C>)
     }

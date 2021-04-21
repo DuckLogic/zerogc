@@ -1,7 +1,7 @@
 [package]
 name = "zerogc-derive"
 description = "Procedural derive for zerogc's garbage collection"
-version = "0.1.4"
+version = "0.2.0-alpha.1"
 authors = ["Techcable <Techcable@techcable.net>"]
 repository = "https://github.com/DuckLogic/zerogc"
 readme = "../../README.md"
@@ -12,10 +12,10 @@ edition = "2018"
 proc-macro = true
 
 [dev-dependencies]
-zerogc = { version = "0.1.3", path = "../.." }
+zerogc = { version = "0.2.0-alpha.1", path = "../.." }
 
 [dependencies]
 # Proc macros
-syn = "1.0.55"
+syn = { version = "1.0.55", features = ["full", "extra-traits"] }
 quote = "1.0.8"
 proc-macro2 = "1"

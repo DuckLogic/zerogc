@@ -1,9 +1,12 @@
 //! Implementation of [::zerogc::GcHandle]
 //!
 //! Inspired by [Mono's Lock free Gc Handles](https://www.mono-project.com/news/2016/08/16/lock-free-gc-handles/)
-use std::ptr::NonNull;
-use std::marker::PhantomData;
-use std::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
+use core::ptr::{self, NonNull};
+use core::marker::PhantomData;
+use core::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use zerogc::{Trace, GcSafe, GcErase, GcRebrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
 use crate::{Gc, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef, CollectionManager};
@@ -39,7 +42,7 @@ pub struct GcHandleList<C: RawHandleImpl> {
 }
 impl<C: RawHandleImpl> GcHandleList<C> {
     pub fn new() -> Self {
-        use std::ptr::null_mut;
+        use core::ptr::null_mut;
         GcHandleList {
             last_bucket: AtomicPtr::new(null_mut()),
             last_free_slot: AtomicPtr::new(null_mut()),
@@ -54,7 +57,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
         debug_assert_eq!(
             (*slot).valid.value
                 .load(Ordering::SeqCst),
-            std::ptr::null_mut()
+            ptr::null_mut()
         );
         let mut last_free = self.last_free_slot
             .load(Ordering::Acquire);
@@ -128,7 +131,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
                     debug_assert_eq!(
                         (*slot).valid.value
                             .load(Ordering::SeqCst),
-                        std::ptr::null_mut()
+                        ptr::null_mut()
                     );
                     /*
                      * We own the slot, initialize it to point to
@@ -297,7 +300,7 @@ impl<C: RawHandleImpl> GcHandleBucket<C> {
             .skip(last_alloc) {
             // TODO: All these fences must be horrible on ARM
             if slot.valid.value.compare_exchange(
-                std::ptr::null_mut(), value,
+                ptr::null_mut(), value,
                 Ordering::AcqRel,
                 Ordering::Relaxed
             ).is_ok() {
@@ -547,15 +550,18 @@ impl<T: GcSafe, C: RawHandleImpl> Drop for GcHandle<T, C> {
             debug_assert!(!inner.value
                 .load(Ordering::SeqCst)
                 .is_null(),
-                          "Pointer already invalid"
+                "Pointer already invalid"
             );
             let prev = inner.refcnt
                 .fetch_sub(1, Ordering::AcqRel);
             match prev {
                 0 => {
-                    // This should be impossible.
-                    eprintln!("GcHandle refcnt Underflow");
-                    std::process::abort();
+                    /*
+                     * This should be impossible.
+                     *
+                     * I believe it's undefined behavior!
+                     */
+                    panic!("UB: GcHandle refcnt overflow")
                 },
                 1 => {
                     // Free underlying memory
@@ -564,7 +570,7 @@ impl<T: GcSafe, C: RawHandleImpl> Drop for GcHandle<T, C> {
             }
             // Mark the value as freed
             inner.value.store(
-                std::ptr::null_mut(),
+                ptr::null_mut(),
                 Ordering::Release
             );
             unsafe {

@@ -1,7 +1,10 @@
 use crate::collector::RawCollectorImpl;
 use crate::{ContextState, ShadowStack, CollectorRef};
-use std::mem::ManuallyDrop;
-use std::fmt::Debug;
+
+use core::mem::ManuallyDrop;
+use core::fmt::Debug;
+
+use alloc::boxed::Box;
 
 /// The internal state of the collector
 ///
