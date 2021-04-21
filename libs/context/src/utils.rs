@@ -1,9 +1,9 @@
 //! Utilities for the context library
 //!
 //! Also used by some collector implementations.
-use std::fmt::{self, Debug, Formatter, Display};
+use core::fmt::{self, Debug, Formatter, Display};
 #[cfg(not(feature = "sync"))]
-use std::cell::Cell;
+use core::cell::Cell;
 
 #[cfg(feature = "sync")]
 pub type AtomicCell<T> = ::crossbeam_utils::atomic::AtomicCell<T>;
@@ -39,21 +39,38 @@ impl<T: Copy> AtomicCell<T> {
 pub enum ThreadId {
     #[allow(unused)]
     Nop,
+    #[cfg(feature = "std")]
     Enabled {
         id: std::thread::ThreadId,
         name: Option<String>
     }
 }
 impl ThreadId {
+    #[cfg(feature = "std")]
     pub fn current() -> ThreadId {
+        // NOTE: It's okay: `sync` requires std
         let thread = std::thread::current();
         ThreadId::Enabled {
             id: thread.id(),
             name: thread.name().map(String::from)
         }
     }
+    #[cfg(not(feature = "std"))]
+    #[inline]
+    pub fn current() -> ThreadId {
+        ThreadId::Nop
+    }
 }
 impl slog::Value for ThreadId {
+    #[cfg(not(feature = "std"))]
+    fn serialize(
+        &self, _record: &slog::Record,
+        _key: &'static str,
+        _serializer: &mut dyn slog::Serializer
+    ) -> slog::Result<()> {
+        Ok(()) // Nop
+    }
+    #[cfg(feature = "std")]
     fn serialize(
         &self, _record: &slog::Record,
         key: &'static str,
@@ -81,9 +98,11 @@ impl Debug for ThreadId {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match *self {
             ThreadId::Nop => f.write_str("ThreadId(??)"),
+            #[cfg(feature = "std")]
             ThreadId::Enabled { id, name: None } => {
                 write!(f, "{:?}", id)
             },
+            #[cfg(feature = "std")]
             ThreadId::Enabled { id, name: Some(ref name) } => {
                 f.debug_tuple("ThreadId")
                     .field(&id)

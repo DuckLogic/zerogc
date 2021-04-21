@@ -1,4 +1,7 @@
-/// Thread safe state
+//! Thread safe state
+//!
+//! Note that this module has full permission to use
+//! the standard library in all its glory.
 use std::cell::{Cell, UnsafeCell};
 use std::sync::atomic::{Ordering, AtomicBool};
 use std::mem::ManuallyDrop;

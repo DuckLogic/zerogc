@@ -3,10 +3,27 @@
     untagged_unions, // I want to avoid ManuallyDrop in unions
     const_fn, // Apparently this feature is unstable???
 )]
+#![cfg_attr(not(feature = "std"), no_std)]
 //! The implementation of [::zerogc::CollectorContext] that is
 //! shared among both thread-safe and thread-unsafe code.
-use std::mem::ManuallyDrop;
-use std::fmt::{self, Debug, Formatter};
+
+/*
+ * NOTE: Allocation is still needed for internals
+ *
+ * Uses:
+ * 1. `Box` for each handle
+ * 2. `Vec` for listing buckets of handles
+ * 3. `Arc` and `Box` for boxing context state
+ * 
+ * TODO: Should we drop these uses entirely?
+ */
+extern crate alloc;
+
+use core::mem::ManuallyDrop;
+use core::fmt::{self, Debug, Formatter};
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use zerogc::prelude::*;
 
@@ -183,7 +200,7 @@ unsafe impl<C: RawCollectorImpl> GcContext for CollectorContext<C> {
             let result = func(&mut *sub_context, value);
             debug_assert!(!sub_context.root);
             // No need to run drop code on context.....
-            std::mem::forget(sub_context);
+            core::mem::forget(sub_context);
             debug_assert_eq!((*self.raw).state(), ContextState::Active);
             result
         })
@@ -233,7 +250,7 @@ impl<C: RawCollectorImpl> ShadowStack<C> {
     }
     #[inline]
     pub unsafe fn reverse_iter(&self) -> impl Iterator<Item=C::GcDynPointer> + '_ {
-        std::iter::successors(
+        core::iter::successors(
             self.last.as_ref(),
             |link| link.prev.as_ref()
         ).map(|link| link.element)
