@@ -37,6 +37,7 @@ use std::alloc::Layout;
 mod malloc;
 #[cfg(feature = "small-objects")]
 mod small_objects;
+mod utils;
 
 /// The most basic interface to allocation
 ///
