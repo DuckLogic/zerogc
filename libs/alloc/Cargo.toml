@@ -22,5 +22,5 @@ default = ["malloc", "sync"]
 malloc = []
 # Enable support for "small object" allocators
 small-objects = ["once_cell"]
-# Support thread-safety (for all collectors)
+# Support thread-safety (for all allocators)
 sync = ["parking_lot", "once_cell/parking_lot", "crossbeam-utils"]

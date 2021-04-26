@@ -22,12 +22,12 @@
     allocator_api, // We allocate via the standard API
     slice_ptr_get, // We want to have NonNull::as_mut
     untagged_unions, // This should already be stable....
+    const_panic, // Used to verify sizes
 )]
 // Features required for 'small object' allocator
 #![cfg_attr(feature = "small-objects", feature(
     new_uninit, // Needed to allocate fixed-size arrays via `Box<[SmallArena; NUM_ARENAS]>`
     cell_update, // Cell::update is just useful :)
-    generic_associated_types, // Used to be generic over 'std::cell::MutRef' and `MutextGuard`
 ))]
 
 use std::ptr::NonNull;
@@ -35,8 +35,7 @@ use std::alloc::Layout;
 
 #[cfg(feature = "malloc")]
 mod malloc;
-#[cfg(feature = "small-objects")]
-mod small_objects;
+pub mod free_lists;
 mod utils;
 
 /// The most basic interface to allocation
