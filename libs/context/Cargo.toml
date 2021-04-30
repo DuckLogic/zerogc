@@ -12,7 +12,7 @@ edition = "2018"
 zerogc = { path = "../..", version = "0.2.0-alpha.1" }
 once_cell = { version = "1.5", optional = true }
 # Concurrency
-parking_lot = { version = "0.11", features = ["nightly"], optional = true }
+parking_lot = { version = "0.11", optional = true }
 crossbeam-utils = { version = "0.8", optional = true }
 # Logging
 slog = "2.7"
