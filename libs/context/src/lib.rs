@@ -1,7 +1,6 @@
 #![feature(
     negative_impls, // !Send is much cleaner than `PhantomData<Rc>`
     untagged_unions, // I want to avoid ManuallyDrop in unions
-    const_fn, // Apparently this feature is unstable???
     const_fn_trait_bound, // So generics + const fn are unstable, huh?
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
