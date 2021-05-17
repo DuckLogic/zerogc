@@ -1,6 +1,6 @@
 [package]
 name = "zerogc"
-version = "0.2.0-alpha.2"
+version = "0.2.0-alpha.3"
 authors = ["Techcable <Techcable@techcable.net>"]
 description = "Zero overhead tracing garbage collection for rust"
 repository = "https://github.com/DuckLogic/zerogc"
@@ -14,7 +14,7 @@ readme = "README.md"
 # gives zerogc 'batteries included' support.
 indexmap = { version = "1.6", optional = true }
 # Used for macros
-zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.2" }
+zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.3" }
 
 [workspace]
 members = ["libs/simple", "libs/derive", "libs/context"]
