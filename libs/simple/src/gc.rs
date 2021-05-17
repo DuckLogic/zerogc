@@ -17,7 +17,6 @@ use super::CollectorId as SimpleCollectorId;
 #[repr(C)]
 pub struct Gc<'gc, T: GcSafe + 'gc> {
     ptr: NonNull<T>,
-    id: SimpleCollectorId,
     marker: PhantomData<&'gc T>
 }
 impl<'gc, T: GcSafe + 'gc> Gc<'gc, T> {
@@ -29,16 +28,27 @@ impl<'gc, T: GcSafe + 'gc> Gc<'gc, T> {
     pub fn value(&self) -> &'gc T {
        unsafe { &*(&self.ptr as *const NonNull<T> as *const &T) }
     }
+    #[inline]
+    unsafe fn header(&self) -> *mut super::GcHeader {
+        super::GcHeader::from_value_ptr(
+            self.value() as *const T as *mut T,
+            <T as super::StaticGcType>::STATIC_TYPE
+        )
+    }
 }
 unsafe impl<'gc, T: GcSafe + 'gc> GcRef<'gc, T> for Gc<'gc, T> {
     type Id = SimpleCollectorId;
-    #[inline(always)]
+    #[inline]
     fn collector_id(&self) -> Self::Id {
-        self.id
+        unsafe {
+            (*self.header()).collector_id
+        }
     }
-    #[inline(always)]
+    #[inline]
     unsafe fn from_raw(id: SimpleCollectorId, ptr: NonNull<T>) -> Self {
-        Gc { ptr, id, marker: PhantomData }
+        let res = Gc { ptr, marker: PhantomData };
+        debug_assert_eq!(res.collector_id(), id);
+        res
     }
     #[inline(always)]
     fn value(&self) -> &'gc T {
@@ -51,7 +61,7 @@ unsafe impl<'gc, T: GcSafe + 'gc> GcRef<'gc, T> for Gc<'gc, T> {
     #[inline(always)]
     fn system(&self) -> &'_ <Self::Id as CollectorId>::System {
         // This assumption is safe - see the docs
-        unsafe { self.id.assume_valid_system() }
+        unsafe { (*self.header()).collector_id.assume_valid_system() }
     }
 }
 unsafe impl<'gc, O, V> ::zerogc::GcDirectBarrier<'gc, Gc<'gc, O>> for Gc<'gc, V>

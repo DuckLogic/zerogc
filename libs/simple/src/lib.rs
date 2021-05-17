@@ -276,25 +276,27 @@ impl SimpleAlloc {
         if let Some(arena) = self.small_arenas.find::<T>() {
             let header = arena.alloc();
             unsafe {
+                let collector_id = match self.collector_id {
+                    Some(collector) => collector,
+                    None => {
+                        #[cfg(debug_assertions)] {
+                            unreachable!("Invalid collector id")
+                        }
+                        #[cfg(not(debug_assertions))] {
+                            std::hint::unreachable_unchecked()
+                        }
+                    }
+                };
                 header.as_ptr().write(GcHeader::new(
                     T::STATIC_TYPE,
-                    MarkState::White.to_raw(self.mark_inverted())
+                    MarkState::White.to_raw(self.mark_inverted()),
+                    collector_id
                 ));
                 let value_ptr = header.as_ref().value().cast::<T>();
                 value_ptr.write(value);
                 self.add_allocated_size(small_object_size::<T>());
                 Gc::from_raw(
-                    match self.collector_id {
-                        Some(collector) => collector,
-                        None => {
-                            #[cfg(debug_assertions)] {
-                                unreachable!("Invalid collector id")
-                            }
-                            #[cfg(not(debug_assertions))] {
-                                std::hint::unreachable_unchecked()
-                            }
-                        }
-                    },
+                    collector_id,
                     NonNull::new_unchecked(value_ptr),
                 )
             }
@@ -306,7 +308,8 @@ impl SimpleAlloc {
         let mut object = Box::new(BigGcObject {
             header: GcHeader::new(
                 T::STATIC_TYPE,
-                MarkState::White.to_raw(self.mark_inverted())
+                MarkState::White.to_raw(self.mark_inverted()),
+                self.collector_id.unwrap()
             ),
             static_value: ManuallyDrop::new(value),
             prev: BigObjectLink::new(self.big_object_link.item()),
@@ -810,11 +813,12 @@ struct GcHeader {
      * Do we really need to use atomic stores?
      */
     raw_state: AtomicCell<RawMarkState>,
+    collector_id: CollectorId
 }
 impl GcHeader {
     #[inline]
-    pub fn new(type_info: &'static GcType, raw_state: RawMarkState) -> Self {
-        GcHeader { type_info, raw_state: AtomicCell::new(raw_state) }
+    pub fn new(type_info: &'static GcType, raw_state: RawMarkState, collector_id: CollectorId) -> Self {
+        GcHeader { type_info, raw_state: AtomicCell::new(raw_state), collector_id }
     }
     #[inline]
     pub fn value(&self) -> *mut c_void {
