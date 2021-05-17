@@ -31,14 +31,14 @@ use std::any::TypeId;
 
 use slog::{Logger, FnValue, debug};
 
-use zerogc::{GcSafe, Trace, GcVisitor};
+use zerogc::{GcSafe, Trace, GcVisitor, GcRef};
 
 use zerogc_context::utils::{ThreadId, AtomicCell, MemorySize};
 
 use crate::alloc::{SmallArenaList, small_object_size};
 
 use zerogc_context::collector::{RawSimpleAlloc};
-use zerogc_context::handle::{GcHandleList, RawHandleImpl};
+use zerogc_context::handle::{GcHandleList, RawHandleImpl, RawHandleImplHack};
 use zerogc_context::{
     CollectionManager as AbstractCollectionManager,
     RawContext as AbstractRawContext
@@ -67,6 +67,9 @@ mod alloc {
         pub fn find<T>(&self) -> Option<FakeArena> { None }
     }
 }
+mod gc;
+
+pub use self::gc::Gc;
 
 #[cfg(feature = "sync")]
 type RawContext<C> = zerogc_context::state::sync::RawContext<C>;
@@ -81,14 +84,14 @@ type CollectionManager<C> = zerogc_context::state::nosync::CollectionManager<C>;
 pub type SimpleCollector = ::zerogc_context::CollectorRef<RawSimpleCollector>;
 pub type SimpleCollectorContext = ::zerogc_context::CollectorContext<RawSimpleCollector>;
 pub type CollectorId = ::zerogc_context::CollectorId<RawSimpleCollector>;
-pub type Gc<'gc, T> = ::zerogc::Gc<'gc, T, CollectorId>;
 
 #[cfg(not(feature = "multiple-collectors"))]
 static GLOBAL_COLLECTOR: AtomicPtr<RawSimpleCollector> = AtomicPtr::new(std::ptr::null_mut());
 
-unsafe impl RawSimpleAlloc for RawSimpleCollector {
+unsafe impl<'gc, T: GcSafe + 'gc> RawSimpleAlloc<'gc, T> for RawSimpleCollector {
+    type Gc = Gc<'gc, T>;
     #[inline]
-    fn alloc<'gc, T>(context: &'gc SimpleCollectorContext, value: T) -> Gc<'gc, T> where T: GcSafe + 'gc {
+    fn alloc(context: &'gc SimpleCollectorContext, value: T) -> Gc<'gc, T> where T: GcSafe + 'gc {
         context.collector().heap.allocator.alloc(value)
     }
 }
@@ -115,6 +118,9 @@ unsafe impl RawHandleImpl for RawSimpleCollector {
     fn handle_list(&self) -> &GcHandleList<Self> {
         &self.handle_list
     }
+}
+impl<'gc, T: GcSafe + 'gc> RawHandleImplHack<'gc, T> for RawSimpleCollector {
+    type Gc = Gc<'gc, T>;
 }
 
 /// A wrapper for [GcHandleList] that implements [DynTrace]
@@ -464,14 +470,6 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
         raw_ptr
     }
 
-    #[inline(always)]
-    unsafe fn gc_write_barrier<'gc, T, V>(
-        _owner: &Gc<'gc, T>,
-        _value: &Gc<'gc, V>,
-        _field_offset: usize
-    ) where T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {
-        // Simple GC doesn't need write barriers
-    }
     #[inline]
     fn logger(&self) -> &Logger {
         &self.logger
@@ -673,11 +671,11 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
     type Err = !;
 
     #[inline]
-    unsafe fn visit_gc<'gc, T, Id>(
-        &mut self, gc: &mut ::zerogc::Gc<'gc, T, Id>
+    unsafe fn visit_gc<'gc, T, G>(
+        &mut self, gc: &mut G
     ) -> Result<(), Self::Err>
-        where T: GcSafe + 'gc, Id: ::zerogc::CollectorId {
-        if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
+        where T: GcSafe + 'gc, G: GcRef<'gc, T> {
+        if TypeId::of::<G::Id>() == TypeId::of::<crate::CollectorId>() {
             /*
              * Since the `TypeId`s match, we know the generic `Id`
              * matches our own `crate::CollectorId`.
@@ -685,8 +683,8 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
              * `Gc` into its more specific type.
              */
             let gc = std::mem::transmute::<
-                &mut ::zerogc::Gc<'gc, T, Id>,
-                &mut ::zerogc::Gc<'gc, T, crate::CollectorId>
+                &mut G,
+                &mut crate::gc::Gc<'gc, T>
             >(gc);
             /*
              * Check the collectors match. Otherwise we're mutating

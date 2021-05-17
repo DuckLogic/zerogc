@@ -305,7 +305,7 @@ unsafe_gc_impl! {
 
 #[cfg(test)]
 mod test {
-    use crate::dummy_impl::{DummyCollectorId, Gc};
+    use crate::dummy_impl::{DummyCollectorId, DummyGc as Gc};
     use zerogc_derive::Trace;
     use crate::prelude::*;
     use std::marker::PhantomData;

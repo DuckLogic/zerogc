@@ -9,7 +9,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use zerogc::{Trace, GcSafe, GcErase, GcRebrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
-use crate::{Gc, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef, CollectionManager};
+use crate::{GcRef, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef, CollectionManager};
 use crate::collector::RawCollectorImpl;
 
 const INITIAL_HANDLE_CAPACITY: usize = 64;
@@ -22,6 +22,13 @@ pub unsafe trait RawHandleImpl: RawCollectorImpl {
     fn type_info_of<T: GcSafe>() -> &'static Self::TypeInfo;
 
     fn handle_list(&self) -> &GcHandleList<Self>;
+}
+/// A type hack on [RawHandleImpl] to get the associated type
+/// of [::zerogc::GcRef]
+///
+/// This is needed because we don't have generic associated types (yet)
+pub trait RawHandleImplHack<'gc, T: GcSafe + 'gc>: RawHandleImpl {
+    type Gc: GcRef<'gc, T, Id=CollectorId<Self>>;
 }
 
 /// Concurrent list of [GcHandle]s
@@ -438,9 +445,10 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C
 }
 unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
     where T: GcSafe, T: GcRebrand<'new_gc, CollectorId<C>>,
-          T::Branded: GcSafe, C: RawHandleImpl {
+          T::Branded: GcSafe, C: RawHandleImplHack<'new_gc, T::Branded> {
+    type Gc = C::Gc;
     #[inline]
-    fn bind_to(&self, context: &'new_gc CollectorContext<C>) -> Gc<'new_gc, T::Branded, CollectorId<C>> {
+    fn bind_to(&self, context: &'new_gc CollectorContext<C>) -> Self::Gc {
         /*
          * We can safely assume the object will
          * be as valid as long as the context.
@@ -465,7 +473,7 @@ unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
             let value = inner.value.load(Ordering::Acquire)
                 as *mut T as *mut T::Branded;
             debug_assert!(!value.is_null());
-            Gc::from_raw(
+            Self::Gc::from_raw(
                 collector,
                 NonNull::new_unchecked(value)
             )
@@ -597,14 +605,15 @@ unsafe impl<T: GcSafe + Sync, C: RawHandleImpl + Sync> Sync for GcHandle<T, C> {
 
 /// We support handles
 unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for CollectorRef<C>
-    where C: RawHandleImpl,
+    where C: RawHandleImplHack<'gc, T>,
           T: GcSafe + 'gc,
           T: GcErase<'a, CollectorId<C>>,
           T::Erased: GcSafe {
+    type Gc = C::Gc;
     type Handle = GcHandle<T::Erased, C>;
 
     #[inline]
-    fn create_handle(gc: Gc<'gc, T, CollectorId<C>>) -> Self::Handle {
+    fn create_handle(gc: Self::Gc) -> Self::Handle {
         unsafe {
             let collector = gc.collector_id();
             let value = gc.as_raw_ptr();

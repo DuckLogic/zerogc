@@ -15,7 +15,7 @@ pub use crate::{
 // Basic collector types
 pub use crate::{
     GcSystem, GcContext, GcSimpleAlloc,
-    Gc, GcHandle, GcVisitor
+    GcRef, GcHandle, GcVisitor
 };
 // Traits for user code to implement
 pub use crate::{
