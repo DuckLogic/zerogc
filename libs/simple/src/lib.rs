@@ -515,10 +515,10 @@ unsafe impl zerogc_context::collector::SingletonCollector for RawSimpleCollector
          *
          * Exchange with marker pointer while we're initializing.
          */
-        assert!(GLOBAL_COLLECTOR.compare_and_swap(
+        assert_eq!(GLOBAL_COLLECTOR.compare_exchange(
             std::ptr::null_mut(), marker_ptr,
-            Ordering::SeqCst
-        ).is_null(), "Collector already exists");
+            Ordering::SeqCst, Ordering::SeqCst
+        ), Ok(std::ptr::null_mut()), "Collector already exists");
         let mut raw = Box::new(
             unsafe { RawSimpleCollector::with_logger(logger) }
         );
@@ -527,11 +527,11 @@ unsafe impl zerogc_context::collector::SingletonCollector for RawSimpleCollector
         // It shall reign forever!
         let raw = Box::leak(raw);
         assert_eq!(
-            GLOBAL_COLLECTOR.compare_and_swap(
+            GLOBAL_COLLECTOR.compare_exchange(
                 marker_ptr, raw as *mut RawSimpleCollector,
-                Ordering::SeqCst
+                Ordering::SeqCst, Ordering::SeqCst
             ),
-            marker_ptr, "Unexpected modification"
+            Ok(marker_ptr), "Unexpected modification"
         );
     }
 }
