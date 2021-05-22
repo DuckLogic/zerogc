@@ -2,10 +2,11 @@
 //!
 //! This includes references, tuples, primitives, arrays, and everything else in `libcore`.
 //!
-//! `RefCell` and `Cell` are intentionally ignored and do not have implementations.
-//! Some collectors may need write barriers to protect their internals.
+//! `RefCell` and `Cell` require `T: NullTrace` and do not have implementations for other types.
+//! This is because some collectors may need write barriers to protect their internals.
 use core::num::Wrapping;
 use core::marker::PhantomData;
+use core::cell::{RefCell, Cell};
 
 use crate::prelude::*;
 use crate::GcDirectBarrier;
@@ -198,6 +199,40 @@ unsafe_gc_impl! {
         visitor.visit_immutable::<T>(&**self)
     }
 }
+
+
+unsafe_gc_impl!(
+    target => Cell<T>,
+    params => [T: NullTrace],
+    bounds => {
+        GcRebrand => { where T: NullTrace, T: 'new_gc },
+        GcErase => { where T: NullTrace, T: 'min }
+    },
+    branded_type => Self,
+    erased_type => Self,
+    null_trace => always,
+    NEEDS_TRACE => false,
+    NEEDS_DROP => T::NEEDS_DROP,
+    visit => |self, visitor| {
+        Ok(()) /* nop */
+    }
+);
+unsafe_gc_impl!(
+    target => RefCell<T>,
+    params => [T: NullTrace],
+    bounds => {
+        GcRebrand => { where T: NullTrace, T: 'new_gc },
+        GcErase => { where T: NullTrace, T: 'min }
+    },
+    branded_type => Self,
+    erased_type => Self,
+    null_trace => always,
+    NEEDS_TRACE => false,
+    NEEDS_DROP => T::NEEDS_DROP,
+    visit => |self, visitor| {
+        Ok(()) /* nop */
+    }
+);
 
 
 /*
