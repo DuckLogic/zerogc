@@ -1,5 +1,5 @@
 use crate::collector::RawCollectorImpl;
-use crate::{ContextState, ShadowStack, GarbageCollector};
+use crate::{ContextState, ShadowStack, CollectorRef};
 
 use core::mem::ManuallyDrop;
 use core::fmt::Debug;
@@ -47,7 +47,7 @@ pub unsafe trait CollectionManager<C>: self::sealed::Sealed
 /// even if the collector supports multi-threading.
 pub unsafe trait RawContext<C>: Debug + self::sealed::Sealed
     where C: RawCollectorImpl<RawContext=Self> {
-    unsafe fn register_new(collector: &GarbageCollector<C>) -> ManuallyDrop<Box<Self>>;
+    unsafe fn register_new(collector: &CollectorRef<C>) -> ManuallyDrop<Box<Self>>;
     /// Trigger a safepoint for this context.
     ///
     /// This implicitly attempts a collection,

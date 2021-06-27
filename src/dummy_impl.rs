@@ -1,7 +1,11 @@
 //! Dummy collector implementation for testing
 
+use zerogc_derive::unsafe_gc_impl;
 
-use crate::{Trace, TraceImmutable, GcVisitor, NullTrace, CollectorId, GcSafe, GcSystem, GcContext, Gc};
+use crate::{
+    Trace, TraceImmutable, GcVisitor, NullTrace, CollectorId,
+    GcSafe, GcSystem, GcContext, GcRef, GcRebrand, GcErase
+};
 use std::ptr::NonNull;
 use std::marker::PhantomData;
 
@@ -11,7 +15,7 @@ use std::marker::PhantomData;
 /// and will always be valid
 pub fn gc<'gc, T: GcSafe + 'static>(ptr: &'static T) -> DummyGc<'gc, T> {
     unsafe {
-        Gc::from_raw(
+        DummyGc::from_raw(
             DummyCollectorId { _priv: () },
             NonNull::from(ptr)
         )
@@ -32,7 +36,60 @@ pub fn leaked<'gc, T: GcSafe + 'static>(value: T) -> DummyGc<'gc, T> {
 ///
 /// **WARNING:** This never actually collects any garbage.
 /// This is **only for testing purposes**.
-pub type DummyGc<'gc, T> = Gc<'gc, T, DummyCollectorId>;
+#[repr(C)]
+pub struct DummyGc<'gc, T> {
+    ptr: NonNull<T>,
+    id: DummyCollectorId,
+    marker: PhantomData<&'gc T>,
+}
+unsafe impl<'gc, T: GcSafe + 'gc> GcRef<'gc, T> for DummyGc<'gc, T> {
+    type Id = DummyCollectorId;
+    fn collector_id(&self) -> Self::Id {
+        self.id
+    }
+    unsafe fn from_raw(id: DummyCollectorId, ptr: NonNull<T>) -> Self {
+        DummyGc { ptr, id, marker: PhantomData }
+    }
+    fn value(&self) -> &'gc T {
+        unsafe { &*self.ptr.as_ptr() }
+    }
+    unsafe fn as_raw_ptr(&self) -> *mut T {
+        self.ptr.as_ptr()
+    }
+    fn system(&self) -> &'_ <Self::Id as CollectorId>::System {
+        // This assumption is safe - see the docs
+        unsafe { self.id.assume_valid_system() }
+    }
+}
+impl<'gc, T: GcSafe + 'gc> Copy for DummyGc<'gc, T> {}
+impl<'gc, T: GcSafe + 'gc> Clone for DummyGc<'gc, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+unsafe_gc_impl!(
+    target => DummyGc<'gc, T>,
+    params => ['gc, T: GcSafe + 'gc],
+    null_trace => never,
+    bounds => {
+        TraceImmutable => never,
+        GcRebrand => { where T: GcRebrand<'new_gc, Id>, T::Branded: GcSafe },
+        GcErase => { where T: GcErase<'min, Id>, T::Erased: GcSafe }
+    },
+    branded_type => DummyGc<'new_gc, T::Branded>,
+    erased_type => DummyGc<'min, T::Erased>,
+    NEEDS_TRACE => true,
+    NEEDS_DROP => false, // Copy
+    trace_mut => |self, visitor| {
+        unsafe { visitor.visit_gc(self) }
+    }
+);
+impl<'gc, T: GcSafe + 'gc> std::ops::Deref for DummyGc<'gc, T> {
+    type Target = &'gc T;
+    fn deref(&self) -> &&'gc T {
+        unsafe { &*(&self.ptr as *const NonNull<T> as *const &T) }
+    }
+}
 
 /// A dummy implementation of [crate::GcSystem]
 /// which is useful for testing
@@ -94,7 +151,6 @@ impl DummySystem {
 }
 unsafe impl GcSystem for DummySystem {
     type Id = DummyCollectorId;
-    const MOVING: bool = false;
     type Context = DummyContext;
 }
 
@@ -117,21 +173,10 @@ unsafe impl TraceImmutable for DummyCollectorId {
 }
 
 unsafe impl NullTrace for DummyCollectorId {}
-unsafe impl GcSafe for DummyCollectorId {
-    const NEEDS_DROP: bool = false;
-}
 unsafe impl CollectorId for DummyCollectorId {
     type System = DummySystem;
 
-    #[inline]
-    fn determine_from_ref<'gc, T: GcSafe + ?Sized + 'gc>(gc: Gc<'gc, T, Self>) -> &'gc Self {
-        &DummyCollectorId { _priv: () }
-    }
-
-    fn system(&self) -> &Self::System {
+    unsafe fn assume_valid_system(&self) -> &Self::System {
         unimplemented!()
     }
-
-    fn write_barrier<'gc, V, O>(&self, _gc: Gc<'gc, V, Self>,owner: Gc<'gc, O, Self>, field_offset: usize)
-        where O: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {}
 }

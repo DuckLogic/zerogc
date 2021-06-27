@@ -34,8 +34,7 @@ pub mod handle;
 
 use crate::collector::{RawCollectorImpl};
 
-pub(crate) use crate::collector::WeakCollectorRef;
-pub use crate::collector::{GarbageCollector, CollectorId};
+pub use crate::collector::{WeakCollectorRef, CollectorRef, CollectorId};
 pub use crate::state::{CollectionManager, RawContext};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -115,7 +114,7 @@ pub struct CollectorContext<C: RawCollectorImpl> {
     root: bool
 }
 impl<C: RawCollectorImpl> CollectorContext<C> {
-    pub(crate) unsafe fn register_root(collector: &GarbageCollector<C>) -> Self {
+    pub(crate) unsafe fn register_root(collector: &CollectorRef<C>) -> Self {
         CollectorContext {
             raw: Box::into_raw(ManuallyDrop::into_inner(
                 C::RawContext::register_new(&collector)
@@ -163,7 +162,7 @@ impl<C: RawCollectorImpl> Drop for CollectorContext<C> {
     }
 }
 unsafe impl<C: RawCollectorImpl> GcContext for CollectorContext<C> {
-    type System = GarbageCollector<C>;
+    type System = CollectorRef<C>;
     type Id = CollectorId<C>;
 
     #[inline]

@@ -8,11 +8,10 @@ use alloc::sync::Arc;
 
 use slog::{Logger, o};
 
-use zerogc::{GcSafe, GcSystem, Trace, GcSimpleAlloc, NullTrace, TraceImmutable, GcVisitor, Gc};
+use zerogc::{GcRef, GcSafe, GcSystem, Trace, GcSimpleAlloc, NullTrace, TraceImmutable, GcVisitor};
 
 use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
-use std::mem::ManuallyDrop;
 
 /// A specific implementation of a collector
 pub unsafe trait RawCollectorImpl: 'static + Sized {
@@ -21,11 +20,6 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     /// The simple collector implements this as
     /// a trait object pointer.
     type GcDynPointer: Copy + Debug + 'static;
-
-    /// Whether or not this collector is moving
-    ///
-    /// See the docs for [::zerogc::CollectorId::MOVING] for more information.
-    const MOVING: bool;
 
     /// A pointer to this collector
     ///
@@ -50,18 +44,16 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     /// Convert the specified value into a dyn pointer
     unsafe fn create_dyn_pointer<T: Trace>(t: *mut T) -> Self::GcDynPointer;
 
-    /// Determine the collector that owns the specified [Gc] pointer.
-    fn determine_ptr_from_ref<'gc, T>(gc: Gc<'gc, T, CollectorId<Self>>) -> &'gc Self::Ptr
-        where T: GcSafe + ?Sized + 'gc;
-
-    /// Initialize an instance of the collector,
-    /// using an [Arc] to manage the underlying memory
+    /// Initialize an instance of the collector
     ///
-    /// Must panic if the collector is a singleton
-    fn init(logger: Logger) -> Arc<Self>;
+    /// Must panic if the collector is not a singleton
+    fn init(logger: Logger) -> NonNull<Self>;
 
-    /// Create a [CollectorPtr] referring to this pointer
-    fn as_ptr(&self) -> Self::Ptr;
+    /// The id of this collector
+    #[inline]
+    fn id(&self) -> CollectorId<Self> {
+        CollectorId { ptr: unsafe { Self::Ptr::from_raw(self as *const _ as *mut _) } }
+    }
 
     /// The logger associated with this collector
     fn logger(&self) -> &Logger;
@@ -86,39 +78,53 @@ pub unsafe trait SyncCollector: RawCollectorImpl + Sync {
 pub unsafe trait SingletonCollector: RawCollectorImpl<Ptr=PhantomData<&'static Self>> {
     /// When the collector is a singleton,
     /// return the global implementation
-    fn global_ptr() -> &'static Self;
-
-    /// A double indirection to the global pointer
-    fn double_global_ptr() -> &'static &'static Self;
+    fn global_ptr() -> *const Self;
 
     /// Initialize the global singleton
     ///
     /// Panics if already initialized
-    fn init_global(logger: Logger) -> &'static Self;
+    fn init_global(logger: Logger);
+}
+
+impl<C: RawCollectorImpl> PartialEq for CollectorId<C> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+}
+impl<C: RawCollectorImpl> Eq for CollectorId<C> {}
+impl<C: RawCollectorImpl> Clone for CollectorId<C> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<C: RawCollectorImpl> Copy for CollectorId<C> {}
+impl<C: RawCollectorImpl> Debug for CollectorId<C> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("CollectorId");
+        if !C::SINGLETON {
+            debug.field("ptr", &format_args!("{:p}", self.ptr.as_ptr()));
+        }
+        debug.finish()
+    }
 }
 
 /// An unchecked pointer to a collector
-/*
- * TODO: Unify with CollectorRef
- * Wait a second...
- * This is used by `CollectorId`, and when its PhantomData
- * that turns the id into a ZST. Shouldn't we preserve that behavior?
- */
 pub unsafe trait CollectorPtr<C: RawCollectorImpl<Ptr=Self>>: Copy + Eq
-    + self::sealed::SealedPtr + 'static {
+    + self::sealed::Sealed + 'static {
     /// A weak reference to the pointer
     type Weak: Clone + 'static;
 
     unsafe fn from_raw(ptr: *mut C) -> Self;
     unsafe fn clone_owned(&self) -> Self;
-    fn double_ptr(&self) -> &'_ GarbageCollector<C>;
     fn as_ptr(&self) -> *mut C;
     unsafe fn drop(self);
     fn upgrade_weak_raw(weak: &Self::Weak) -> Option<Self>;
     #[inline]
-    fn upgrade_weak(weak: &Self::Weak) -> Option<C::Ptr> {
+    fn upgrade_weak(weak: &Self::Weak) -> Option<CollectorRef<C>> {
         match Self::upgrade_weak_raw(weak) {
-            Some(ptr) => Some(ptr),
+            Some(ptr) => Some(CollectorRef { ptr }),
             None => None
         }
     }
@@ -143,13 +149,6 @@ unsafe impl<C: RawCollectorImpl<Ptr=Self>> CollectorPtr<C> for NonNull<C> {
         let cloned = Arc::clone(&original);
         core::mem::forget(original);
         NonNull::new_unchecked(Arc::into_raw(cloned) as *mut _)
-    }
-
-    #[inline]
-    fn double_ptr(&self) -> &GarbageCollector<C> {
-        unsafe {
-            &*(self as *const Self as *mut *mut C as *mut GarbageCollector<C>)
-        }
     }
 
     #[inline]
@@ -192,14 +191,14 @@ unsafe impl<C: RawCollectorImpl<Ptr=Self>> CollectorPtr<C> for NonNull<C> {
     }
 }
 /// Dummy implementation
-impl<C: RawCollectorImpl<Ptr=Self>> self::sealed::SealedPtr for NonNull<C> {}
+impl<C: RawCollectorImpl> self::sealed::Sealed for NonNull<C> {}
 unsafe impl<C: SingletonCollector<Ptr=Self>> CollectorPtr<C> for PhantomData<&'static C> {
     type Weak = PhantomData<&'static C>;
 
     #[inline]
     unsafe fn from_raw(ptr: *mut C) -> Self {
         assert!(C::SINGLETON, "Expected a singleton");
-        debug_assert_eq!(ptr, C::global_ptr() as *const C as *mut C);
+        debug_assert_eq!(ptr, C::global_ptr() as *mut _);
         PhantomData
     }
 
@@ -211,17 +210,7 @@ unsafe impl<C: SingletonCollector<Ptr=Self>> CollectorPtr<C> for PhantomData<&'s
     #[inline]
     fn as_ptr(&self) -> *mut C {
         assert!(C::SINGLETON, "Expected a singleton");
-        C::global_ptr() as *const C as *mut C
-    }
-    #[inline]
-    fn double_ptr(&self) -> &'_ GarbageCollector<C> {
-        assert!(C::SINGLETON, "Expected a singleton");
-        unsafe {
-            std::mem::transmute::<
-                &'static &'static C,
-                &'static GarbageCollector<C>
-            >(C::double_global_ptr())
-        }
+        C::global_ptr() as *mut C
     }
 
     #[inline]
@@ -245,7 +234,7 @@ unsafe impl<C: SingletonCollector<Ptr=Self>> CollectorPtr<C> for PhantomData<&'s
     }
 }
 /// Dummy implementation
-impl<C: SingletonCollector<Ptr=Self>> self::sealed::SealedPtr for PhantomData<&'static C> {}
+impl<C: SingletonCollector> self::sealed::Sealed for PhantomData<&'static C> {}
 
 /// Uniquely identifies the collector in case there are
 /// multiple collectors.
@@ -254,53 +243,43 @@ impl<C: SingletonCollector<Ptr=Self>> self::sealed::SealedPtr for PhantomData<&'
 /// we need to use a pointer to tell them apart.
 /// Otherwise, this is a zero-sized structure.
 ///
-/// This type is a marker type. It can never be created.
+/// As long as our memory is valid,
+/// it implies this pointer is too.
+#[repr(C)]
 pub struct CollectorId<C: RawCollectorImpl> {
-    pub(crate) collector: C::Ptr
+    /// This is in essence a borrowed reference to
+    /// the collector.
+    ///
+    /// Depending on whether or not the collector is a singleton,
+    ///
+    /// We don't know whether the underlying memory will be valid.
+    ptr: C::Ptr,
 }
-impl<C: RawCollectorImpl> Eq for CollectorId<C> {}
-impl<C: RawCollectorImpl> PartialEq for CollectorId<C> {
+impl<C: RawCollectorImpl> CollectorId<C> {
     #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        if C::SINGLETON {
-            true
-        } else {
-            std::ptr::eq(self.collector.as_ptr(), other.collector.as_ptr())
-        }
+    pub const unsafe fn from_raw(ptr: C::Ptr) -> CollectorId<C> {
+        CollectorId { ptr }
     }
-}
-impl<C: RawCollectorImpl> Debug for CollectorId<C> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CollectorId")
-            .field("type", &std::any::type_name::<C>())
-            .field("ptr", &format_args!("{:p}", self.collector.as_ptr()))
-            .finish()
+    #[inline]
+    pub unsafe fn as_ref(&self) -> &C {
+        &*self.ptr.as_ptr()
+    }
+    #[inline]
+    pub unsafe fn weak_ref(&self) -> WeakCollectorRef<C> {
+        WeakCollectorRef { weak: self.ptr.create_weak() }
     }
 }
 unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
-    type System = GarbageCollector<C>;
+    type System = CollectorRef<C>;
 
     #[inline]
-    fn system(&self) -> &Self::System {
-        unsafe {
-            &*self.collector.double_ptr()
-        }
-    }
-
-    #[inline(always)] // NOP
-    fn write_barrier<'gc, V, O>(&self, _gc: Gc<'gc, V, Self>, _owner: Gc<'gc, O, Self>, _field_offset: usize)
-        where O: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {
-        // TODO: what if the collector doesn't have a NOP implementation?
-    }
-
-    #[inline]
-    fn determine_from_ref<'gc, T: GcSafe + ?Sized + 'gc>(gc: Gc<'gc, T, Self>) -> &'gc Self {
-        unsafe {
-            std::mem::transmute::<
-                &'gc C::Ptr,
-                &'gc CollectorId<C>
-            >(C::determine_ptr_from_ref(gc))
-        }
+    unsafe fn assume_valid_system(&self) -> &Self::System {
+        // TODO: Make the API nicer? (avoid borrowing and indirection)
+        assert_eq!(
+            core::mem::size_of::<Self>(),
+            core::mem::size_of::<CollectorRef<C>>()
+        );
+        &*(self as *const CollectorId<C> as *const CollectorRef<C>)
     }
 }
 unsafe impl<C: RawCollectorImpl> Trace for CollectorId<C> {
@@ -317,151 +296,66 @@ unsafe impl<C: RawCollectorImpl> TraceImmutable for CollectorId<C> {
     }
 }
 unsafe impl<C: RawCollectorImpl> NullTrace for CollectorId<C> {}
-unsafe impl<C: RawCollectorImpl> GcSafe for CollectorId<C> {
-    const NEEDS_DROP: bool = false;
-}
 
-pub(crate) struct WeakCollectorRef<C: RawCollectorImpl> {
-    pub(crate) weak: <C::Ptr as CollectorPtr<C>>::Weak,
+pub struct WeakCollectorRef<C: RawCollectorImpl> {
+    weak: <C::Ptr as CollectorPtr<C>>::Weak,
 }
 impl<C: RawCollectorImpl> WeakCollectorRef<C> {
     #[inline]
-    pub unsafe fn assume_valid(&self) -> C::Ptr {
-         C::Ptr::assume_weak_valid(&self.weak)
+    pub unsafe fn assume_valid(&self) -> CollectorId<C> {
+        CollectorId { ptr: C::Ptr::assume_weak_valid(&self.weak) }
     }
-    pub fn ensure_valid<R>(&self, func: impl FnOnce(C::Ptr) -> R) -> R {
+    pub fn ensure_valid<R>(&self, func: impl FnOnce(CollectorId<C>) -> R) -> R {
         self.try_ensure_valid(|id| match id{
             Some(id) => func(id),
             None => panic!("Dead collector")
         })
     }
     #[inline]
-    pub fn try_ensure_valid<R>(&self, func: impl FnOnce(Option<C::Ptr>) -> R) -> R{
-        func(C::Ptr::upgrade_weak(&self.weak))
+    pub fn try_ensure_valid<R>(&self, func: impl FnOnce(Option<CollectorId<C>>) -> R) -> R{
+        func(C::Ptr::upgrade_weak(&self.weak).map(|r| r.id()))
     }
 }
 
 pub unsafe trait RawSimpleAlloc<'gc, T>: RawCollectorImpl 
     where T: GcSafe + 'gc {
+    /// The type of GC references that are returned
+    type Gc: GcRef<'gc, T, Id=CollectorId<Self>>;
     /// Allocate a new garbage collected reference
     fn alloc(
         context: &'gc CollectorContext<Self>,
         value: T
-    ) -> Gc<'gc, T, CollectorId<Self>>;
+    ) -> Self::Gc;
 }
 unsafe impl<'gc, T, C> GcSimpleAlloc<'gc, T> for CollectorContext<C>
     where T: GcSafe + 'gc, C: RawSimpleAlloc<'gc, T> {
+    type Gc = C::Gc;
     #[inline]
-    fn alloc(&'gc self, value: T) -> Gc<'gc, T, CollectorId<C>> {
+    fn alloc(&'gc self, value: T) -> C::Gc {
         C::alloc(self, value)
     }
 }
 
-
-/// An internal reference to a garbage collector.\
+/// A reference to the collector.
 ///
-/// When an implementation is a singleton,
-/// this is a `&'static C'.
-///
-/// When using multiple collectors, this is an [Arc].
-/// Reference counting is needed to ensure the collector
-/// lives longer than its longest [GcContext].
-/*
- * TODO: Consider panicking if a GcContext outlives its owning GarbageCollector.
- * It seems unintuitive that a GcContext can implicitly extend the lifetime
- * of its logically owning GarbageCollector
- */
-#[doc(hidden)]
+/// TODO: Devise better name
+#[repr(C)]
 pub struct CollectorRef<C: RawCollectorImpl> {
-    ptr: NonNull<C>,
-    marker: PhantomData<Arc<C>>
-}
-impl<C: RawCollectorImpl> CollectorRef<C> {
-    #[inline]
-    unsafe fn dangling() -> Self {
-        CollectorRef {
-            ptr: NonNull::dangling(),
-            marker: PhantomData
-        }
-    }
-    #[inline]
-    fn from_arc(arc: Arc<C>) -> Self {
-        assert!(!C::SINGLETON);
-        CollectorRef {
-            ptr: unsafe { NonNull::new_unchecked(Arc::into_raw(arc) as *mut C) },
-            marker: PhantomData
-        }
-    }
-    #[inline]
-    fn from_static(s: &'static C) -> Self {
-        assert!(C::SINGLETON);
-        CollectorRef { ptr: NonNull::from(s), marker: PhantomData }
-    }
-    #[inline]
-    pub(crate) fn create_weak(&self) -> WeakCollectorRef<C> {
-        WeakCollectorRef {
-            weak: unsafe { self.as_raw().as_ptr().create_weak() }
-        }
-    }
-    #[inline]
-    pub(crate) fn as_raw(&self) -> &C {
-        unsafe { self.ptr.as_ref() }
-    }
-    /// Steal an [Arc] referring to the underlying collector.
+    /// When using singleton collectors, this is a ZST.
     ///
-    /// ## Safety
-    /// Undefined behavior if the [Arc] is dropped while this reference
-    /// is still in use.
+    /// When using multiple collectors, this is just an [Arc].
     ///
-    /// Must never be used with singleton collectors.
-    #[inline]
-    unsafe fn steal_arc(&self) -> ManuallyDrop<Arc<C>> {
-        assert!(!C::SINGLETON);
-        ManuallyDrop::new(Arc::from_raw(self.ptr.as_ptr() as *const C))
-    }
-    #[inline]
-    fn into_arc(self) -> Arc<C> {
-        unsafe { ManuallyDrop::into_inner(self.steal_arc()) }
-    }
-}
-impl<C: RawCollectorImpl> Clone for CollectorRef<C> {
-    fn clone(&self) -> Self {
-        if !C::SINGLETON {
-            unsafe {
-                Arc::increment_strong_count(self.ptr.as_ptr() as *const C);
-            }
-        }
-        CollectorRef { ptr: self.ptr, marker: PhantomData }
-    }
-}
-impl<C: RawCollectorImpl> Drop for CollectorRef<C> {
-    fn drop(&mut self) {
-        if !C::SINGLETON {
-            unsafe {
-                drop(ManuallyDrop::into_inner(self.steal_arc()));
-            }
-        }
-    }
-}
-
-/// A garbage collector
-///
-/// This is a wrapper around a [RawCollectorImpl],
-/// that manages the shared "context" code relating to [GcContext]
-/// and the implementation of shadow stacks.
-#[repr(transparent)]
-pub struct GarbageCollector<C: RawCollectorImpl> {
-    raw_ref: ManuallyDrop<CollectorRef<C>>,
-    marker: PhantomData<C>
+    /// It is implemented as a raw pointer around [Arc::into_raw]
+    ptr: C::Ptr
 }
 /// We actually are thread safe ;)
-unsafe impl<C: SyncCollector> Send for GarbageCollector<C> {}
+unsafe impl<C: SyncCollector> Send for CollectorRef<C> {}
 #[cfg(feature = "sync")]
-unsafe impl<C: SyncCollector> Sync for GarbageCollector<C> {}
+unsafe impl<C: SyncCollector> Sync for CollectorRef<C> {}
 
 /// Internal trait for initializing a collector
 #[doc(hidden)]
-pub trait CollectorInit<C: RawCollectorImpl> {
+pub trait CollectorInit<C: RawCollectorImpl<Ptr=Self>>: CollectorPtr<C> {
     fn create() -> CollectorRef<C> {
         Self::with_logger(Logger::root(
             slog::Discard,
@@ -474,65 +368,57 @@ pub trait CollectorInit<C: RawCollectorImpl> {
 impl<C: RawCollectorImpl<Ptr=NonNull<C>>> CollectorInit<C> for NonNull<C> {
     fn with_logger(logger: Logger) -> CollectorRef<C> {
         assert!(!C::SINGLETON);
-        let raw = C::init(logger);
-        CollectorRef::from_arc(raw)
+        let raw_ptr = C::init(logger);
+        CollectorRef { ptr: raw_ptr }
     }
 }
 impl<C> CollectorInit<C> for PhantomData<&'static C>
     where C: SingletonCollector {
     fn with_logger(logger: Logger) -> CollectorRef<C> {
         assert!(C::SINGLETON);
-        let raw = C::init_global(logger);
-        CollectorRef::from_static(raw)
-   }
+        C::init_global(logger); // TODO: Is this safe?
+        // NOTE: The raw pointer is implicit (now that we're leaked)
+        CollectorRef { ptr: PhantomData }
+    }
 }
 
 
-impl<C: RawCollectorImpl> GarbageCollector<C> {
+impl<C: RawCollectorImpl> CollectorRef<C> {
     #[inline]
-    pub fn create() -> GarbageCollector<C> where C::Ptr: CollectorInit<C> {
-        GarbageCollector::from_raw(<C::Ptr as CollectorInit<C>>::create())
+    pub fn create() -> Self where C::Ptr: CollectorInit<C> {
+        <C::Ptr as CollectorInit<C>>::create()
     }
 
     #[inline]
     pub fn with_logger(logger: Logger) -> Self where C::Ptr: CollectorInit<C> {
-        GarbageCollector::from_raw(<C::Ptr as CollectorInit<C>>::with_logger(logger))
+        <C::Ptr as CollectorInit<C>>::with_logger(logger)
     }
 
     #[inline]
-    pub(crate) fn from_raw(raw: CollectorRef<C>) -> Self {
-        GarbageCollector { raw_ref: ManuallyDrop::new(raw), marker: PhantomData }
+    pub(crate) fn clone_internal(&self) -> CollectorRef<C> {
+        CollectorRef { ptr: unsafe { self.ptr.clone_owned() } }
     }
 
-    /// The underlying collector
-    ///
-    /// ## Safety
-    /// This is marked unsafe as a more of a lint.
-    ///
-    /// It is possible the internal implementation of the collector may
-    /// have semi-private state that users shouldn't access.
-    ///
-    /// Regardless, users shouldn't be accessing this in the vast majority of cases.
     #[inline]
-    pub unsafe fn as_raw(&self) -> &C {
-        self.raw_ref.as_raw()
+    pub fn as_raw(&self) -> &C {
+        unsafe { &*self.ptr.as_ptr() }
     }
 
-    /// An internal reference to the collector
+    /// The id of this collector
     #[inline]
-    pub(crate) fn as_ref(&self) -> &CollectorRef<C> {
-        &self.raw_ref
+    pub fn id(&self) -> CollectorId<C> {
+        CollectorId { ptr: self.ptr  }
     }
 
     /// Convert this collector into a unique context
     ///
     /// The single-threaded implementation only allows a single context,
-    /// so this method is necessary to support it.
+    /// so this method is nessicary to support it.
     pub fn into_context(self) -> CollectorContext<C> {
         unsafe { CollectorContext::register_root(&self) }
     }
 }
-impl<C: SyncCollector> GarbageCollector<C> {
+impl<C: SyncCollector> CollectorRef<C> {
 
     /// Create a new context bound to this collector
     ///
@@ -542,47 +428,18 @@ impl<C: SyncCollector> GarbageCollector<C> {
         unsafe { CollectorContext::register_root(&self) }
     }
 }
-impl<C: RawCollectorImpl> Drop for GarbageCollector<C> {
+impl<C: RawCollectorImpl> Drop for CollectorRef<C> {
+    #[inline]
     fn drop(&mut self) {
-        if C::SINGLETON {
-            // Singletons live forever
-        } else {
-            let raw_ref = std::mem::replace(
-                &mut self.raw_ref,
-                ManuallyDrop::new(unsafe { CollectorRef::dangling() })
-            );
-            let arc = ManuallyDrop::into_inner(raw_ref).into_arc();
-            if !std::thread::panicking() {
-                /*
-                 * Check that there are no outstanding references to the collector.
-                 * This may happen if a GcContext outlives its parent GarbageCollector.
-                 * A GarbageCollector is the logical owner of all its child contexts,
-                 * and its unintuitive if the child context outlives the parent collector.
-                 * However, if we are already panicking, we ignore this check.
-                 * A double-panic triggers an abort, which would be unhelpful.
-                 */
-                match Arc::try_unwrap(arc) {
-                    Ok(inner) => drop::<C>(inner),
-                    Err(arc) => {
-                        panic!("Multiple outstanding references to collector: {}", Arc::strong_count(&arc) - 1)
-                    }
-                }
-            } else {
-                drop(arc);
-            }
-        }
+        unsafe { self.ptr.drop(); }
     }
 }
 
-unsafe impl<C: RawCollectorImpl> GcSystem for GarbageCollector<C> {
+unsafe impl<C: RawCollectorImpl> GcSystem for CollectorRef<C> {
     type Id = CollectorId<C>;
-    const MOVING: bool = C::MOVING;
     type Context = CollectorContext<C>;
 }
 
 mod sealed {
-    use crate::collector::{CollectorInit, RawCollectorImpl};
-
-    // TODO: This is stupid
-    pub trait SealedPtr {}
+    pub trait Sealed {}
 }
