@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 
 use slog::{Logger, o};
 
-use zerogc::{GcRef, GcSafe, GcSystem, Trace, GcSimpleAlloc, NullTrace, TraceImmutable, GcVisitor};
+use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc, NullTrace, TraceImmutable, GcVisitor};
 
 use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
@@ -54,7 +54,11 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     fn id(&self) -> CollectorId<Self> {
         CollectorId { ptr: unsafe { Self::Ptr::from_raw(self as *const _ as *mut _) } }
     }
-
+    unsafe fn gc_write_barrier<'gc, T, V>(
+        owner: &Gc<'gc, T, CollectorId<Self>>,
+        value: &Gc<'gc, V, CollectorId<Self>>,
+        field_offset: usize
+    ) where T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc;
     /// The logger associated with this collector
     fn logger(&self) -> &Logger;
 
@@ -272,6 +276,15 @@ impl<C: RawCollectorImpl> CollectorId<C> {
 unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     type System = CollectorRef<C>;
 
+    #[inline(always)]
+    unsafe fn gc_write_barrier<'gc, T, V>(
+        owner: &Gc<'gc, T, Self>,
+        value: &Gc<'gc, V, Self>,
+        field_offset: usize
+    ) where T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {
+        C::gc_write_barrier(owner, value, field_offset)
+    }
+
     #[inline]
     unsafe fn assume_valid_system(&self) -> &Self::System {
         // TODO: Make the API nicer? (avoid borrowing and indirection)
@@ -317,21 +330,13 @@ impl<C: RawCollectorImpl> WeakCollectorRef<C> {
     }
 }
 
-pub unsafe trait RawSimpleAlloc<'gc, T>: RawCollectorImpl 
-    where T: GcSafe + 'gc {
-    /// The type of GC references that are returned
-    type Gc: GcRef<'gc, T, Id=CollectorId<Self>>;
-    /// Allocate a new garbage collected reference
-    fn alloc(
-        context: &'gc CollectorContext<Self>,
-        value: T
-    ) -> Self::Gc;
+pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
+    fn alloc<'gc, T: GcSafe + 'gc>(context: &'gc CollectorContext<Self>, value: T) -> Gc<'gc, T, CollectorId<Self>>;
 }
 unsafe impl<'gc, T, C> GcSimpleAlloc<'gc, T> for CollectorContext<C>
-    where T: GcSafe + 'gc, C: RawSimpleAlloc<'gc, T> {
-    type Gc = C::Gc;
+    where T: GcSafe + 'gc, C: RawSimpleAlloc {
     #[inline]
-    fn alloc(&'gc self, value: T) -> C::Gc {
+    fn alloc(&'gc self, value: T) -> Gc<'gc, T, Self::Id> {
         C::alloc(self, value)
     }
 }

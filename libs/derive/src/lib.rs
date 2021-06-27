@@ -601,9 +601,9 @@ fn impl_extras(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, E
                     let barrier = quote_spanned!(field.span() => #zerogc_crate::GcDirectBarrier::write_barrier(&value, &self, offset));
                     extra_items.push(quote! {
                         #[inline] // TODO: Implement `GcDirectBarrier` ourselves
-                        #mutator_vis fn #mutator_name<G>(self: G, value: #value_ref_type)
-                            where G: #zerogc_crate::GcRef<#gc_lifetime, Self>,
-                                   #value_ref_type: #zerogc_crate::GcDirectBarrier<#gc_lifetime, G> {
+                        #mutator_vis fn #mutator_name<Id>(self: #zerogc_crate::Gc<#gc_lifetime, Self, Id>, value: #value_ref_type)
+                            where Id: #zerogc_crate::CollectorId,
+                                   #value_ref_type: #zerogc_crate::GcDirectBarrier<#gc_lifetime, #zerogc_crate::Gc<#gc_lifetime, Self, Id>> {
                             unsafe {
                                 let target_ptr = #field_as_ptr;
                                 let offset = target_ptr as usize - self.as_raw_ptr() as usize;
