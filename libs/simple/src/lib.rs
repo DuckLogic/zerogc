@@ -31,18 +31,19 @@ use std::any::TypeId;
 
 use slog::{Logger, FnValue, debug};
 
-use zerogc::{GcSafe, Trace, GcVisitor, GcRef};
+use zerogc::{GcSafe, Trace, GcVisitor,};
 
 use zerogc_context::utils::{ThreadId, AtomicCell, MemorySize};
 
 use crate::alloc::{SmallArenaList, small_object_size};
 
-use zerogc_context::collector::{RawSimpleAlloc};
-use zerogc_context::handle::{GcHandleList, RawHandleImpl, RawHandleImplHack};
+use zerogc_context::collector::{RawSimpleAlloc, RawCollectorImpl};
+use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 use zerogc_context::{
     CollectionManager as AbstractCollectionManager,
     RawContext as AbstractRawContext
 };
+use std::marker::PhantomData;
 
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
@@ -67,9 +68,9 @@ mod alloc {
         pub fn find<T>(&self) -> Option<FakeArena> { None }
     }
 }
-mod gc;
 
-pub use self::gc::Gc;
+/// An alias for [Gc](::zerogc::Gc), with its id set to use the simple collector.
+pub type Gc<'gc, T> = ::zerogc::Gc<'gc, T, CollectorId>;
 
 #[cfg(feature = "sync")]
 type RawContext<C> = zerogc_context::state::sync::RawContext<C>;
@@ -81,7 +82,7 @@ type RawContext<C> = zerogc_context::state::nosync::RawContext<C>;
 type CollectionManager<C> = zerogc_context::state::nosync::CollectionManager<C>;
 
 
-pub type SimpleCollector = ::zerogc_context::CollectorRef<RawSimpleCollector>;
+pub type SimpleCollector = ::zerogc_context::GarbageCollector<RawSimpleCollector>;
 pub type SimpleCollectorContext = ::zerogc_context::CollectorContext<RawSimpleCollector>;
 pub type CollectorId = ::zerogc_context::CollectorId<RawSimpleCollector>;
 
@@ -89,7 +90,6 @@ pub type CollectorId = ::zerogc_context::CollectorId<RawSimpleCollector>;
 static GLOBAL_COLLECTOR: AtomicPtr<RawSimpleCollector> = AtomicPtr::new(std::ptr::null_mut());
 
 unsafe impl<'gc, T: GcSafe + 'gc> RawSimpleAlloc<'gc, T> for RawSimpleCollector {
-    type Gc = Gc<'gc, T>;
     #[inline]
     fn alloc(context: &'gc SimpleCollectorContext, value: T) -> Gc<'gc, T> where T: GcSafe + 'gc {
         context.collector().heap.allocator.alloc(value)
@@ -118,9 +118,6 @@ unsafe impl RawHandleImpl for RawSimpleCollector {
     fn handle_list(&self) -> &GcHandleList<Self> {
         &self.handle_list
     }
-}
-impl<'gc, T: GcSafe + 'gc> RawHandleImplHack<'gc, T> for RawSimpleCollector {
-    type Gc = Gc<'gc, T>;
 }
 
 /// A wrapper for [GcHandleList] that implements [DynTrace]
@@ -428,6 +425,7 @@ pub struct RawSimpleCollector {
 
 unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector {
     type GcDynPointer = NonNull<dyn DynTrace>;
+    const MOVING: bool = false;
 
     #[cfg(feature = "multiple-collectors")]
     type Ptr = NonNull<Self>;
@@ -454,13 +452,24 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
         )
     }
 
+    #[inline]
+    fn determine_ptr_from_ref<'gc, T>(gc: Gc<'gc, T>) -> &'gc Self::Ptr where T: GcSafe + ?Sized + 'gc {
+        #[cfg(feature = "multiple-collectors")] {
+            if std::ptr::metadata()
+            unsafe { &(*GcHeader::for_gc::<'gc, T>(gc)).collector_ptr }
+        }
+        #[cfg(not(feature = "multiple-collectors"))] {
+            &PhantomData
+        }
+    }
+
     #[cfg(not(feature = "multiple-collectors"))]
     fn init(_logger: Logger) -> NonNull<Self> {
         panic!("Not a singleton")
     }
 
     #[cfg(feature = "multiple-collectors")]
-    fn init(logger: Logger) -> NonNull<Self> {
+    fn init(logger: Logger) -> Arc<Self> {
         // We're assuming its safe to create multiple (as given by config)
         let raw = unsafe { RawSimpleCollector::with_logger(logger) };
         let mut collector = Arc::new(raw);
@@ -471,6 +480,10 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
             .heap.allocator.collector_id = Some(unsafe { CollectorId::from_raw(raw_ptr) });
         std::mem::forget(collector); // We own it as a raw pointer...
         raw_ptr
+    }
+
+    fn as_ptr(&self) -> Self::Ptr {
+        todo!()
     }
 
     #[inline]
@@ -674,11 +687,11 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
     type Err = !;
 
     #[inline]
-    unsafe fn visit_gc<'gc, T, G>(
-        &mut self, gc: &mut G
+    unsafe fn visit_gc<'gc, T, Id>(
+        &mut self, gc: &mut ::zerogc::Gc<'gc, T, Id>
     ) -> Result<(), Self::Err>
-        where T: GcSafe + 'gc, G: GcRef<'gc, T> {
-        if TypeId::of::<G::Id>() == TypeId::of::<crate::CollectorId>() {
+        where T: GcSafe + ?Sized + 'gc, Id: ::zerogc::CollectorId {
+        if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
             /*
              * Since the `TypeId`s match, we know the generic `Id`
              * matches our own `crate::CollectorId`.
@@ -686,8 +699,8 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
              * `Gc` into its more specific type.
              */
             let gc = std::mem::transmute::<
-                &mut G,
-                &mut crate::gc::Gc<'gc, T>
+                &mut ::zerogc::Gc<'gc, T, Id>,
+                &mut ::zerogc::Gc<'gc, T, CollectorId>
             >(gc);
             /*
              * Check the collectors match. Otherwise we're mutating
@@ -813,12 +826,20 @@ struct GcHeader {
      * Do we really need to use atomic stores?
      */
     raw_state: AtomicCell<RawMarkState>,
-    collector_id: CollectorId
+    #[cfg(feature = "multiple-collectors")]
+    collector_ptr: *mut ::zerogc_context::collector::CollectorRef<RawSimpleCollector>
 }
 impl GcHeader {
     #[inline]
+    pub(crate) unsafe fn for_gc<'gc, T: GcSafe + 'gc>(gc: Gc<'gc,  T>) -> *mut Self {
+        GcHeader::from_value_ptr(
+            gc.value(),
+            <T as StaticGcType>::STATIC_TYPE
+        )
+    }
+    #[inline]
     pub fn new(type_info: &'static GcType, raw_state: RawMarkState, collector_id: CollectorId) -> Self {
-        GcHeader { type_info, raw_state: AtomicCell::new(raw_state), collector_id }
+        GcHeader { type_info, raw_state: AtomicCell::new(raw_state), collector_ptr: collector_id }
     }
     #[inline]
     pub fn value(&self) -> *mut c_void {

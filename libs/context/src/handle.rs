@@ -8,9 +8,9 @@ use core::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use zerogc::{Trace, GcSafe, GcErase, GcRebrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
-use crate::{GcRef, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef, CollectionManager};
-use crate::collector::RawCollectorImpl;
+use zerogc::{Trace, GcSafe, GcErase, GcRebrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle, Gc};
+use crate::{WeakCollectorRef, CollectorId, CollectorContext, GarbageCollector, CollectionManager};
+use crate::collector::{RawCollectorImpl, CollectorPtr};
 
 const INITIAL_HANDLE_CAPACITY: usize = 64;
 
@@ -22,13 +22,6 @@ pub unsafe trait RawHandleImpl: RawCollectorImpl {
     fn type_info_of<T: GcSafe>() -> &'static Self::TypeInfo;
 
     fn handle_list(&self) -> &GcHandleList<Self>;
-}
-/// A type hack on [RawHandleImpl] to get the associated type
-/// of [::zerogc::GcRef]
-///
-/// This is needed because we don't have generic associated types (yet)
-pub trait RawHandleImplHack<'gc, T: GcSafe + 'gc>: RawHandleImpl {
-    type Gc: GcRef<'gc, T, Id=CollectorId<Self>>;
 }
 
 /// Concurrent list of [GcHandle]s
@@ -421,7 +414,7 @@ impl<T: GcSafe, C: RawHandleImpl> GcHandle<T, C> {
     }
 }
 unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C> {
-    type System = CollectorRef<C>;
+    type System = GarbageCollector<C>;
     type Id = CollectorId<C>;
 
     fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R {
@@ -435,7 +428,7 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C
              * This is preferable to using `recursive_read`,
              * since that could starve writers (collectors).
              */
-            C::Manager::prevent_collection(collector.as_ref(), || {
+            C::Manager::prevent_collection(&*collector.as_ptr(), || {
                 let value = self.inner.as_ref().value
                     .load(Ordering::Acquire) as *mut T;
                 func(&*value)
@@ -444,11 +437,10 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C
     }
 }
 unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
-    where T: GcSafe, T: GcRebrand<'new_gc, CollectorId<C>>,
-          T::Branded: GcSafe, C: RawHandleImplHack<'new_gc, T::Branded> {
-    type Gc = C::Gc;
+    where T: GcSafe, T: GcRebrand<'new_gc, CollectorId<C>>, C: RawHandleImpl,
+          T::Branded: GcSafe {
     #[inline]
-    fn bind_to(&self, context: &'new_gc CollectorContext<C>) -> Self::Gc {
+    fn bind_to(&self, context: &'new_gc CollectorContext<C>) -> Gc<'new_gc, T::Branded, CollectorId<C>>{
         /*
          * We can safely assume the object will
          * be as valid as long as the context.
@@ -465,7 +457,7 @@ unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
         unsafe {
             let collector = self.collector.assume_valid();
             assert_eq!(
-                collector.as_ref() as *const C,
+                collector.as_ptr() as *const C,
                 context.collector() as *const C,
                 "Collectors mismatch"
             );
@@ -473,8 +465,8 @@ unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
             let value = inner.value.load(Ordering::Acquire)
                 as *mut T as *mut T::Branded;
             debug_assert!(!value.is_null());
-            Self::Gc::from_raw(
-                collector,
+            Gc::from_raw(
+                CollectorId { collector },
                 NonNull::new_unchecked(value)
             )
         }
@@ -502,7 +494,9 @@ impl<T: GcSafe, C: RawHandleImpl> Clone for GcHandle<T, C> {
     fn clone(&self) -> Self {
         // NOTE: Dead collector -> invalid handle
         let collector = self.collector
-            .ensure_valid(|id| unsafe { id.weak_ref() });
+            .ensure_valid(|id| unsafe { WeakCollectorRef {
+                weak: id.create_weak()
+            } });
         let inner = unsafe { self.inner.as_ref() };
         debug_assert!(
             !inner.value
@@ -513,7 +507,7 @@ impl<T: GcSafe, C: RawHandleImpl> Clone for GcHandle<T, C> {
         let mut old_refcnt = inner.refcnt.load(Ordering::Relaxed);
         loop {
             assert_ne!(
-                old_refcnt, isize::max_value() as usize,
+                old_refcnt, isize::MAX as usize,
                 "Reference count overflow"
             );
             /*
@@ -552,7 +546,7 @@ impl<T: GcSafe, C: RawHandleImpl> Drop for GcHandle<T, C> {
                      */
                     return;
                 },
-                Some(ref id) => unsafe { id.as_ref() },
+                Some(ref id) => unsafe { &*id.as_ptr() },
             };
             let inner = unsafe { self.inner.as_ref() };
             debug_assert!(!inner.value
@@ -604,20 +598,19 @@ unsafe impl<T: GcSafe + Sync, C: RawHandleImpl + Sync> Send for GcHandle<T, C> {
 unsafe impl<T: GcSafe + Sync, C: RawHandleImpl + Sync> Sync for GcHandle<T, C> {}
 
 /// We support handles
-unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for CollectorRef<C>
-    where C: RawHandleImplHack<'gc, T>,
+unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for GarbageCollector<C>
+    where C: RawHandleImpl,
           T: GcSafe + 'gc,
           T: GcErase<'a, CollectorId<C>>,
           T::Erased: GcSafe {
-    type Gc = C::Gc;
     type Handle = GcHandle<T::Erased, C>;
 
     #[inline]
-    fn create_handle(gc: Self::Gc) -> Self::Handle {
+    fn create_handle(gc: Gc<'gc, T, CollectorId<C>>) -> Self::Handle {
         unsafe {
-            let collector = gc.collector_id();
+            let collector = gc.system();
             let value = gc.as_raw_ptr();
-            let raw = collector.as_ref().handle_list()
+            let raw = collector.as_raw().handle_list()
                 .alloc_raw_handle(value as *mut ());
             /*
              * WARN: Undefined Behavior
@@ -631,7 +624,7 @@ unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for CollectorRef<C>
                 Ordering::Release
             );
             raw.refcnt.store(1, Ordering::Release);
-            let weak_collector = collector.weak_ref();
+            let weak_collector = collector.as_ref().create_weak();
             GcHandle::new(NonNull::from(raw), weak_collector)
         }
     }

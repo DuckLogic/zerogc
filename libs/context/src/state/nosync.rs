@@ -14,8 +14,8 @@ use alloc::boxed::Box;
 
 use slog::{Logger, FnValue, trace, o};
 
-use crate::{CollectorRef, ShadowStack, ContextState};
-use crate::collector::RawCollectorImpl;
+use crate::{GarbageCollector, ShadowStack, ContextState};
+use crate::collector::{RawCollectorImpl, CollectorRef};
 
 /// Manages coordination of garbage collections
 ///
@@ -23,7 +23,7 @@ use crate::collector::RawCollectorImpl;
 /// differences from single-threaded collection
 pub struct CollectionManager<C: RawCollectorImpl> {
     /// Implicit collector ref
-    _marker: PhantomData<CollectorRef<C>>,
+    _marker: PhantomData<GarbageCollector<C>>,
     /// Access to the internal state
     state: RefCell<CollectorState>,
     /// Whether a collection is currently in progress
@@ -87,7 +87,7 @@ pub struct RawContext<C: RawCollectorImpl> {
     /// Since we're the only context, we should (logically)
     /// be the only owner.
     ///
-    /// This is still an Arc for easier use alongside the
+    /// This may still be an Arc for easier use alongside the
     /// thread-safe implementation
     pub(crate) collector: CollectorRef<C>,
     // NOTE: We are Send, not Sync
@@ -115,7 +115,7 @@ impl<C: RawCollectorImpl> Debug for RawContext<C> {
 impl<C: RawCollectorImpl> super::sealed::Sealed for RawContext<C> {}
 unsafe impl<C> super::RawContext<C> for RawContext<C>
     where C: RawCollectorImpl<RawContext=Self, Manager=CollectionManager<C>> {
-    unsafe fn register_new(collector: &CollectorRef<C>) -> ManuallyDrop<Box<Self>> {
+    unsafe fn register_new(collector: &GarbageCollector<C>) -> ManuallyDrop<Box<Self>> {
         assert!(!C::SYNC);
         // NOTE: Nosync collector must have only **ONE** context
         assert!(
@@ -124,7 +124,7 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
             "Already created a context for the collector!"
         );
         // Assume ownership
-        let collector = collector.clone_internal();
+        let collector = collector.as_ref().clone();
         let logger = collector.as_raw().logger().new(o!());
         let context = ManuallyDrop::new(Box::new(RawContext {
             logger: logger.clone(), collector,
@@ -179,7 +179,7 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
             self.state.replace(ContextState::Active),
             ContextState::SafePoint { collection_id }
         );
-        assert!(self.collector.as_raw().manager().collecting.replace(false));
+        assert!((&*self.collector.as_raw()).manager().collecting.replace(false));
     }
 
     #[inline]

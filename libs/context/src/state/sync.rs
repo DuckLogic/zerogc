@@ -13,9 +13,9 @@ use parking_lot::{Mutex, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWrite
 use slog::{Logger, FnValue, trace, Drain, o};
 
 use super::{ShadowStack, ContextState};
-use crate::{RawCollectorImpl, CollectorRef};
+use crate::{RawCollectorImpl, GarbageCollector};
 use crate::utils::ThreadId;
-use crate::collector::SyncCollector;
+use crate::collector::{SyncCollector, CollectorRef};
 
 /// Manages coordination of garbage collections
 ///
@@ -104,7 +104,7 @@ unsafe impl<C> super::CollectionManager<C> for CollectionManager<C>
          * context's shadow stack, so unfreezing it while in progress
          * could trigger undefined behavior!!!!!
          */
-        context.collector.as_raw().prevent_collection(|_| {
+        (&*context.collector.as_raw()).prevent_collection(|_| {
             assert_eq!(context.state.get(), ContextState::Frozen);
             context.state.set(ContextState::Active);
         })
@@ -150,14 +150,14 @@ impl<C: RawCollectorImpl> Debug for RawContext<C> {
 impl<C: SyncCollector> super::sealed::Sealed for RawContext<C> {}
 unsafe impl<C> super::RawContext<C> for RawContext<C>
     where C: SyncCollector<RawContext=Self, Manager=CollectionManager<C>> {
-    unsafe fn register_new(collector: &CollectorRef<C>) -> ManuallyDrop<Box<Self>> {
+    unsafe fn register_new(collector: &GarbageCollector<C>) -> ManuallyDrop<Box<Self>> {
         let original_thread = if collector.as_raw().logger().is_trace_enabled() {
             ThreadId::current()
         } else {
             ThreadId::Nop
         };
         let mut context = ManuallyDrop::new(Box::new(RawContext {
-            collector: collector.clone_internal(),
+            collector: collector.as_ref().clone(),
             original_thread: original_thread.clone(),
             logger: collector.as_raw().logger().new(o!(
                 "original_thread" => original_thread.clone()
@@ -297,7 +297,7 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
 
     #[inline]
     unsafe fn collector(&self) -> &C {
-        self.collector.as_raw()
+        &*self.collector.as_raw()
     }
 
     #[inline]

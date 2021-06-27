@@ -25,8 +25,10 @@ extern crate alloc;
  */
 use core::mem;
 use core::ops::{Deref, DerefMut};
-use core::ptr::NonNull;
 use core::fmt::Debug;
+use std::marker::PhantomData;
+use std::cell::Cell;
+
 use zerogc_derive::unsafe_gc_impl;
 
 #[macro_use]
@@ -34,6 +36,9 @@ mod manually_traced;
 pub mod cell;
 pub mod prelude;
 pub mod dummy_impl;
+mod gc;
+
+pub use self::gc::Gc;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.
@@ -194,9 +199,17 @@ macro_rules! unfreeze_context {
 /// A garbage collector implementation.
 ///
 /// These implementations should be completely safe and zero-overhead.
-pub unsafe trait GcSystem {
+pub unsafe trait GcSystem: 'static {
     /// The type of collector IDs given by this system
     type Id: CollectorId;
+    /// Whether this collector is a moving/copying collector
+    ///
+    /// If this is false, then once pointer is allocated
+    /// it will never move.
+    ///
+    /// If this is a true, then a collector may (but doesn't have to)
+    /// move pointers once they have been allocated.
+    const MOVING: bool;
     /// The type of contexts used in this sytem
     type Context: GcContext<Id=Self::Id>;
 }
@@ -212,8 +225,6 @@ pub unsafe trait GcHandleSystem<'gc, 'a, T: GcSafe + ?Sized + 'gc>: GcSystem
           <T as GcErase<'a, Self::Id>>::Erased: GcSafe {
     /// The type of handles to this object.
     type Handle: GcHandle<<T as GcErase<'a, Self::Id>>::Erased, System=Self>;
-    /// The type of garbag e collected pointers to this object.
-    type Gc: GcRef<'gc, T, Id=Self::Id>;
 
     /// Create a handle to the specified GC pointer,
     /// which can be used without a context
@@ -222,7 +233,7 @@ pub unsafe trait GcHandleSystem<'gc, 'a, T: GcSafe + ?Sized + 'gc>: GcSystem
     ///
     /// The system is implicit in the [Gc]
     #[doc(hidden)]
-    fn create_handle(gc: Self::Gc) -> Self::Handle;
+    fn create_handle(gc: Gc<'gc, T, Self::Id>) -> Self::Handle;
 }
 
 /// The context of garbage collection,
@@ -255,7 +266,7 @@ pub unsafe trait GcContext: Sized {
     /// The context can't be used for anything (including allocations),
     /// until it is unfrozen.
     ///
-    /// This allows other threds to perform collections while this
+    /// This allows other threads to perform collections while this
     /// thread does other work (without using the GC).
     ///
     /// The current contexts roots are considered invalid
@@ -322,21 +333,18 @@ pub unsafe trait GcContext: Sized {
 /// Some garbage collectors implement more complex interfaces,
 /// so implementing this is optional
 pub unsafe trait GcSimpleAlloc<'gc, T: GcSafe + 'gc>: GcContext + 'gc {
-    /// The type of the garbage collected pointers that are being allocated
-    type Gc: GcRef<'gc, T>;
     /// Allocate the specified object in this garbage collector,
-    /// binding it to the lifetime of this collector.
+    /// binding it to the lifetime of this context.
     ///
     /// The object will never be collected until the next safepoint,
     /// which is considered a mutation by the borrow checker and will be statically checked.
     /// Therefore, we can statically guarantee the pointers will survive until the next safepoint.
     ///
-    /// See `safepoint!` docs on how to properly invoke a safepoint
-    /// and transfer values across it.
+    /// See [safepoint!] docs on how to properly invoke a safepoint.
     ///
-    /// This gives a immutable reference to the resulting object.
+    /// This gives a immutable [Gc] pointer to the resulting object.
     /// Once allocated, the object can only be correctly modified with a `GcCell`
-    fn alloc(&'gc self, value: T) -> Self::Gc;
+    fn alloc(&'gc self, value: T) -> Gc<'gc, T, Self::Id>;
 }
 /// The internal representation of a frozen context
 ///
@@ -361,114 +369,57 @@ impl<C: GcContext> FrozenContext<C> {
     }
 }
 
-/// Uniquely identifies the collector in case there are
-/// multiple collectors.
+/// An unchecked pointer to a garbage collector.
+///
+/// Logically speaking, this functions as borrowed reference `&'gc GcSystem`.
+///
+/// However, it's lifetime is `'static` for convenience with use in [Gc].
+///
+/// Furthermore, some collectors are singletons, and only have a single instance
+/// making it possible for this type to be a zero sized type.
 ///
 /// ## Safety
-/// To simply the typing, this contains no references to the
-/// lifetime of the associated [GcSystem].
+/// It is the user's responsibility to manage the lifetime of this structure.
 ///
-/// It's implicitly held and is unsafe to access.
-/// As long as the collector is valid,
-/// this id should be too.
-///
-/// It should be safe to assume that a collector exists
-/// if any of its pointers still do!
-pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + 'static {
+/// A reference to a collector must never outlive its owning collector.
+pub unsafe trait CollectorId: Sized + Debug + Eq + GcSafe + NullTrace + 'static {
     /// The type of the garbage collector system
     type System: GcSystem<Id=Self>;
 
-    /// Assume the ID is valid and use it to access the [GcSystem]
+    /// Determine the [CollectorId] of the collector that
+    /// owns the specified [Gc] reference.
     ///
-    /// NOTE: The system is bound to the lifetime of *THIS* id.
-    /// A CollectorId may have an internal pointer to the system
-    /// and the pointer may not have a stable address. In other words,
-    /// it may be difficult to reliably take a pointer to a pointer.
+    /// Depending on the [GcSystem], this may require dereferencing the [Gc]'s object header
+    fn determine_from_ref<'gc, T: GcSafe + ?Sized + 'gc>(gc: Gc<'gc, T, Self>) -> &'gc Self;
+
+    /// Access the owning [GcSystem]
+    ///
+    /// Depending on the implementation, it is possible that multiple [GcSystem]s exist.
+    /// In that case, this will likely require dereferencing the pointer.
     ///
     /// ## Safety
-    /// Undefined behavior if the associated collector no longer exists.
-    unsafe fn assume_valid_system(&self) -> &Self::System;
+    /// The returned pointer must be used correctly.
+    fn system(&self) -> &Self::System;
+
+    /// Trigger a write barrier for the specified GC pointer,
+    /// given the specified owning pointer.
+    ///
+    /// See docs for [GcDirectBarrier] for more details.
+    fn write_barrier<'gc, V, O>(&self, gc: Gc<'gc, V, Self>, owner: Gc<'gc, O, Self>, field_offset: usize)
+        where O: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc;
 }
 
-/// A garbage collected pointer to a value.
+/// A magic id that refers to a [GcContext] with a unique lifetime parameter.
 ///
-/// This is the equivalent of a garbage collected smart-pointer.
-/// It's so smart, you can even coerce it to a reference bound to the lifetime of the `GarbageCollectorRef`.
-/// However, all those references are invalidated by the borrow checker as soon as
-/// your reference to the collector reaches a safepoint.
-/// The objects can only survive garbage collection if they live in this smart-pointer.
+/// This has been called "generativity", and the classic example is [safe indexing of arrays without bound checks](https://github.com/bluss/indexing#indexing).
+/// It is described in Chapter 6.3 of [Granko's master thesis](https://raw.githubusercontent.com/Gankro/thesis/master/thesis.pdf)
 ///
-/// The smart pointer is simply a guarantee to the garbage collector
-/// that this points to a garbage collected object with the correct header,
-/// and not some arbitrary bits that you've decided to heap allocate.
-///
-/// Generally this trait isn't what you're looking for.
-/// Each collector should have a separate implementation of this type.
-///
-/// ## Safety
-/// The collector relies upon correct implementation of this trait for memory safety.
-/// Just like [Trace] and [GcRef], incorrect implementation is undefined behavior.
-///
-/// In particular, this must always dereference to the same object,
-/// although it may move during collections for copying collectors.
-pub unsafe trait GcRef<'gc, T: GcSafe + ?Sized + 'gc>: Copy + GcSafe
-    + Deref<Target=&'gc T> {
-    /// The type of the collector's id
-    ///
-    /// Singleton collectors have a zero-sized id.
-    /// However, some types of collectors may
-    /// have multiple active instances and require an id
-    /// to disambiguate between them.
-    type Id: CollectorId;
-    /// The collector's uniquely identification.
-    ///
-    /// Ensure we aren't modifying another
-    /// collector's pointers
-    fn collector_id(&self) -> Self::Id;
-    /// Create a GC pointer from a raw ID/pointer pair
-    ///
-    /// ## Safety
-    /// Undefined behavior if the underlying pointer is not valid
-    /// and associated with the specified collector id.
-    ///
-    /// Collectors may add their own additional invariants
-    /// that callers need to maintain.
-    unsafe fn from_raw(id: Self::Id, value: NonNull<T>) -> Self;
+/// The lifetime `'id` is invariant, meaning that the borrow checker
+/// cannot switch it out with other lifetimes, even if those lifetimes are longer lived.
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub struct GcContextId<'gc>(PhantomData<Cell<&'gc ()>>);
 
-    /// The value of the underlying pointer
-    ///
-    /// Guaranteed to live until the next garbage collection.
-    fn value(&self) -> &'gc T;
-
-    /// Cast this reference to a raw pointer
-    ///
-    /// ## Safety
-    /// It's undefined behavior to mutate the
-    /// value.
-    /// The pointer is only valid as long as
-    /// the underlying reference is.
-    unsafe fn as_raw_ptr(&self) -> *mut T;
-
-    /// Create a handle to this object, which can be used without a context
-    #[inline]
-    fn create_handle<'a>(&self) -> <<Self::Id as CollectorId>::System as GcHandleSystem<'gc, 'a, T>>::Handle
-        // TODO: These type bounds are a monstrosity
-        where <Self::Id as CollectorId>::System: GcHandleSystem<'gc, 'a, T>,
-            <Self::Id as CollectorId>::System: GcHandleSystem<'gc, 'a, T, Gc=Self>,
-              T: GcErase<'a, Self::Id> + 'a,
-              <T as GcErase<'a, Self::Id>>::Erased: GcSafe + 'a {
-        <<Self::Id as CollectorId>::System as GcHandleSystem<'gc, 'a, T>>::create_handle(*self)
-    }
-
-    /// Get a reference to the system
-    ///
-    /// ## Safety
-    /// This is based on the assumption that a [GcSystem] must outlive
-    /// all of the pointers it owns.
-    /// Although it could be restricted to the lifetime of the [CollectorId]
-    /// (in theory that may have an internal pointer) it will still live for '&self'.
-    fn system(&self) -> &'_ <Self::Id as CollectorId>::System;
-}
 /// A owned handle which points to a garbage collected object.
 ///
 /// This is considered a root by the garbage collector that is independent
@@ -525,8 +476,6 @@ pub unsafe trait GcHandle<T: GcSafe + ?Sized>: Clone + NullTrace {
 pub unsafe trait GcBindHandle<'new_gc, T: GcSafe + ?Sized>: GcHandle<T>
     where T: GcRebrand<'new_gc, Self::Id>,
           <T as GcRebrand<'new_gc, Self::Id>>::Branded: GcSafe {
-    /// The type of the rebranded references
-    type Gc: GcRef<'new_gc, <T as GcRebrand<'new_gc, Self::Id>>::Branded>;
     /// Associate this handle with the specified context,
     /// allowing its underlying object to be accessed
     /// as long as the context is valid.
@@ -535,7 +484,7 @@ pub unsafe trait GcBindHandle<'new_gc, T: GcSafe + ?Sized>: GcHandle<T>
     /// other object that would be allocated from the context.
     /// It'll be properly collected and can even be used as a root
     /// at the next safepoint.
-    fn bind_to(&self, context: &'new_gc <Self::System as GcSystem>::Context) -> Self::Gc;
+    fn bind_to(&self, context: &'new_gc <Self::System as GcSystem>::Context) -> Gc<'new_gc, T::Branded, Self::Id>;
 }
 
 /// Safely trigger a write barrier before
@@ -757,11 +706,8 @@ pub unsafe trait Trace {
     /// Some types (like `Gc`) need special actions taken when they're traced,
     /// but those are somewhat rare and are usually already provided by the garbage collector.
     ///
-    /// Unless I explicitly document actions as legal I may decide to change i.
-    /// I am only bound by the constraints of [semantic versioning](http://semver.org/) in the trace function
-    /// if I explicitly document it as safe behavior in this method's documentation.
-    /// If you try something that isn't explicitly documented here as permitted behavior,
-    /// the collector may choose to override your memory with `0xDEADBEEF`.
+    /// Only explicitly document actions as legal. They may change in accordiance with semantic versioning.
+    ///
     /// ## Always Permitted
     /// - Reading your own memory (includes iteration)
     ///   - Interior mutation is undefined behavior, even if you use `GcCell`
@@ -770,18 +716,20 @@ pub unsafe trait Trace {
     /// - Panicking
     ///   - This should be reserved for cases where you are seriously screwed up,
     ///       and can't fulfill your contract to trace your interior properly.
-    ///     - One example is `Gc<T>` which panics if the garbage collectors are mismatched
-    ///   - This rule may change in future versions, depending on how we deal with multi-threading.
+    ///   - This rule may change in future versions, and could possibly trigger an abort.
     /// ## Never Permitted Behavior
     /// - Forgetting a element of a collection, or field of a structure
     ///   - If you forget an element undefined behavior will result
-    ///   - This is why we always prefer automatically derived implementations where possible.
+    ///   - This is why you should always prefer automatically derived implementations where possible.
     ///     - You will never trigger undefined behavior with an automatic implementation,
     ///       and it'll always be completely sufficient for safe code (aside from destructors).
     ///     - With an automatically derived implementation you will never miss a field
     /// - It is undefined behavior to mutate any of your own data.
-    ///   - The mutable `&mut self` is just so copying collectors can relocate GC pointers
-    /// - Invoking this function directly, without delegating to `GcVisitor`
+    ///   - The mutable `&mut self` is needed because copying collectors can relocate GC pointers.
+    ///   - In the future, [Gc] may end up changing and use an `UnsafeCell` for interior mutability,
+    ///     and this may be changed to an immutable reference.
+    /// - Calling external functions, that don't obey these rules.
+    ///   - Calling internal utility functions is fine, so long as they follow these rules.
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err>;
 }
 /// A type that can be safely traced/relocated
@@ -828,7 +776,7 @@ pub unsafe trait GcVisitor: Sized {
     /// ## Safety
     /// Undefined behavior if the GC pointer isn't properly visited.
     unsafe fn visit_gc<
-        'gc, T: GcSafe + 'gc,
-        G: GcRef<'gc, T>
-    >(&mut self, gc: &mut G) -> Result<(), Self::Err>;
+        'gc, T: GcSafe + ?Sized + 'gc,
+        Id: CollectorId,
+    >(&mut self, gc: &mut Gc<'gc, T, Id>) -> Result<(), Self::Err>;
 }
