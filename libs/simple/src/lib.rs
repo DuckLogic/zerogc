@@ -8,6 +8,7 @@
     const_panic, // Const panic should be stable
     untagged_unions, // Why isn't this stable?
     new_uninit, // Until Rust has const generics, this is how we init arrays..
+    ptr_metadata, // Needed to abstract over Sized/unsized types
 )]
 #![allow(
     /*
@@ -17,7 +18,7 @@
     clippy::vtable_address_comparisons,
 )]
 use std::alloc::Layout;
-use std::ptr::NonNull;
+use std::ptr::{NonNull, Pointee};
 use std::os::raw::c_void;
 use std::mem::{transmute, ManuallyDrop};
 #[cfg(feature = "multiple-collectors")]
@@ -43,6 +44,7 @@ use zerogc_context::{
     CollectionManager as AbstractCollectionManager,
     RawContext as AbstractRawContext
 };
+use crate::layout::{GcHeader, GcType, BigObjectLink, BigGcObject, BigGcHeader};
 
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
@@ -67,6 +69,7 @@ mod alloc {
         pub fn find<T>(&self) -> Option<FakeArena> { None }
     }
 }
+mod layout;
 
 #[cfg(feature = "sync")]
 type RawContext<C> = zerogc_context::state::sync::RawContext<C>;
@@ -107,8 +110,8 @@ unsafe impl RawHandleImpl for RawSimpleCollector {
     type TypeInfo = GcType;
 
     #[inline]
-    fn type_info_of<T: GcSafe>() -> &'static Self::TypeInfo {
-        &<T as StaticGcType>::STATIC_TYPE
+    fn type_info_for_val<T: GcSafe>(val: &T) -> &'a Self::TypeInfo {
+        GcType::type_for_val::<T>(val)
     }
 
     #[inline]
@@ -129,7 +132,9 @@ unsafe impl DynTrace for GcHandleListWrapper {
                 header.update_raw_state(MarkState::Grey.
                     to_raw(visitor.inverted_mark));
                 // Visit innards
-                (type_info.trace_func)(header.value(), visitor);
+                if let Some(trace_func) = type_info.trace_func {
+                    trace_func(header.value(), visitor);
+                }
                 // Mark black
                 header.update_raw_state(MarkState::Black.
                     to_raw(visitor.inverted_mark));
@@ -169,55 +174,6 @@ impl GcHeap {
          */
         self.allocator.allocated_size.load(Ordering::Relaxed)
             >= self.threshold.load(Ordering::Relaxed)
-    }
-}
-
-/// A link in the chain of `BigGcObject`s
-type BigObjectLinkItem = Option<NonNull<BigGcObject<DynamicObj>>>;
-/// An atomic link in the linked-list of BigObjects
-///
-/// This is thread-safe
-#[derive(Default)]
-struct BigObjectLink(AtomicCell<BigObjectLinkItem>);
-impl BigObjectLink {
-    #[inline]
-    pub const fn new(item: BigObjectLinkItem) -> Self {
-        BigObjectLink(AtomicCell::new(item))
-    }
-    #[inline]
-    fn item(&self) -> BigObjectLinkItem {
-        self.0.load()
-    }
-    #[inline]
-    unsafe fn set_item_forced(&self, val: BigObjectLinkItem) {
-        self.0.store(val)
-    }
-    #[inline]
-    fn append_item(&self, big_obj: Box<BigGcObject>) {
-        // Must use CAS loop in case another thread updates
-        let mut expected_prev = big_obj.prev.item();
-        let mut updated_item = unsafe {
-            NonNull::new_unchecked(Box::into_raw(big_obj))
-        };
-        loop {
-            match self.0.compare_exchange(
-                expected_prev, Some(updated_item)
-            ) {
-                Ok(_) => break,
-                Err(actual_prev) => {
-                    unsafe {
-                        /*
-                         * We have exclusive access to `updated_item`
-                         * here so we don't need to worry about CAS.
-                         * We just need to update its `prev`
-                         * link to point to the new value.
-                         */
-                        updated_item.as_mut().prev.0.store(actual_prev);
-                        expected_prev = actual_prev;
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -282,7 +238,7 @@ impl SimpleAlloc {
                     }
                 };
                 header.as_ptr().write(GcHeader::new(
-                    T::STATIC_TYPE,
+                    GcType::type_for_val(value),
                     MarkState::White.to_raw(self.mark_inverted()),
                     collector_id
                 ));
@@ -299,14 +255,14 @@ impl SimpleAlloc {
         }
     }
     fn alloc_big<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
+        let mut header = GcHeader::new(
+            &,
+            MarkState::White.to_raw( self.mark_inverted()),
+            self.collector_id.unwrap()
+        );
+        header.prev = BigObjectLink::new(self.big_object_link.item());
         let mut object = Box::new(BigGcObject {
-            header: GcHeader::new(
-                T::STATIC_TYPE,
-                MarkState::White.to_raw(self.mark_inverted()),
-                self.collector_id.unwrap()
-            ),
-            static_value: ManuallyDrop::new(value),
-            prev: BigObjectLink::new(self.big_object_link.item()),
+            header, static_value: ManuallyDrop::new(value),
         });
         let gc = unsafe { Gc::from_raw(
             self.collector_id.unwrap(),
@@ -340,8 +296,7 @@ impl SimpleAlloc {
                         MarkState::White => {
                             // Free the object, dropping if necessary
                             expected_size -= (*slot).header.type_info.total_size();
-                            if let Some(drop) = (*slot).header
-                                .type_info.drop_func {
+                            if let Some(drop) = (*slot).header.type_info.drop_func {
                                 drop((*slot).header.value());
                             }
                             // Add to free list
@@ -355,7 +310,7 @@ impl SimpleAlloc {
                              * State will be implicitly set to white
                              * by inverting mark the meaning of the mark bits.
                              */
-                            actual_size += (*slot).header.type_info.total_size();
+                            actual_size += GcType::type_for_val((*slot)).header.type_info.total_size();
                         },
                     }
                 }
@@ -436,6 +391,20 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     const SINGLETON: bool = cfg!(not(feature = "multiple-collectors"));
 
     const SYNC: bool = cfg!(feature = "sync");
+
+    #[inline]
+    fn id_for_gc<'a, 'gc, T>(gc: &'a Gc<'gc, T>) -> &'a CollectorId where 'gc: 'a, T: GcSafe + ?Sized + 'gc {
+        #[cfg(feature = "multiple-collectors")] {
+            unsafe {
+                &(*GcHeader::from_value_ptr(gc.as_raw_ptr(), GcType::type_for_val(gc.value()))).collector_id
+            }
+        }
+        #[cfg(not(feature = "multiple-collectors"))] {
+            const ID: CollectorId = unsafe { CollectorId::from_raw(PhantomData) };
+            &ID
+        }
+    }
+
 
     #[inline]
     unsafe fn create_dyn_pointer<T: Trace>(value: *mut T) -> Self::GcDynPointer {
@@ -695,7 +664,7 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
              * Check the collectors match. Otherwise we're mutating
              * other people's data.
              */
-            assert_eq!(gc.collector_id(), self.expected_collector);
+            assert_eq!(*gc.collector_id(), self.expected_collector);
             self._visit_own_gc(gc);
             Ok(())
         } else {
@@ -713,7 +682,6 @@ impl MarkVisitor<'_> {
         debug_assert_eq!(gc.collector_id(), self.expected_collector);
         let header = GcHeader::from_value_ptr(
             gc.as_raw_ptr(),
-            T::STATIC_TYPE
         );
         self.visit_raw_gc(&mut *header, |obj, visitor| {
             let inverted_mark = visitor.inverted_mark;
@@ -754,123 +722,6 @@ impl MarkVisitor<'_> {
                 }
             }
         });
-    }
-}
-
-#[doc(hidden)] // NOTE: Needed for GcHandleImpl
-pub struct GcType {
-    value_size: usize,
-    value_offset: usize,
-    trace_func: unsafe fn(*mut c_void, &mut MarkVisitor),
-    drop_func: Option<unsafe fn(*mut c_void)>,
-}
-impl GcType {
-    #[inline]
-    const fn total_size(&self) -> usize {
-        self.value_offset + self.value_size
-    }
-}
-trait StaticGcType {
-    const VALUE_OFFSET: usize;
-    const STATIC_TYPE: &'static GcType;
-}
-impl<T: GcSafe> StaticGcType for T {
-    const VALUE_OFFSET: usize = {
-        if alloc::is_small_object::<T>() {
-            // Small object
-            let layout = Layout::new::<GcHeader>();
-            layout.size() + layout.padding_needed_for(std::mem::align_of::<T>())
-        } else {
-            // Big object
-            let layout = Layout::new::<BigGcObject<()>>();
-            layout.size() + layout.padding_needed_for(std::mem::align_of::<T>())
-        }
-    };
-    const STATIC_TYPE: &'static GcType = &GcType {
-        value_size: std::mem::size_of::<T>(),
-        value_offset: Self::VALUE_OFFSET,
-        trace_func: unsafe { transmute::<_, unsafe fn(*mut c_void, &mut MarkVisitor)>(
-            <T as DynTrace>::trace as fn(&mut T, &mut MarkVisitor),
-        ) },
-        drop_func: if <T as GcSafe>::NEEDS_DROP {
-            unsafe { Some(transmute::<_, unsafe fn(*mut c_void)>(
-                std::ptr::drop_in_place::<T> as unsafe fn(*mut T)
-            )) }
-        } else { None }
-    };
-}
-
-/// A header for a GC object
-///
-/// This is shared between both small arenas
-/// and fallback alloc vis `BigGcObject`
-#[repr(C)]
-struct GcHeader {
-    type_info: &'static GcType,
-    /*
-     * NOTE: State byte should come last
-     * If the value is small `(u32)`, we could reduce
-     * the padding to a 3 bytes and fit everything in a word.
-     *
-     * Do we really need to use atomic stores?
-     */
-    raw_state: AtomicCell<RawMarkState>,
-    collector_id: CollectorId
-}
-impl GcHeader {
-    #[inline]
-    pub fn new(type_info: &'static GcType, raw_state: RawMarkState, collector_id: CollectorId) -> Self {
-        GcHeader { type_info, raw_state: AtomicCell::new(raw_state), collector_id }
-    }
-    #[inline]
-    pub fn value(&self) -> *mut c_void {
-        unsafe {
-            (self as *const GcHeader as *mut GcHeader as *mut u8)
-                // NOTE: This takes into account the possibility of `BigGcObject`
-                .add(self.type_info.value_offset)
-                .cast::<c_void>()
-        }
-    }
-    #[inline]
-    pub unsafe fn from_value_ptr<T>(ptr: *mut T, static_type: &GcType) -> *mut GcHeader {
-        (ptr as *mut u8).sub(static_type.value_offset).cast()
-    }
-    #[inline]
-    fn raw_state(&self) -> RawMarkState {
-        // TODO: Is this safe? Couldn't it be accessed concurrently?
-        self.raw_state.load()
-    }
-    #[inline]
-    fn update_raw_state(&self, raw_state: RawMarkState) {
-        self.raw_state.store(raw_state);
-    }
-}
-
-/// Marker for an unknown GC object
-struct DynamicObj;
-
-#[repr(C)]
-struct BigGcObject<T = DynamicObj> {
-    header: GcHeader,
-    /// The previous object in the linked list of allocated objects,
-    /// or null if its the end
-    prev: BigObjectLink,
-    /// This is dropped using dynamic type info
-    static_value: ManuallyDrop<T>
-}
-impl<T> BigGcObject<T> {
-    #[inline]
-    unsafe fn into_dynamic_box(val: Box<Self>) -> Box<BigGcObject<DynamicObj>> {
-        std::mem::transmute::<Box<BigGcObject<T>>, Box<BigGcObject<DynamicObj>>>(val)
-    }
-}
-impl<T> Drop for BigGcObject<T> {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(drop) = self.header.type_info.drop_func {
-                drop(&mut *self.static_value as *mut T as *mut c_void);
-            }
-        }
     }
 }
 

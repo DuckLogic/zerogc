@@ -37,6 +37,7 @@ mod manually_traced;
 pub mod cell;
 pub mod prelude;
 pub mod dummy_impl;
+pub mod format;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.
@@ -376,6 +377,11 @@ impl<C: GcContext> FrozenContext<C> {
 pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + 'static {
     /// The type of the garbage collector system
     type System: GcSystem<Id=Self>;
+
+    /// Get the runtime id of the collector that allocated the [Gc]
+    fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self
+        where T: GcSafe + ?Sized + 'gc, 'gc: 'a;
+
     /// Perform a write barrier before writing to a garbage collected field
     ///
     /// ## Safety
@@ -410,15 +416,22 @@ pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + 'static {
 /// The smart pointer is simply a guarantee to the garbage collector
 /// that this points to a garbage collected object with the correct header,
 /// and not some arbitrary bits that you've decided to heap allocate.
-#[repr(C)]
+///
+/// ## Safety
+/// A `Gc` can be safely transmuted back and forth from its corresponding pointer.
+///
+/// Unsafe code can rely on a pointer always dereferencing to the same value in between
+/// safepoints. This is true even for copying/moving collectors.
+#[repr(transparent)]
 pub struct Gc<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> {
     value: NonNull<T>,
-    /// Used to uniquely identify the collector,
-    /// to ensure we aren't modifying another collector's pointers
-    collector_id: Id,
+    /// Marker struct used to statically identify the collector's type
+    ///
+    /// The runtime instance of this value can be computed from the pointer itself: `NonNull<T>`
+    collector_id: PhantomData<Id>,
     /*
      * TODO: I think this lifetime variance is safe
-     * Better add some tests and an explination.
+     * Better add some tests and an explanation.
      */
     marker: PhantomData<&'gc T>,
 }
@@ -428,9 +441,13 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
     /// ## Safety
     /// Undefined behavior if the underlying pointer is not valid
     /// and associated with the collector corresponding to the id.
-    #[inline(always)]
+    #[inline]
     pub unsafe fn from_raw(id: Id, value: NonNull<T>) -> Self {
-        Gc { collector_id: id, value, marker: PhantomData }
+        let res = Gc { collector_id: PhantomData, value, marker: PhantomData };
+        #[cfg(debug_assertions)] {
+            debug_assert_eq!(id, *Id::from_gc_ptr(&res));
+        }
+        res
     }
 
     /// The value of the underlying pointer
@@ -470,15 +487,15 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
     #[inline]
     pub fn system(&self) -> &'_ Id::System {
         // This assumption is safe - see the docs
-        unsafe { self.collector_id.assume_valid_system() }
+        unsafe { self.collector_id().assume_valid_system() }
     }
 
-    /// Get a copy of the collector's id
+    /// Get a reference to the collector's id
     ///
     /// The underlying collector it points to is not necessarily always valid
     #[inline]
-    pub fn collector_id(&self) -> Id {
-        self.collector_id
+    pub fn collector_id(&self) -> &'_ Id {
+        Id::from_gc_ptr(self)
     }
 }
 

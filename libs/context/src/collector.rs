@@ -41,6 +41,9 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     /// True if this collector is thread-safe.
     const SYNC: bool;
 
+    fn id_for_gc<'a, 'gc, T>(gc: &'a Gc<'gc, T, CollectorId<Self>>) -> &'a CollectorId<Self>
+        where 'gc: 'a, T: GcSafe + ?Sized + 'gc;
+
     /// Convert the specified value into a dyn pointer
     unsafe fn create_dyn_pointer<T: Trace>(t: *mut T) -> Self::GcDynPointer;
 
@@ -275,6 +278,12 @@ impl<C: RawCollectorImpl> CollectorId<C> {
 }
 unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     type System = CollectorRef<C>;
+
+    #[inline]
+    fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self where T: GcSafe + ?Sized + 'gc, 'gc: 'a {
+        C::id_for_gc(gc)
+    }
+
 
     #[inline(always)]
     unsafe fn gc_write_barrier<'gc, T, V>(

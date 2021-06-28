@@ -19,7 +19,7 @@ pub unsafe trait RawHandleImpl: RawCollectorImpl {
     /// Type information
     type TypeInfo: Sized;
 
-    fn type_info_of<T: GcSafe>() -> &'static Self::TypeInfo;
+    fn type_info_for_val<T: GcSafe + ?Sized>(val: &T) -> &'_ Self::TypeInfo;
 
     fn handle_list(&self) -> &GcHandleList<Self>;
 }
@@ -598,7 +598,7 @@ unsafe impl<T: GcSafe + Sync, C: RawHandleImpl + Sync> Sync for GcHandle<T, C> {
 /// We support handles
 unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for CollectorRef<C>
     where C: RawHandleImpl,
-          T: GcSafe + 'gc,
+          T: GcSafe + 'gc + ?Sized,
           T: GcErase<'a, CollectorId<C>>,
           T::Erased: GcSafe {
     type Handle = GcHandle<T::Erased, C>;
@@ -616,7 +616,7 @@ unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for CollectorRef<C>
              * the handle!!!
              */
             raw.type_info.store(
-                C::type_info_of::<T>()
+                C::type_info_for_val::<T>(gc.value())
                     as *const C::TypeInfo
                     as *mut C::TypeInfo,
                 Ordering::Release

@@ -29,6 +29,7 @@ use zerogc::prelude::*;
 
 pub mod state;
 
+#[macro_use]
 pub mod utils;
 pub mod collector;
 pub mod handle;

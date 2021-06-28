@@ -5,6 +5,14 @@ use core::fmt::{self, Debug, Formatter, Display};
 #[cfg(not(feature = "sync"))]
 use core::cell::Cell;
 
+/// Get the offset of the specified field within a structure
+#[macro_export]
+macro_rules! field_offset {
+    ($target:ty, $($field:ident).+) => {
+        (core::ptr::addr_of!((*(std::ptr::null() as *mut $target))$(.$field)*) as usize)
+    };
+}
+
 #[cfg(feature = "sync")]
 pub type AtomicCell<T> = ::crossbeam_utils::atomic::AtomicCell<T>;
 /// Fallback `AtomicCell` implementation when we actually

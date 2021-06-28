@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 #[cfg(not(feature = "sync"))]
 use std::cell::RefCell;
 
-use crate::{GcHeader};
+use crate::layout::{GcHeader};
 use zerogc_context::utils::AtomicCell;
 
 /// The minimum size of supported memory (in words)
