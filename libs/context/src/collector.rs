@@ -12,6 +12,7 @@ use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc, NullTrace, TraceImmutab
 
 use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
+use std::ffi::c_void;
 
 /// A specific implementation of a collector
 pub unsafe trait RawCollectorImpl: 'static + Sized {
@@ -20,6 +21,8 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     /// The simple collector implements this as
     /// a trait object pointer.
     type GcDynPointer: Copy + Debug + 'static;
+
+    unsafe fn dyn_ptr_from_raw(raw: *mut c_void) -> Self::GcDynPointer;
 
     /// A pointer to this collector
     ///
@@ -45,7 +48,7 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
         where 'gc: 'a, T: GcSafe + ?Sized + 'gc;
 
     /// Convert the specified value into a dyn pointer
-    unsafe fn create_dyn_pointer<T: Trace>(t: *mut T) -> Self::GcDynPointer;
+    unsafe fn create_dyn_pointer<T: GcSafe>(&self, t: *mut T) -> Self::GcDynPointer;
 
     /// Initialize an instance of the collector
     ///

@@ -1,6 +1,14 @@
-// NOTE: Both these features have accepted RFCs
 #![feature(
     const_panic, // RFC 2345 - Const asserts
+    // Used for object format API:
+    ptr_metadata,
+    // Used for the "simple" object format:
+    alloc_layout_extra, // Needed to compute format
+    const_alloc_layout, // Needed to compute format in 'const'
+    const_fn_transmute,
+    const_fn_trait_bound,
+    const_fn_fn_ptr_basics,
+    const_mut_refs,
 )]
 #![deny(missing_docs)]
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -16,7 +24,7 @@
 //! 6. Collection can only happen with an explicit `safepoint` call and has no overhead between these calls,
 //! 7. API supports moving objects (allowing copying/generational GCs)
 
-#![cfg(any(feature = "alloc", feature = "std"))]
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
 /*
@@ -448,6 +456,16 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
             debug_assert_eq!(id, *Id::from_gc_ptr(&res));
         }
         res
+    }
+
+    /// Create a GC pointer
+    ///
+    /// ## Safety
+    /// This is even more unsafe than [Gc::from_raw],
+    /// because it doesn't check the ids matched
+    #[inline]
+    pub unsafe fn from_raw_without_id(value: NonNull<T>) -> Self {
+        Gc { collector_id: PhantomData, value, marker: PhantomData }
     }
 
     /// The value of the underlying pointer

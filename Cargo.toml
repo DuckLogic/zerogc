@@ -27,7 +27,7 @@ default = ["std"]
 # Depend on the standard library (optional)
 #
 # This implements tracing
-std = []
+std = ["alloc"]
 # Depend on `extern crate alloc` in addition to the Rust `core`
 # This is implied by using the standard library (feature="std")
 #

@@ -134,7 +134,7 @@ impl<C: RawCollectorImpl> CollectorContext<C> {
     ) -> R {
         let old_link = (*(*self.raw).shadow_stack_ptr()).last;
         let new_link = ShadowStackLink {
-            element: C::create_dyn_pointer(value),
+            element: (*self.raw).collector().create_dyn_pointer(value),
             prev: old_link
         };
         (*(*self.raw).shadow_stack_ptr()).last = &new_link;

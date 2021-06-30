@@ -120,7 +120,7 @@ unsafe impl CollectorId for DummyCollectorId {
     type System = DummySystem;
 
     #[inline]
-    fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T>) -> &'a Self where T: GcSafe + ?Sized + 'gc, 'gc: 'a {
+    fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: GcSafe + ?Sized + 'gc, 'gc: 'a {
         const ID: DummyCollectorId = DummyCollectorId { _priv: () };
         &ID
     }
