@@ -4,7 +4,7 @@
     const_fn_trait_bound, // So generics + const fn are unstable, huh?
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
-//! The implementation of [::zerogc::CollectorContext] that is
+//! The implementation of (GcContext)[`::zerogc::GcContext`] that is
 //! shared among both thread-safe and thread-unsafe code.
 
 /*
@@ -134,7 +134,7 @@ impl<C: RawCollectorImpl> CollectorContext<C> {
     ) -> R {
         let old_link = (*(*self.raw).shadow_stack_ptr()).last;
         let new_link = ShadowStackLink {
-            element: (*self.raw).collector().create_dyn_pointer(value),
+            element: C::as_dyn_trace_pointer(value),
             prev: old_link
         };
         (*(*self.raw).shadow_stack_ptr()).last = &new_link;

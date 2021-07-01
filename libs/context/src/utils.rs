@@ -9,7 +9,7 @@ use core::cell::Cell;
 #[macro_export]
 macro_rules! field_offset {
     ($target:ty, $($field:ident).+) => {
-        (core::ptr::addr_of!((*(std::ptr::null() as *mut $target))$(.$field)*) as usize)
+        unsafe { (core::ptr::addr_of!((*(std::ptr::null_mut::<$target>()))$(.$field)*) as usize) }
     };
 }
 

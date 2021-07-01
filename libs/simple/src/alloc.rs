@@ -14,7 +14,6 @@ use parking_lot::Mutex;
 use std::cell::RefCell;
 
 use zerogc_context::utils::AtomicCell;
-use zerogc::format::{ObjectFormat, OpenAllocObjectFormat};
 
 /// The minimum size of supported memory (in words)
 ///
@@ -30,22 +29,25 @@ pub const ARENA_ELEMENT_ALIGN: usize = ARENA_HEADER_LAYOUT.align();
 /// The size of headers in the arena
 ///
 /// This is the same regardless of the underlying object format
-const ARENA_HEADER_LAYOUT: Layout = Layout::new::<DummyGcHeader>();
+const ARENA_HEADER_LAYOUT: Layout = Layout::new::<GcHeader>();
 
-use super::DummyGcHeader;
-use crate::{RawSimpleCollector, RawObjectFormat};
+use crate::layout::{GcHeader};
 
 #[inline]
-pub const fn small_object_size<T>() -> usize {
+pub const fn small_object_size(layout: Layout) -> usize {
     let header_layout = ARENA_HEADER_LAYOUT;
     header_layout.size() + header_layout
-        .padding_needed_for(std::mem::align_of::<T>())
-        + mem::size_of::<T>()
+        .padding_needed_for(layout.align())
+        + layout.size()
+}
+#[inline]
+pub const fn fits_small_object(layout: Layout) -> bool {
+    small_object_size(layout) <= MAXIMUM_SMALL_WORDS * std::mem::size_of::<usize>()
+        && layout.align() <= ARENA_ELEMENT_ALIGN
 }
 #[inline]
 pub const fn is_small_object<T>() -> bool {
-    small_object_size::<T>() <= MAXIMUM_SMALL_WORDS * 8
-        && mem::align_of::<T>() <= ARENA_ELEMENT_ALIGN
+    fits_small_object(Layout::new::<T>())
 }
 
 pub(crate) struct Chunk {
@@ -121,7 +123,7 @@ pub struct FreeSlot {
 #[repr(C)]
 pub(crate) union MaybeFreeSlot {
     pub free: FreeSlot,
-    pub header: DummyGcHeader,
+    pub header: GcHeader,
 }
 
 impl MaybeFreeSlot {
@@ -199,7 +201,7 @@ impl ArenaState {
         self.current_chunk.store(ptr);
     }
     #[inline]
-    fn alloc(&self, element_size: usize) -> NonNull<DummyGcHeader> {
+    fn alloc(&self, element_size: usize) -> NonNull<GcHeader> {
         unsafe {
             let chunk = &*self.current_chunk().as_ptr();
             match chunk.try_alloc(element_size) {
@@ -211,7 +213,7 @@ impl ArenaState {
 
     #[cold]
     #[inline(never)]
-    fn alloc_fallback(&self, element_size: usize) -> NonNull<DummyGcHeader> {
+    fn alloc_fallback(&self, element_size: usize) -> NonNull<GcHeader> {
         let mut chunks = self.lock_chunks();
         // Now that we hold the lock, check the current chunk again
         unsafe {
@@ -227,7 +229,7 @@ impl ArenaState {
             self.force_current_chunk(NonNull::from(&**chunks.last().unwrap()));
             self.current_chunk().as_ref()
                 .try_alloc(element_size).unwrap()
-                .cast::<DummyGcHeader>()
+                .cast::<GcHeader>()
         }
     }
 }
@@ -249,7 +251,7 @@ impl FreeList {
         self.next.store(next)
     }
     #[inline]
-    fn take_free(&self) -> Option<NonNull<DummyGcHeader>> {
+    fn take_free(&self) -> Option<NonNull<GcHeader>> {
         loop {
             let next_free = match self.next.load() {
                 Some(free) => free,
@@ -271,15 +273,14 @@ impl FreeList {
     }
 }
 
-pub struct SmallArena<Fmt: RawObjectFormat> {
+pub struct SmallArena {
     pub(crate) element_size: usize,
     state: ArenaState,
-    pub(crate) free: FreeList,
-    format: &'static Fmt
+    pub(crate) free: FreeList
 }
-impl<Fmt: RawObjectFormat> SmallArena<Fmt> {
+impl SmallArena {
     #[cold] // Initialization is the slow path
-    fn with_words(format: &'static Fmt, num_words: usize) -> SmallArena<Fmt> {
+    fn with_words(num_words: usize) -> SmallArena {
         assert!(num_words >= MINIMUM_WORDS);
         let element_size = num_words * mem::size_of::<usize>();
         assert!(INITIAL_SIZE >= element_size * 2);
@@ -287,11 +288,10 @@ impl<Fmt: RawObjectFormat> SmallArena<Fmt> {
         SmallArena {
             state: ArenaState::new(chunks),
             element_size, free: Default::default(),
-            format
         }
     }
     #[inline]
-    pub(crate) fn alloc(&self) -> NonNull<DummyGcHeader> {
+    pub(crate) fn alloc(&self) -> NonNull<GcHeader> {
         // Check the free list
         if let Some(free) = self.free.take_free() {
             free
@@ -312,11 +312,11 @@ impl<Fmt: RawObjectFormat> SmallArena<Fmt> {
     }
 }
 macro_rules! arena_match {
-    ($format:expr, $arenas:expr, $target:ident, max = $max:expr; $($size:pat => $num_words:literal @ $idx:expr),*) => {
+    ($arenas:expr, $target:ident, max = $max:expr; $($size:pat => $num_words:literal @ $idx:expr),*) => {
         Some(match $target {
             $($size => $arenas[$idx].get_or_init(|| {
                 assert_eq!(SMALL_ARENA_SIZES[$idx], $num_words);
-                SmallArena::with_words($format, $num_words)
+                SmallArena::with_words($num_words)
             }),)*
             _ => {
                 assert!($target > $max);
@@ -330,16 +330,16 @@ const SMALL_ARENA_SIZES: [usize; NUM_SMALL_ARENAS] =  [
     10, 12, 14, 16,
     20, 24, 28, 32
 ];
-pub struct SmallArenaList<Fmt: RawObjectFormat> {
+pub struct SmallArenaList {
     // NOTE: Internally boxed to avoid bloating main struct
-    arenas: Box<[OnceCell<SmallArena<Fmt>>; NUM_SMALL_ARENAS]>
+    arenas: Box<[OnceCell<SmallArena>; NUM_SMALL_ARENAS]>
 }
-impl<Fmt: RawObjectFormat> SmallArenaList<Fmt> {
+impl SmallArenaList {
     pub fn new() -> Self {
         // NOTE: Why does writing arrays have to be so difficult:?
         unsafe {
             let mut arenas: Box<[
-                MaybeUninit<OnceCell<SmallArena<Fmt>>>;
+                MaybeUninit<OnceCell<SmallArena>>;
                 NUM_SMALL_ARENAS
             ]> = Box::new_uninit().assume_init();
             for i in 0..NUM_SMALL_ARENAS {
@@ -348,29 +348,32 @@ impl<Fmt: RawObjectFormat> SmallArenaList<Fmt> {
             SmallArenaList {
                 // NOTE: This is done because I want to explicitly specify types
                 arenas: mem::transmute::<
-                    Box<[MaybeUninit<OnceCell<SmallArena<Fmt>>>; NUM_SMALL_ARENAS]>,
-                    Box<[OnceCell<SmallArena<Fmt>>; NUM_SMALL_ARENAS]>
+                    Box<[MaybeUninit<OnceCell<SmallArena>>; NUM_SMALL_ARENAS]>,
+                    Box<[OnceCell<SmallArena>; NUM_SMALL_ARENAS]>
                 >(arenas)
             }
         }
     }
-    pub fn iter(&self) -> impl Iterator<Item=&SmallArena<Fmt>> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item=&SmallArena> + '_ {
         self.arenas.iter().filter_map(OnceCell::get)
     }
     #[inline] // This should be constant folded away (size/align is const)
-    pub fn find<T>(&self) -> Option<&SmallArena<Fmt>> {
+    pub fn find<T>(&self) -> Option<&SmallArena> {
         if std::mem::align_of::<T>() > ARENA_ELEMENT_ALIGN {
+            return None
+        }
+        if !is_small_object::<T>() {
             return None
         }
         // Divide round up
         let word_size = mem::size_of::<usize>();
-        let num_words = (small_object_size::<T>() + (word_size - 1))
+        let num_words = (small_object_size(Layout::new::<T>()) + (word_size - 1))
             / word_size;
         self.find_raw(num_words)
     }
     #[inline] // We want this constant-folded away......
-    fn find_raw(&self, num_words: usize) -> Option<&SmallArena<Fmt>> {
-        arena_match!(self.format,
+    fn find_raw(&self, num_words: usize) -> Option<&SmallArena> {
+        arena_match!(
             self.arenas, num_words, max = 32;
             0..=2 => 2 @ 0,
             3 => 3 @ 1,

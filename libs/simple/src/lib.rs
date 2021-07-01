@@ -1,4 +1,24 @@
-// TODO: Use stable rust
+//! The simplest implementation of zerogc's garbage collection.
+//!
+//! Uses mark/sweep collection. This shares shadow stack code with the `zerogc-context`
+//! crate, and thus [SimpleCollector] is actually a type alias for that crate.
+//!
+//! ## Internals
+//! The internal layout information is public,
+//! and available through the (layout module)[`self::layout`].
+//!
+//! The garbage collector needs to store some dynamic type information at runtime,
+//! to allow dynamic dispatch to trace and drop functions.
+//! Each object's [GcHeader] has two fields: a [GcType] and some internal mark data.
+//!
+//! The mark data is implementation-internal. However, the header as a whole is `repr(C)`
+//! and the type information
+//!
+//! Sometimes, users need to store their own type metadata for other purposes.
+//! TODO: Allow users to do this.
+#![deny(
+    missing_docs, // The 'simple' implementation needs to document its public API
+)]
 #![feature(
     alloc_layout_extra, // Used for GcObject::from_raw
     never_type, // Used for errors (which are currently impossible)
@@ -9,6 +29,10 @@
     untagged_unions, // Why isn't this stable?
     new_uninit, // Until Rust has const generics, this is how we init arrays..
     ptr_metadata, // Needed to abstract over Sized/unsized types
+    // Used for const layout computation:
+    const_raw_ptr_deref,
+    const_raw_ptr_to_usize_cast,
+    const_ptr_offset,
 )]
 #![feature(drain_filter)]
 #![allow(
@@ -19,9 +43,8 @@
     clippy::vtable_address_comparisons,
 )]
 use std::alloc::Layout;
-use std::ptr::{NonNull, Pointee};
-use std::os::raw::c_void;
-use std::mem::{transmute, ManuallyDrop, MaybeUninit};
+use std::ptr::{NonNull, addr_of_mut};
+use std::mem::{ManuallyDrop};
 #[cfg(feature = "multiple-collectors")]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
@@ -29,47 +52,25 @@ use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use std::sync::atomic::AtomicPtr;
 #[cfg(not(feature = "multiple-collectors"))]
 use std::marker::PhantomData;
-use std::any::TypeId;
+use std::any::{TypeId};
 
 use slog::{Logger, FnValue, debug};
 
-use zerogc::{GcSafe, Trace, GcVisitor, NullTrace};
+use zerogc::{GcSafe, Trace, GcVisitor};
 
-use zerogc_context::utils::{ThreadId, AtomicCell, MemorySize};
+use zerogc_context::utils::{ThreadId, MemorySize};
 
 use crate::alloc::{SmallArenaList, small_object_size};
+use crate::layout::{StaticGcType, GcType};
 
-use zerogc_context::collector::{RawSimpleAlloc, RawCollectorImpl};
+use zerogc_context::collector::{RawSimpleAlloc};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 use zerogc_context::{
     CollectionManager as AbstractCollectionManager,
     RawContext as AbstractRawContext
 };
-use crate::layout::{BigGcObject, SimpleMarkData, SimpleMarkDataSnapshot};
-use std::ops::{DerefMut, Deref};
-use std::borrow::BorrowMut;
-use zerogc::format::{ObjectFormat, GcTypeInfo, OpenAllocObjectFormat, GcLayoutInternals};
-use zerogc::format::simple::{SimpleObjectFormat};
-use std::fmt::{Pointer, Debug};
-
-trait DynTrace<Fmt: RawObjectFormat> {
-    fn trace<'a>(&mut self, visitor: &mut MarkVisitor<'a, Fmt>);
-}
-impl<Fmt: RawObjectFormat, T: Trace> DynTrace<Fmt> for T {
-    fn trace<'a>(&mut self, visitor: &mut MarkVisitor<'a, Fmt>) {
-        let Ok(()) = <T as Trace>::visit(self, visitor);
-    }
-}
-
-/// A 'dummy' gc header type used for small allocations, regardless of the actual object format.
-///
-/// It indicates that we support a word aligned header whose size
-/// is at most two words.
-#[derive(Default)]
-pub(crate) struct DummyGcHeader {
-    _first: usize,
-    _second: usize
-}
+use crate::layout::{SimpleMarkData, SimpleMarkDataSnapshot, GcHeader, BigGcObject};
+use std::ops::{Deref, DerefMut};
 
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
@@ -94,7 +95,7 @@ mod alloc {
         pub fn find<T>(&self) -> Option<FakeArena> { None }
     }
 }
-mod layout;
+pub mod layout;
 
 #[cfg(feature = "sync")]
 type RawContext<C> = zerogc_context::state::sync::RawContext<C>;
@@ -106,28 +107,41 @@ type RawContext<C> = zerogc_context::state::nosync::RawContext<C>;
 type CollectionManager<C> = zerogc_context::state::nosync::CollectionManager<C>;
 
 
-type DefaultFmt = SimpleObjectFormat;
-pub type SimpleCollector<Fmt = DefaultFmt> = ::zerogc_context::CollectorRef<RawSimpleCollector<Fmt>>;
-pub type SimpleCollectorContext<Fmt = DefaultFmt> = ::zerogc_context::CollectorContext<RawSimpleCollector<Fmt>>;
-pub type CollectorId<Fmt = DefaultFmt> = ::zerogc_context::CollectorId<RawSimpleCollector<Fmt>>;
-pub type Gc<'gc, T, Fmt = DefaultFmt> = ::zerogc::Gc<'gc, T, CollectorId<Fmt>>;
+/// A "simple" garbage collector
+pub type SimpleCollector = ::zerogc_context::CollectorRef<RawSimpleCollector>;
+/// The context of a simple collector
+pub type SimpleCollectorContext = ::zerogc_context::CollectorContext<RawSimpleCollector>;
+/// The id for a simple collector
+pub type CollectorId = ::zerogc_context::CollectorId<RawSimpleCollector>;
+/// A garbage collected pointer, allocated in the "simple" collector
+pub type Gc<'gc, T> = ::zerogc::Gc<'gc, T, CollectorId>;
 
 #[cfg(not(feature = "multiple-collectors"))]
-static GLOBAL_COLLECTOR: AtomicPtr<RawSimpleCollector<DefaultFmt>> = AtomicPtr::new(std::ptr::null_mut());
+static GLOBAL_COLLECTOR: AtomicPtr<RawSimpleCollector> = AtomicPtr::new(std::ptr::null_mut());
 
-unsafe impl<Fmt: RawObjectFormat> RawSimpleAlloc for RawSimpleCollector<Fmt> {
+unsafe impl RawSimpleAlloc for RawSimpleCollector {
     #[inline]
-    fn alloc<'gc, T>(context: &'gc SimpleCollectorContext<Fmt>, value: T) -> Gc<'gc, T, Fmt> where T: GcSafe + 'gc {
+    fn alloc<'gc, T>(context: &'gc SimpleCollectorContext, value: T) -> Gc<'gc, T> where T: GcSafe + 'gc {
         context.collector().heap.allocator.alloc(value)
     }
 }
 
-unsafe impl<Fmt: RawObjectFormat> RawHandleImpl for RawSimpleCollector<Fmt> {
-    type TypeInfo = Fmt::TypeInfo;
+#[doc(hidden)] // NOTE: Needs be public for RawCollectorImpl
+pub unsafe trait DynTrace {
+    fn trace(&mut self, visitor: &mut MarkVisitor);
+}
+unsafe impl<T: Trace + ?Sized> DynTrace for T {
+    fn trace(&mut self, visitor: &mut MarkVisitor) {
+        let Ok(()) = self.visit(visitor);
+    }
+}
+
+unsafe impl RawHandleImpl for RawSimpleCollector {
+    type TypeInfo = GcType;
 
     #[inline]
-    fn type_info_for_val<T: GcSafe>(&self, _val: &T) -> Fmt::TypeInfo {
-        self.format.sized_type::<T>()
+    fn type_info_of<T: GcSafe>() -> &'static Self::TypeInfo {
+        &<T as StaticGcType>::STATIC_TYPE
     }
 
     #[inline]
@@ -138,27 +152,21 @@ unsafe impl<Fmt: RawObjectFormat> RawHandleImpl for RawSimpleCollector<Fmt> {
 
 /// A wrapper for [GcHandleList] that implements [DynTrace]
 #[repr(transparent)]
-struct GcHandleListWrapper<Fmt: RawObjectFormat>(GcHandleList<RawSimpleCollector<Fmt>>);
-impl<Fmt: RawObjectFormat> DynTrace<Fmt> for GcHandleListWrapper<Fmt> {
-    fn trace<'a>(&mut self, visitor: &mut MarkVisitor<'a, Fmt>) {
+struct GcHandleListWrapper(GcHandleList<RawSimpleCollector>);
+unsafe impl DynTrace for GcHandleListWrapper {
+    fn trace(&mut self, visitor: &mut MarkVisitor) {
         unsafe {
             let Ok(()) = self.0.trace::<_, !>(|raw_ptr, type_info| {
-                let type_info = Fmt::determine_type(raw_ptr);
-                let mark_data = Fmt::mark_data_ptr(raw_ptr, type_info);
-                let mark_data = &*(mark_data as *const SimpleMarkData<Fmt>);
+                let header = &mut *GcHeader::from_value_ptr(raw_ptr);
                 // Mark grey
-                mark_data.update_raw_state(MarkState::Grey.
+                header.update_raw_mark_state(MarkState::Grey.
                     to_raw(visitor.inverted_mark));
                 // Visit innards
-                type_info.trace(raw_ptr, unsafe {
-                    // No GAT yet, so we do this....
-                    std::mem::transmute::<
-                        &mut MarkVisitor<'a, Fmt>,
-                        &mut MarkVisitor<'static, Fmt>
-                    >(visitor)
-                });
+                if let Some(func) = type_info.trace_func {
+                    func(header.value(), visitor);
+                }
                 // Mark black
-                mark_data.update_raw_state(MarkState::Black.
+                header.update_raw_mark_state(MarkState::Black.
                     to_raw(visitor.inverted_mark));
                 Ok(())
             });
@@ -170,15 +178,15 @@ impl<Fmt: RawObjectFormat> DynTrace<Fmt> for GcHandleListWrapper<Fmt> {
 /// The initial memory usage to start a collection
 const INITIAL_COLLECTION_THRESHOLD: usize = 2048;
 
-struct GcHeap<Fmt: RawObjectFormat> {
+struct GcHeap {
     threshold: AtomicUsize,
-    allocator: SimpleAlloc<Fmt>
+    allocator: SimpleAlloc
 }
-impl<Fmt: RawObjectFormat> GcHeap<Fmt> {
-    fn new(format: &'static Fmt, threshold: usize) -> Self {
+impl GcHeap {
+    fn new(threshold: usize) -> GcHeap {
         GcHeap {
             threshold: AtomicUsize::new(threshold),
-            allocator: SimpleAlloc::new(format)
+            allocator: SimpleAlloc::new()
         }
     }
     #[inline]
@@ -256,26 +264,24 @@ impl<'a, T> ILock<'a, T> for Lock<T> {
 /// The thread-safe implementation of an allocator
 ///
 /// Most allocations should avoid locking.
-pub(crate) struct SimpleAlloc<Fmt: RawObjectFormat> {
-    collector_id: Option<CollectorId<Fmt>>,
-    small_arenas: SmallArenaList<Fmt>,
-    big_objects: Lock<Vec<Box<BigGcObject<Fmt>>>>,
+pub(crate) struct SimpleAlloc {
+    collector_id: Option<CollectorId>,
+    small_arenas: SmallArenaList,
+    big_objects: Lock<Vec<Box<BigGcObject>>>,
     /// Whether the meaning of the mark bit is currently inverted.
     ///
     /// This flips every collection
     mark_inverted: AtomicBool,
-    allocated_size: AtomicUsize,
-    format: &'static Fmt
+    allocated_size: AtomicUsize
 }
-impl<Fmt: RawObjectFormat> SimpleAlloc<Fmt> {
-    fn new(format: &'static Fmt) -> Self {
+impl SimpleAlloc {
+    fn new() -> SimpleAlloc {
         SimpleAlloc {
             collector_id: None,
             allocated_size: AtomicUsize::new(0),
             small_arenas: SmallArenaList::new(),
             big_objects: Lock::from(Vec::new()),
             mark_inverted: AtomicBool::new(false),
-            format
         }
     }
     #[inline]
@@ -300,14 +306,7 @@ impl<Fmt: RawObjectFormat> SimpleAlloc<Fmt> {
     }
 
     #[inline]
-    fn cast_header(dummy: *mut DummyGcHeader) -> *mut Fmt::SizedHeaderType {
-        assert!(std::mem::size_of::<DummyGcHeader>() >= std::mem::size_of::<Fmt::SizedHeaderType>());
-        assert!(std::mem::align_of::<DummyGcHeader>() >= std::mem::align_of::<Fmt::SizedHeaderType>());
-        dummy.cast()
-    }
-
-    #[inline]
-    fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T, Fmt> {
+    fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
         if let Some(arena) = self.small_arenas.find::<T>() {
             let header = arena.alloc();
             unsafe {
@@ -322,15 +321,16 @@ impl<Fmt: RawObjectFormat> SimpleAlloc<Fmt> {
                         }
                     }
                 };
-                let value_ptr = self.format.write_sized_header::<T>(
-                    Self::cast_header(header.as_ptr()),
+                let _value_ptr = header.as_ptr().write(GcHeader::new(
+                    T::STATIC_TYPE,
                     SimpleMarkData::from_snapshot(SimpleMarkDataSnapshot::new(
                         MarkState::White.to_raw(self.mark_inverted()),
                         collector_id_ptr as *const _ as *mut _,
                     ))
-                );
+                ));
+                let value_ptr = header.as_ref().value().cast::<T>();
                 value_ptr.write(value);
-                self.add_allocated_size(small_object_size::<T>());
+                self.add_allocated_size(small_object_size(Layout::new::<T>()));
                 Gc::from_raw(
                     *collector_id_ptr,
                     NonNull::new_unchecked(value_ptr),
@@ -340,27 +340,24 @@ impl<Fmt: RawObjectFormat> SimpleAlloc<Fmt> {
             self.alloc_big(value)
         }
     }
-    fn alloc_big<T: GcSafe>(&self, value: T) -> Gc<'_, T, Fmt> {
+    fn alloc_big<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
         let collector_id = self.collector_id.as_ref().unwrap();
         let mut object = Box::new(BigGcObject {
-            header: unsafe { MaybeUninit::uninit() },
-            static_value: ManuallyDrop::new(value),
-        });
-        unsafe {
-            self.format.write_sized_header::<T>(
-                object.header.as_mut_ptr(),
+            header: GcHeader::new(
+                T::STATIC_TYPE,
                 SimpleMarkData::from_snapshot(SimpleMarkDataSnapshot::new(
                     MarkState::White.to_raw(self.mark_inverted()),
                     collector_id as *const _ as *mut _
                 ))
-            );
-        }
+            ),
+            static_value: ManuallyDrop::new(value),
+        });
         let gc = unsafe { Gc::from_raw(
             self.collector_id.unwrap(),
             NonNull::new_unchecked(&mut *object.static_value),
         ) };
         {
-            let size = std::mem::size_of::<BigGcObject<Fmt, T>>();
+            let size = std::mem::size_of::<BigGcObject<T>>();
             {
                 let mut objs = self.big_objects.lock();
                 objs.push(unsafe { BigGcObject::into_dynamic_box(object) });
@@ -384,16 +381,14 @@ impl<Fmt: RawObjectFormat> SimpleAlloc<Fmt> {
                      * of allocated objects.
                      */
                 } else {
-                    let header = Self::cast_header(&mut (*slot).header);
-                    let obj = Fmt::untyped_object_from_header(header);
-                    let type_info = Fmt::determine_type(obj);
-                    let mark_data = Fmt::mark_data_ptr(obj, type_info);
-                    let total_size = type_info.determine_total_size(obj);
-                    match (&*mark_data).load_snapshot().state.resolve(mark_inverted) {
+                    let total_size = (*slot).header.type_info.determine_total_size(addr_of_mut!((*slot).header));
+                    match (*slot).header.raw_mark_state().resolve(mark_inverted) {
                         MarkState::White => {
                             // Free the object, dropping if necessary
                             expected_size -= total_size;
-                            type_info.drop(obj);
+                            if let Some(func) = (*slot).header.type_info.drop_func {
+                                func((*slot).header.value());
+                            }
                             // Add to free list
                             (*slot).mark_free(last_free);
                             last_free = Some(NonNull::new_unchecked(slot));
@@ -415,13 +410,11 @@ impl<Fmt: RawObjectFormat> SimpleAlloc<Fmt> {
         // Clear large objects
         let was_mark_inverted = self.mark_inverted();
         self.big_objects.lock().drain_filter(|big_item| {
-            let obj = Fmt::untyped_object_from_header(big_item.header.as_mut_ptr());
-            let type_info = Fmt::determine_type(obj);
-            let mark_data = Fmt::mark_data_ptr(obj, type_info);
-            match (&*mark_data).load_snapshot().state.resolve(was_mark_inverted) {
+            let total_size = big_item.header.type_info.determine_total_size(addr_of_mut!(big_item.header));
+            match big_item.header.mark_data.load_snapshot().state.resolve(was_mark_inverted) {
                 MarkState::White => {
                     // Free the object
-                    expected_size -= type_info.determine_total_size(obj);
+                    expected_size -= total_size;
                     true // remove from list
                 },
                 MarkState::Grey => panic!("All gray objects should've been processed"),
@@ -431,7 +424,7 @@ impl<Fmt: RawObjectFormat> SimpleAlloc<Fmt> {
                      * State will be implicitly set to white
                      * by inverting mark the meaning of the mark bits.
                      */
-                    actual_size += type_info.determine_total_size(obj);
+                    actual_size += total_size;
                     false // Keep
                 }
             }
@@ -446,52 +439,29 @@ impl<Fmt: RawObjectFormat> SimpleAlloc<Fmt> {
         self.set_allocated_size(actual_size);
     }
 }
-unsafe impl<Fmt: RawObjectFormat> Send for SimpleAlloc<Fmt> {}
+unsafe impl Send for SimpleAlloc {}
 /// We're careful to be thread safe here
 ///
 /// This isn't auto implemented because of the
 /// raw pointer to the collector (we only use it as an id)
-unsafe impl<Fmt: RawObjectFormat> Sync for SimpleAlloc<Fmt> {}
+unsafe impl Sync for SimpleAlloc {}
 
 /// We're careful - I swear :D
-unsafe impl<Fmt: RawObjectFormat> Send for RawSimpleCollector<Fmt> {}
-unsafe impl<Fmt: RawObjectFormat> Sync for RawSimpleCollector<Fmt> {}
-
-/// Trait hack to avoid overflow with [ObjectFormat]
-#[doc(hidden)]
-pub trait RawObjectFormat: Sized + 'static + OpenAllocObjectFormat<RawSimpleCollector<Self>> {
-    fn global() -> &'static Self;
-}
-impl RawObjectFormat for SimpleObjectFormat {
-    #[inline]
-    fn global() -> &'static Self {
-        const INSTANCE: SimpleObjectFormat = SimpleObjectFormat;
-        &INSTANCE
-    }
-}
+unsafe impl Send for RawSimpleCollector {}
+unsafe impl Sync for RawSimpleCollector {}
 
 /// The internal data for a simple collector
 #[doc(hidden)]
-pub struct RawSimpleCollector<Fmt: RawObjectFormat> {
+pub struct RawSimpleCollector {
     logger: Logger,
-    heap: GcHeap<Fmt>,
+    heap: GcHeap,
     manager: CollectionManager<Self>,
     /// Tracks object handles
     handle_list: GcHandleList<Self>,
-    format: &'static Fmt
 }
-unsafe impl<Fmt: RawObjectFormat> GcLayoutInternals for RawSimpleCollector<Fmt> {
-    type Visitor = MarkVisitor<'static, Fmt>;
-    type Id = CollectorId<Fmt>;
-    type VisitorError = !;
-    type Format = Fmt;
-    type MarkData = SimpleMarkData<Fmt>;
-    const IMPLICIT_ALIGN: usize = 0; // TODO
-    const MARK_BITS: usize = usize::MAX; // We use all the bits
-}
-unsafe impl<Fmt: RawObjectFormat> ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector<Fmt> {
-    type DynTracePtr = NonNull<dyn DynTrace<Fmt>>;
-    type Fmt = Fmt;
+
+unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector {
+    type DynTracePtr = NonNull<dyn DynTrace>;
 
     #[cfg(feature = "multiple-collectors")]
     type Ptr = NonNull<Self>;
@@ -508,12 +478,11 @@ unsafe impl<Fmt: RawObjectFormat> ::zerogc_context::collector::RawCollectorImpl 
     const SYNC: bool = cfg!(feature = "sync");
 
     #[inline]
-    fn id_for_gc<'a, 'gc, T>(gc: &'a Gc<'gc, T, Fmt>) -> &'a CollectorId<Fmt> where 'gc: 'a, T: GcSafe + ?Sized + 'gc {
+    fn id_for_gc<'a, 'gc, T>(gc: &'a Gc<'gc, T>) -> &'a CollectorId where 'gc: 'a, T: GcSafe + ?Sized + 'gc {
         #[cfg(feature = "multiple-collectors")] {
             unsafe {
-                let obj = Fmt::into_untyped_object(*gc);
-                let mark_data = Fmt::mark_data_ptr(obj, Fmt::determine_type(obj));
-                &*(&*mark_data).load_snapshot().collector_id_ptr
+                let mark_data = GcHeader::from_value_ptr(gc.as_raw_ptr());
+                &*(&*mark_data).mark_data.load_snapshot().collector_id_ptr
             }
         }
         #[cfg(not(feature = "multiple-collectors"))] {
@@ -523,9 +492,14 @@ unsafe impl<Fmt: RawObjectFormat> ::zerogc_context::collector::RawCollectorImpl 
     }
 
     #[inline]
-    unsafe fn create_dyn_pointer<T: Trace>(&self, value: *mut T) -> Self::DynTracePtr {
+    unsafe fn as_dyn_trace_pointer<T: Trace>(value: *mut T) -> Self::DynTracePtr {
         debug_assert!(!value.is_null());
-        NonNull::new_unchecked(value) as NonNull<dyn DynTrace<Fmt>>
+        NonNull::new_unchecked(
+            std::mem::transmute::<
+                *mut dyn DynTrace,
+                *mut (dyn DynTrace + 'static)
+            >(value as *mut dyn DynTrace)
+        )
     }
 
     #[cfg(not(feature = "multiple-collectors"))]
@@ -536,10 +510,10 @@ unsafe impl<Fmt: RawObjectFormat> ::zerogc_context::collector::RawCollectorImpl 
     #[cfg(feature = "multiple-collectors")]
     fn init(logger: Logger) -> NonNull<Self> {
         // We're assuming its safe to create multiple (as given by config)
-        let raw = unsafe { RawSimpleCollector::with_logger(Fmt::global(), logger) };
+        let raw = unsafe { RawSimpleCollector::with_logger(logger) };
         let mut collector = Arc::new(raw);
         let raw_ptr = unsafe { NonNull::new_unchecked(
-            Arc::as_ptr(&collector) as *mut RawSimpleCollector<Fmt>
+            Arc::as_ptr(&collector) as *mut RawSimpleCollector
         ) };
         Arc::get_mut(&mut collector).unwrap()
             .heap.allocator.collector_id = Some(unsafe { CollectorId::from_raw(raw_ptr) });
@@ -549,8 +523,8 @@ unsafe impl<Fmt: RawObjectFormat> ::zerogc_context::collector::RawCollectorImpl 
 
     #[inline(always)]
     unsafe fn gc_write_barrier<'gc, T, V>(
-        _owner: &Gc<'gc, T, Fmt>,
-        _value: &Gc<'gc, V, Fmt>,
+        _owner: &Gc<'gc, T>,
+        _value: &Gc<'gc, V>,
         _field_offset: usize
     ) where T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {
         // Simple GC doesn't need write barriers
@@ -585,9 +559,9 @@ unsafe impl<Fmt: RawObjectFormat> ::zerogc_context::collector::RawCollectorImpl 
     }
 }
 #[cfg(feature = "sync")]
-unsafe impl<Fmt: RawObjectFormat> ::zerogc_context::collector::SyncCollector for RawSimpleCollector<Fmt> {}
+unsafe impl ::zerogc_context::collector::SyncCollector for RawSimpleCollector {}
 #[cfg(not(feature = "multiple-collectors"))]
-unsafe impl<Fmt: RawObjectFormat> zerogc_context::collector::SingletonCollector for RawSimpleCollector<Fmt> {
+unsafe impl zerogc_context::collector::SingletonCollector for RawSimpleCollector {
     #[inline]
     fn global_ptr() -> *const Self {
         GLOBAL_COLLECTOR.load(Ordering::Acquire)
@@ -620,30 +594,32 @@ unsafe impl<Fmt: RawObjectFormat> zerogc_context::collector::SingletonCollector 
         );
     }
 }
-impl<Fmt: RawObjectFormat> RawSimpleCollector<Fmt> {
-    unsafe fn with_logger(format: &'static Fmt, logger: Logger) -> Self {
+impl RawSimpleCollector {
+    unsafe fn with_logger(logger: Logger) -> Self {
         RawSimpleCollector {
             logger,
             manager: CollectionManager::new(),
-            heap: GcHeap::new(format, INITIAL_COLLECTION_THRESHOLD),
+            heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD),
             handle_list: GcHandleList::new(),
-            format
         }
     }
     #[cold]
     #[inline(never)]
-    unsafe fn perform_raw_collection<'a>(
-        &'a self, contexts: &[*mut RawContext<Self>]
+    unsafe fn perform_raw_collection(
+        &self, contexts: &[*mut RawContext<Self>]
     ) {
         debug_assert!(self.manager.is_collecting());
-        let roots: Vec<Self::DynTracePtr> = contexts.iter()
+        let roots: Vec<*mut dyn DynTrace> = contexts.iter()
             .flat_map(|ctx| {
                 (**ctx).assume_valid_shadow_stack()
                     .reverse_iter().map(NonNull::as_ptr)
             })
             .chain(std::iter::once(&self.handle_list
                 // Cast to wrapper type
-                as *const GcHandleList<Self> as *const GcHandleListWrapper<Fmt> as *const (dyn DynTrace<Fmt> + 'a)
+                as *const GcHandleList<Self> as *const GcHandleListWrapper
+                // Make into virtual pointer
+                as *const dyn DynTrace
+                as *mut dyn DynTrace
             ))
             .collect();
         let num_roots = roots.len();
@@ -668,14 +644,14 @@ impl<Fmt: RawObjectFormat> RawSimpleCollector<Fmt> {
         );
     }
 }
-struct CollectionTask<'a, Fmt: RawObjectFormat> {
+struct CollectionTask<'a> {
     expected_collector: CollectorId,
-    roots: Vec<NonNull<dyn DynTrace<Fmt>>>,
-    heap: &'a GcHeap<Fmt>,
+    roots: Vec<*mut dyn DynTrace>,
+    heap: &'a GcHeap,
     #[cfg_attr(feature = "implicit-grey-stack", allow(dead_code))]
-    grey_stack: Vec<Fmt::DynObject>
+    grey_stack: Vec<*mut GcHeader>
 }
-impl<'a, Fmt: RawObjectFormat> CollectionTask<'a, Fmt> {
+impl<'a> CollectionTask<'a> {
     fn run(&mut self) {
         // Mark
         for &root in &self.roots {
@@ -691,7 +667,7 @@ impl<'a, Fmt: RawObjectFormat> CollectionTask<'a, Fmt> {
             let was_inverted_mark = self.heap.allocator.mark_inverted();
             while let Some(obj) = self.grey_stack.pop() {
                 debug_assert_eq!(
-                    (*obj).raw_state().resolve(was_inverted_mark),
+                    (*obj).raw_mark_state().resolve(was_inverted_mark),
                     MarkState::Grey
                 );
                 let mut visitor = MarkVisitor {
@@ -699,12 +675,14 @@ impl<'a, Fmt: RawObjectFormat> CollectionTask<'a, Fmt> {
                     grey_stack: &mut self.grey_stack,
                     inverted_mark: was_inverted_mark
                 };
-                ((*obj).type_info.trace_func)(
-                    &mut *(*obj).value(),
-                    &mut visitor
-                );
+                if let Some(trace) = (*obj).type_info.trace_func {
+                    (trace)(
+                        &mut *(*obj).value(),
+                        &mut visitor
+                    );
+                }
                 // Mark the object black now it's innards have been traced
-                (*obj).update_raw_state(MarkState::Black.to_raw(was_inverted_mark));
+                (*obj).update_raw_mark_state(MarkState::Black.to_raw(was_inverted_mark));
             }
         }
         // Sweep
@@ -719,24 +697,21 @@ impl<'a, Fmt: RawObjectFormat> CollectionTask<'a, Fmt> {
 }
 
 #[doc(hidden)] // NOTE: Needs be public for RawCollectorImpl
-pub struct MarkVisitor<'a, Fmt: RawObjectFormat> {
-    expected_collector: CollectorId<Fmt>,
+pub struct MarkVisitor<'a> {
+    expected_collector: CollectorId,
     #[cfg_attr(feature = "implicit-grey-stack", allow(dead_code))]
-    grey_stack: &'a mut Vec<Fmt::DynObject>,
+    grey_stack: &'a mut Vec<*mut GcHeader>,
     /// If this meaning of the mark bit is currently inverted
     ///
     /// This flips every collection
     inverted_mark: bool
 }
-impl<'a, Fmt: RawObjectFormat> MarkVisitor<'a, Fmt> {
+impl<'a> MarkVisitor<'a> {
     fn visit_raw_gc(
-        &mut self, obj: Fmt::DynObject,
-        trace_func: impl FnOnce(&mut Fmt::DynObject, &mut MarkVisitor<'a, Fmt>)
+        &mut self, obj: &mut GcHeader,
+        trace_func: impl FnOnce(&mut GcHeader, &mut MarkVisitor<'a>)
     ) {
-        let mark_data = unsafe {
-            Fmt::mark_data_ptr(obj, Fmt::determine_type(obj))
-        };
-        match unsafe { (&*mark_data).load_snapshot().resolve(self.inverted_mark) } {
+        match obj.raw_mark_state().resolve(self.inverted_mark) {
             MarkState::White => trace_func(obj, self),
             MarkState::Grey => {
                 /*
@@ -753,7 +728,7 @@ impl<'a, Fmt: RawObjectFormat> MarkVisitor<'a, Fmt> {
         }
     }
 }
-unsafe impl<Fmt: RawObjectFormat> GcVisitor for MarkVisitor<'_, Fmt> {
+unsafe impl GcVisitor for MarkVisitor<'_> {
     type Err = !;
 
     #[inline]
@@ -770,7 +745,7 @@ unsafe impl<Fmt: RawObjectFormat> GcVisitor for MarkVisitor<'_, Fmt> {
              */
             let gc = std::mem::transmute::<
                 &mut ::zerogc::Gc<'gc, T, Id>,
-                &mut ::zerogc::Gc<'gc, T, crate::CollectorId<Fmt>>
+                &mut ::zerogc::Gc<'gc, T, crate::CollectorId>
             >(gc);
             /*
              * Check the collectors match. Otherwise we're mutating
@@ -785,16 +760,15 @@ unsafe impl<Fmt: RawObjectFormat> GcVisitor for MarkVisitor<'_, Fmt> {
         }
     }
 }
-impl<Fmt: RawObjectFormat> MarkVisitor<'_, Fmt> {
+impl MarkVisitor<'_> {
     /// Visit a GC type whose [::zerogc::CollectorId] matches our own
     ///
     /// The caller should only use `GcVisitor::visit_gc()`
-    unsafe fn _visit_own_gc<'gc, T: GcSafe + 'gc>(&mut self, gc: &mut Gc<'gc, T, Fmt>) {
+    unsafe fn _visit_own_gc<'gc, T: GcSafe + 'gc>(&mut self, gc: &mut Gc<'gc, T>) {
         // Verify this again (should be checked by caller)
         debug_assert_eq!(*gc.collector_id(), self.expected_collector);
-        let untyped = Fmt::into_untyped_object(*gc);
-        let mark_data = Fmt::mark_data_ptr(untyped, Fmt::determine_type(untyped));
-        self.visit_raw_gc(untyped, |obj, visitor| {
+        let header = GcHeader::from_value_ptr(gc.as_raw_ptr());
+        self.visit_raw_gc(&mut *header, |obj, visitor| {
             let inverted_mark = visitor.inverted_mark;
             if !T::NEEDS_TRACE {
                 /*
@@ -802,13 +776,13 @@ impl<Fmt: RawObjectFormat> MarkVisitor<'_, Fmt> {
                  * It has no internals that need to be traced.
                  * We can directly move it directly to the black set
                  */
-                (*mark_data).update_raw_state(MarkState::Black.to_raw(inverted_mark));
+                obj.update_raw_mark_state(MarkState::Black.to_raw(inverted_mark));
             } else {
                 /*
                  * We need to mark this object grey and push it onto the grey stack.
                  * It will be processed later
                  */
-                (*mark_data).update_raw_state(MarkState::Grey.to_raw(inverted_mark));
+                (*obj).update_raw_mark_state(MarkState::Grey.to_raw(inverted_mark));
                 #[cfg(not(feature = "implicit-grey-stack"))] {
                     visitor.grey_stack.push(obj as *mut GcHeader);
                 }
@@ -819,7 +793,7 @@ impl<Fmt: RawObjectFormat> MarkVisitor<'_, Fmt> {
                      * boost performance (See 9a9634d68a4933d).
                      * On some workloads this is fine.
                      */
-                    <T as Trace>::visit(
+                    let Ok(()) = <T as Trace>::visit(
                         &mut *(gc.value() as *const T as *mut T),
                         visitor
                     );
@@ -827,7 +801,7 @@ impl<Fmt: RawObjectFormat> MarkVisitor<'_, Fmt> {
                      * Mark the object black now it's innards have been traced
                      * NOTE: We do **not** do this with an implicit stack.
                      */
-                    (*mark_data).update_raw_state(MarkState::Black.to_raw(
+                    (*obj).update_raw_mark_state(MarkState::Black.to_raw(
                         inverted_mark
                     ));
                 }

@@ -1,4 +1,4 @@
-//! A simpler implementation of [::zerogc::CollectorContext]
+//! A simpler implementation of (GcContext)[`::zerogc::GcContext`]
 //! that doesn't support multiple threads/contexts.
 //!
 //! In exchange, there is no locking :)

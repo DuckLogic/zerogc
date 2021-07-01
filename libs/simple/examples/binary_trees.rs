@@ -69,7 +69,7 @@ fn main() {
 
     let long_lived_tree = bottom_up_tree(&gc, max_depth);
 
-    let (long_lived_tree, ()) = safepoint_recurse!(gc, long_lived_tree, |gc, long_lived_tree| {
+    let (long_lived_tree, ()) = safepoint_recurse!(gc, long_lived_tree, |gc, _long_lived_tree| {
         (min_depth / 2..max_depth / 2 + 1).into_iter().for_each(|half_depth| {
             let depth = half_depth * 2;
             let iterations = 1 << ((max_depth - depth + min_depth) as u32);

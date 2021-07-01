@@ -49,7 +49,7 @@
 /// but it's still a possibility that causes the macro to be unsafe.
 ///
 ///
-/// This delegates to `unsafe_gc_brand` to provide the [GcRebrand] and [GcErase] implementation,
+/// This delegates to `unsafe_gc_brand` to provide the (GcRebrand)[`crate::GcRebrand`] and (GcErase)[`crate::GcErase`] implementation,
 /// so that could also trigger undefined behavior.
 #[macro_export]
 macro_rules! unsafe_trace_lock {
@@ -98,7 +98,7 @@ macro_rules! unsafe_trace_lock {
 /// Undefined behavior only if there are garbage collected pointers in the type's interior,
 /// since the implementation assumes there's nothing to trace in the first place.
 ///
-/// This delegates to `unsafe_gc_brand!` to provide the [GcRebrand] and [GcErase] implementation,
+/// This delegates to `unsafe_gc_brand!` to provide the (GcRebrand)[`crate::GcRebrand`] and (GcErase)[`crate::GcErase`] implementation,
 /// but that will never cause undefined behavior unless you
 /// already have garbage collected pointers inside
 /// (which are already undefined behavior for tracing).

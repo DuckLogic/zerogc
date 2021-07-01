@@ -11,18 +11,15 @@ use alloc::vec::Vec;
 use zerogc::{Trace, GcSafe, GcErase, GcRebrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
 use crate::{Gc, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef, CollectionManager};
 use crate::collector::RawCollectorImpl;
-use std::ffi::c_void;
-use crate::utils::AtomicCell;
-use zerogc::format::ObjectFormat;
 
 const INITIAL_HANDLE_CAPACITY: usize = 64;
 
 /// A [RawCollectorImpl] that supports handles
 pub unsafe trait RawHandleImpl: RawCollectorImpl {
     /// Type information
-    type TypeInfo: Sized + Copy;
+    type TypeInfo: Sized;
 
-    fn type_info_for_val<T: GcSafe>(&self, val: &T) -> Self::TypeInfo;
+    fn type_info_of<T: GcSafe>() -> &'static Self::TypeInfo;
 
     fn handle_list(&self) -> &GcHandleList<Self>;
 }
@@ -235,7 +232,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
     /// Now that's behind a layer of abstraction,
     /// the unsafety has technically been moved to the caller.
     pub unsafe fn trace<F, E>(&mut self, mut visitor: F) -> Result<(), E>
-        where F: FnMut(<C::Fmt as ObjectFormat<C>>::DynObject, &C::TypeInfo) -> Result<(), E> {
+        where F: FnMut(*mut (), &C::TypeInfo) -> Result<(), E> {
         /*
          * TODO: This fence seems unnecessary since we should
          * already have exclusive access.....
@@ -357,14 +354,15 @@ pub struct GcRawHandle<C: RawHandleImpl> {
     /// Refers to the underlying value of this handle.
     ///
     /// If it's null, it's invalid, and is actually
-    /// a [FreedHandle].
+    /// a freed handle
     ///
     /// The underlying value can only be safely accessed
     /// if there isn't a collection in progress
     value: AtomicPtr<()>,
     /// I think this should be protected by the other atomic
     /// accesses. Regardless, I'll put it in an AtomicPtr anyways.
-    pub(crate) type_info: AtomicCell<C::TypeInfo>,
+    // TODO: Encapsulate
+    pub(crate) type_info: AtomicPtr<C::TypeInfo>,
     /// The reference count to the handle
     ///
     /// If this is zero the value can be freed
@@ -381,13 +379,9 @@ impl<C: RawHandleImpl> GcRawHandle<C> {
     /// - It is assumed that the appropriate atomic fences (if any)
     ///   have already been applied (TODO: Don't we have exclusive access?)
     unsafe fn trace_inner<F, E>(&self, trace: &mut F) -> Result<(), E>
-        where F: FnMut(<C::Fmt as ObjectFormat<C>>::DynObject, &C::TypeInfo) -> Result<(), E> {
-        let raw_value = self.value.load(Ordering::Relaxed);
-        assert_eq!(
-            std::mem::size_of::<*mut ()>(),
-            std::mem::size_of::<C::DynTracePtr>(),
-        );
-        if raw_value.is_null() {
+        where F: FnMut(*mut (), &C::TypeInfo) -> Result<(), E> {
+        let value = self.value.load(Ordering::Relaxed);
+        if value.is_null() {
             debug_assert_eq!(
                 self.refcnt.load(Ordering::Relaxed),
                 0
@@ -398,9 +392,8 @@ impl<C: RawHandleImpl> GcRawHandle<C> {
             self.refcnt.load(Ordering::Relaxed),
             0
         );
-        let value = C::Fmt::untyped_object_from_raw(raw_value as *mut c_void);
-        let type_info = self.type_info.load();
-        trace(value, &type_info)
+        let type_info = &*self.type_info.load(Ordering::Relaxed);
+        trace(value, type_info)
     }
 }
 pub struct GcHandle<T: GcSafe, C: RawHandleImpl> {
@@ -623,7 +616,10 @@ unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for CollectorRef<C>
              * the handle!!!
              */
             raw.type_info.store(
-                collector.as_ref().type_info_for_val::<T>(gc.value())
+                C::type_info_of::<T>()
+                    as *const C::TypeInfo
+                    as *mut C::TypeInfo,
+                Ordering::Release
             );
             raw.refcnt.store(1, Ordering::Release);
             let weak_collector = collector.weak_ref();

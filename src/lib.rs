@@ -1,14 +1,5 @@
 #![feature(
     const_panic, // RFC 2345 - Const asserts
-    // Used for object format API:
-    ptr_metadata,
-    // Used for the "simple" object format:
-    alloc_layout_extra, // Needed to compute format
-    const_alloc_layout, // Needed to compute format in 'const'
-    const_fn_transmute,
-    const_fn_trait_bound,
-    const_fn_fn_ptr_basics,
-    const_mut_refs,
 )]
 #![deny(missing_docs)]
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -45,7 +36,6 @@ mod manually_traced;
 pub mod cell;
 pub mod prelude;
 pub mod dummy_impl;
-pub mod format;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.
@@ -458,16 +448,6 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
         res
     }
 
-    /// Create a GC pointer
-    ///
-    /// ## Safety
-    /// This is even more unsafe than [Gc::from_raw],
-    /// because it doesn't check the ids matched
-    #[inline]
-    pub unsafe fn from_raw_without_id(value: NonNull<T>) -> Self {
-        Gc { collector_id: PhantomData, value, marker: PhantomData }
-    }
-
     /// The value of the underlying pointer
     #[inline(always)]
     pub fn value(&self) -> &'gc T {
@@ -717,7 +697,7 @@ pub unsafe trait GcBindHandle<'new_gc, T: GcSafe + ?Sized>: GcHandle<T>
 /// There's no "field offset" we can use to get from `*mut Vec` -> `*mut T`.
 ///
 /// The only exception to this rule is [Gc] itself.
-/// GcRef can freely implement [GcDirectWrite] for any (and all values),
+/// GcRef can freely implement [GcDirectBarrier] for any (and all values),
 /// even though it's just a pointer.
 /// It's the final destination of all write barriers and is expected
 /// to internally handle the indirection.

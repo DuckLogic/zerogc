@@ -28,13 +28,13 @@ pub fn leaked<'gc, T: GcSafe + 'static>(value: T) -> Gc<'gc, T> {
     gc(Box::leak(Box::new(value)))
 }
 
-/// An fake [garbage collected pointer](::zerogc::Gc)
+/// An fake [garbage collected pointer](`crate::Gc`)
 /// that uses the dummy collector system
 ///
 /// This never actually collects any garbage
 pub type Gc<'gc, T> = crate::Gc<'gc, T, DummyCollectorId>;
 
-/// A dummy implementation of [crate::GcSystem]
+/// A dummy implementation of [`crate::GcSystem`]
 /// which is useful for testing
 ///
 /// This just blindly allocates memory and doesn't
@@ -67,7 +67,7 @@ unsafe impl GcContext for DummyContext {
 }
 
 
-/// A dummy implementation of [::zerogc::GcSystem]
+/// A dummy implementation of [GcSystem]
 /// which is useful for testing
 ///
 /// All methods panic and this should never be used
