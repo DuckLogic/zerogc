@@ -1,12 +1,18 @@
+#![feature(
+    arbitrary_self_types, // Used for `zerogc(mutable)`
+)]
 use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, dummy_impl::{self, DummyCollectorId}};
 
 use zerogc_derive::{Trace, NullTrace};
+use zerogc::cell::GcCell;
 
 #[derive(Trace)]
 #[zerogc(collector_id(DummyCollectorId))]
 pub struct SpecificCollector<'gc> {
     gc: Gc<'gc, i32, DummyCollectorId>,
-    rec: Gc<'gc, SpecificCollector<'gc>, DummyCollectorId>
+    rec: Gc<'gc, SpecificCollector<'gc>, DummyCollectorId>,
+    #[zerogc(mutable)]
+    cell: GcCell<Gc<'gc, SpecificCollector<'gc>, DummyCollectorId>>
 }
 
 #[derive(Trace)]
@@ -14,7 +20,9 @@ pub struct SpecificCollector<'gc> {
 pub struct Basic<'gc, Id: CollectorId> {
     parent: Option<Gc<'gc, Basic<'gc, Id>, Id>>,
     children: Vec<Gc<'gc, Basic<'gc, Id>, Id>>,
-    value: String
+    value: String,
+    #[zerogc(mutable)]
+    cell: GcCell<Option<Gc<'gc, Basic<'gc, Id>, Id>>>
 }
 
 #[derive(Copy, Clone, Trace)]
@@ -110,7 +118,8 @@ fn basic<'gc>() {
     let _b = Basic::<dummy_impl::DummyCollectorId> {
         value: String::new(),
         parent: None,
-        children: vec![]
+        children: vec![],
+        cell: GcCell::new(None)
     };
     assert!(<Basic::<dummy_impl::DummyCollectorId> as Trace>::NEEDS_TRACE);
     assert!(<BasicCopy::<dummy_impl::DummyCollectorId> as Trace>::NEEDS_TRACE);

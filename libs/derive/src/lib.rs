@@ -599,11 +599,26 @@ fn impl_extras(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, E
                     // NOTE: Specially quoted since we want to blame the field for errors
                     let field_as_ptr = quote_spanned!(field.span() => #zerogc_crate::cell::GcCell::as_ptr(&(*self.value()).#original_name));
                     let barrier = quote_spanned!(field.span() => #zerogc_crate::GcDirectBarrier::write_barrier(&value, &self, offset));
+                    let id_name = info.config.collector_id.as_ref().cloned()
+                        .unwrap_or_else(|| parse_quote!(Id));
+                    let mut id_generics: Generics = if let Some(ref id_name) = info.config.collector_id {
+                        let mut generics = Generics::default();
+                        generics.make_where_clause().predicates.push(parse_quote!(#id_name: CollectorId));
+                        generics
+                    } else {
+                        parse_quote!(<Id: CollectorId>)
+                    };
+                    id_generics.make_where_clause().predicates.push(parse_quote!(
+                        #value_ref_type: #zerogc_crate::GcDirectBarrier<
+                            #gc_lifetime,
+                            #zerogc_crate::Gc<#gc_lifetime, Self, #id_name>
+                        >
+                    ));
+                    let where_clause = &id_generics.where_clause;
                     extra_items.push(quote! {
                         #[inline] // TODO: Implement `GcDirectBarrier` ourselves
-                        #mutator_vis fn #mutator_name<Id>(self: #zerogc_crate::Gc<#gc_lifetime, Self, Id>, value: #value_ref_type)
-                            where Id: #zerogc_crate::CollectorId,
-                                   #value_ref_type: #zerogc_crate::GcDirectBarrier<#gc_lifetime, #zerogc_crate::Gc<#gc_lifetime, Self, Id>> {
+                        #mutator_vis fn #mutator_name #id_generics(self: #zerogc_crate::Gc<#gc_lifetime, Self, #id_name>, value: #value_ref_type)
+                            #where_clause {
                             unsafe {
                                 let target_ptr = #field_as_ptr;
                                 let offset = target_ptr as usize - self.as_raw_ptr() as usize;
