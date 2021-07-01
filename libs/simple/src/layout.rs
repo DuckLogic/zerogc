@@ -1,4 +1,4 @@
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ffi::c_void;
 use std::alloc::Layout;
 use std::mem;
@@ -69,15 +69,15 @@ impl<Fmt: RawObjectFormat> SimpleMarkData<Fmt> {
 pub struct SimpleMarkDataSnapshot<Fmt: RawObjectFormat> {
     pub state: RawMarkState,
     #[cfg(feature = "multiple-collectors")]
-    pub collector_id: CollectorId<Fmt>
+    pub collector_id_ptr: *mut CollectorId<Fmt>
 }
 impl<Fmt: RawObjectFormat> SimpleMarkDataSnapshot<Fmt> {
-    pub fn new(state: RawMarkState, collector_id: CollectorId<Fmt>) -> Self {
+    pub fn new(state: RawMarkState, collector_id_ptr: *mut CollectorId<Fmt>) -> Self {
         #[cfg(feature = "multiple-collectors")] {
-            SimpleMarkDataSnapshot { state, collector_id }
+            SimpleMarkDataSnapshot { state, collector_id_ptr }
         }
         #[cfg(not(feature = "multiple-collectors"))] {
-            drop(collector_id); // avoid warnings
+            drop(collector_id_ptr); // avoid warnings
             SimpleMarkDataSnapshot { state }
         }
     }
@@ -85,7 +85,7 @@ impl<Fmt: RawObjectFormat> SimpleMarkDataSnapshot<Fmt> {
     fn packed(&self) -> usize {
         let base: usize;
         #[cfg(feature = "multiple-collectors")] {
-            base = self.collector_id.as_ref() as *const RawSimpleCollector<Fmt> as usize;
+            base = (*self.collector_id_ptr).as_ref() as *const RawSimpleCollector<Fmt> as usize;
         }
         #[cfg(not(feature = "multiple-collectors"))] {
             base = 0;
@@ -98,8 +98,8 @@ impl<Fmt: RawObjectFormat> SimpleMarkDataSnapshot<Fmt> {
         let state = MarkState::from_byte((packed & STATE_MASK) as u8);
         let id_bytes: usize = packed & !STATE_MASK;
         #[cfg(feature="multiple-collectors")] {
-            let collector_id = CollectorId::from_raw(NonNull::new_unchecked(id_bytes));
-            SimpleMarkDataSnapshot { state, collector_id }
+            let collector_id_ptr = id_bytes as *mut CollectorId<Fmt>;
+            SimpleMarkDataSnapshot { state, collector_id_ptr }
         }
         #[cfg(not(feature = "multiple-collectors"))] {
             SimpleMarkDataSnapshot { state }
@@ -112,7 +112,7 @@ struct DynamicObj;
 
 #[repr(C)]
 pub(crate) struct BigGcObject<Fmt: RawObjectFormat, T = DynamicObj> {
-    pub(crate) header: Fmt::SizedHeaderType,
+    pub(crate) header: MaybeUninit<Fmt::SizedHeaderType>,
     /// This is dropped using dynamic type info
     pub(crate) static_value: ManuallyDrop<T>
 }

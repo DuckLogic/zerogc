@@ -76,15 +76,15 @@ impl<GC: GcLayoutInternals> GcArrayHeader<GC> {
     }
 }
 
-pub unsafe trait DynTrace<GC: GcLayoutInternals> {
+unsafe trait DynObjectTrace<GC: GcLayoutInternals> {
     unsafe fn dyn_trace(ptr: *mut DynObject, visitor: &mut GC::Visitor) -> Result<(), GC::VisitorError>;
 }
-unsafe impl<GC: GcLayoutInternals, T: GcSafe> DynTrace<GC> for T {
+unsafe impl<GC: GcLayoutInternals, T: GcSafe> DynObjectTrace<GC> for T {
     unsafe fn dyn_trace(ptr: *mut DynObject, visitor: &mut GC::Visitor) -> Result<(), GC::VisitorError> {
         <T as crate::Trace>::visit(&mut *(ptr as *mut T), visitor)
     }
 }
-unsafe impl<GC: GcLayoutInternals, T: GcSafe> DynTrace<GC> for [T] {
+unsafe impl<GC: GcLayoutInternals, T: GcSafe> DynObjectTrace<GC> for [T] {
     unsafe fn dyn_trace(ptr: *mut DynObject, visitor: &mut GC::Visitor) -> Result<(), <GC as GcLayoutInternals>::VisitorError> {
         let header = GcArrayHeader::<GC>::array_header_for(ptr);
         let slice = std::slice::from_raw_parts_mut(ptr as *mut T, (*header).len);
@@ -117,7 +117,7 @@ impl<GC: GcLayoutInternals> SimpleGcType<GC> {
                 element_layout: Layout::new::<T>()
             },
             trace_func: if T::NEEDS_TRACE {
-                Some(<[T] as DynTrace<GC>>::dyn_trace as unsafe fn(*mut DynObject, &mut GC::Visitor) -> _)
+                Some(<[T] as DynObjectTrace<GC>>::dyn_trace as unsafe fn(*mut DynObject, &mut GC::Visitor) -> _)
             } else { None },
             drop_func: if T::NEEDS_DROP {
                 Some(GcArrayHeader::<GC>::dyn_drop_func::<T> as unsafe fn(*mut DynObject))
@@ -132,7 +132,7 @@ impl<GC: GcLayoutInternals> SimpleGcType<GC> {
             layout: LayoutInfo::Fixed(Layout::new::<T>()),
             trace_func: if T::NEEDS_TRACE {
                 unsafe { Some(
-                    <T as DynTrace<GC>>::dyn_trace as unsafe fn(_, &mut GC::Visitor) -> _,
+                    <T as DynObjectTrace<GC>>::dyn_trace as unsafe fn(_, &mut GC::Visitor) -> _,
                 ) }
             } else {
                 None
@@ -219,6 +219,7 @@ unsafe impl<GC: GcLayoutInternals> GcTypeInfo for &'static SimpleGcType<GC> {
     }
 }
 
+#[derive(Default)]
 pub struct SimpleObjectFormat;
 unsafe impl<GC: GcLayoutInternals> ObjectFormat<GC> for SimpleObjectFormat {
     type DynObject = DynObjectPtr;
@@ -262,6 +263,11 @@ unsafe impl<GC: GcLayoutInternals> ObjectFormat<GC> for SimpleObjectFormat {
 }
 impl<GC: GcLayoutInternals> OpenAllocObjectFormat<GC> for SimpleObjectFormat {
     type SizedHeaderType = GcHeader<GC>;
+
+    #[inline]
+    unsafe fn untyped_object_from_header(header: *mut Self::SizedHeaderType) -> Self::DynObject {
+        DynObjectPtr((header as *mut u8).add(GcHeader::<GC>::regular_value_offset((*header).gc_type.align())).cast())
+    }
 
     #[inline]
     unsafe fn write_sized_header<T: GcSafe>(&self, header_location: *mut Self::SizedHeaderType, mark_data: GC::MarkData) -> *mut T {

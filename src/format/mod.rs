@@ -187,6 +187,8 @@ pub unsafe trait ObjectFormat<GC: GcLayoutInternals>: 'static {
 pub trait OpenAllocObjectFormat<GC: GcLayoutInternals>: ObjectFormat<GC> {
     /// The header type to prepend to all 'Sized' allocated objects
     type SizedHeaderType: Sized + NullTrace;
+    /// Create an untyped object from a pointer to its header
+    unsafe fn untyped_object_from_header(header: *mut Self::SizedHeaderType) -> <Self as ObjectFormat<GC>>::DynObject;
     /// Write a sized object header, given the specified header location and initial marking data
     ///
     /// Returns a pointer to the location of the allocated object.

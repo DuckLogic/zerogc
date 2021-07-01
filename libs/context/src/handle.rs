@@ -13,6 +13,7 @@ use crate::{Gc, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef, C
 use crate::collector::RawCollectorImpl;
 use std::ffi::c_void;
 use crate::utils::AtomicCell;
+use zerogc::format::ObjectFormat;
 
 const INITIAL_HANDLE_CAPACITY: usize = 64;
 
@@ -234,7 +235,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
     /// Now that's behind a layer of abstraction,
     /// the unsafety has technically been moved to the caller.
     pub unsafe fn trace<F, E>(&mut self, mut visitor: F) -> Result<(), E>
-        where F: FnMut(C::GcDynPointer, &C::TypeInfo) -> Result<(), E> {
+        where F: FnMut(<C::Fmt as ObjectFormat<C>>::DynObject, &C::TypeInfo) -> Result<(), E> {
         /*
          * TODO: This fence seems unnecessary since we should
          * already have exclusive access.....
@@ -380,11 +381,11 @@ impl<C: RawHandleImpl> GcRawHandle<C> {
     /// - It is assumed that the appropriate atomic fences (if any)
     ///   have already been applied (TODO: Don't we have exclusive access?)
     unsafe fn trace_inner<F, E>(&self, trace: &mut F) -> Result<(), E>
-        where F: FnMut(C::GcDynPointer, &C::TypeInfo) -> Result<(), E> {
+        where F: FnMut(<C::Fmt as ObjectFormat<C>>::DynObject, &C::TypeInfo) -> Result<(), E> {
         let raw_value = self.value.load(Ordering::Relaxed);
         assert_eq!(
             std::mem::size_of::<*mut ()>(),
-            std::mem::size_of::<C::GcDynPointer>(),
+            std::mem::size_of::<C::DynTracePtr>(),
         );
         if raw_value.is_null() {
             debug_assert_eq!(
@@ -397,7 +398,7 @@ impl<C: RawHandleImpl> GcRawHandle<C> {
             self.refcnt.load(Ordering::Relaxed),
             0
         );
-        let value = C::dyn_ptr_from_raw(raw_value as *mut c_void);
+        let value = C::Fmt::untyped_object_from_raw(raw_value as *mut c_void);
         let type_info = self.type_info.load();
         trace(value, &type_info)
     }

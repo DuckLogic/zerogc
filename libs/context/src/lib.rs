@@ -241,16 +241,16 @@ impl<C: RawCollectorImpl> Debug for ShadowStack<C> {
 pub struct ShadowStack<C: RawCollectorImpl> {
     /// The last element in the shadow stack,
     /// or NULL if it's empty
-    pub(crate) last: *const ShadowStackLink<C::GcDynPointer>
+    pub(crate) last: *const ShadowStackLink<C::DynTracePtr>
 }
 impl<C: RawCollectorImpl> ShadowStack<C> {
-    unsafe fn as_vec(&self) -> Vec<C::GcDynPointer> {
+    unsafe fn as_vec(&self) -> Vec<C::DynTracePtr> {
         let mut result: Vec<_> = self.reverse_iter().collect();
         result.reverse();
         result
     }
     #[inline]
-    pub unsafe fn reverse_iter(&self) -> impl Iterator<Item=C::GcDynPointer> + '_ {
+    pub unsafe fn reverse_iter(&self) -> impl Iterator<Item=C::DynTracePtr> + '_ {
         core::iter::successors(
             self.last.as_ref(),
             |link| link.prev.as_ref()
