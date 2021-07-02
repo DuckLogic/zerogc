@@ -17,7 +17,7 @@ indexmap = { version = "1.6", optional = true }
 zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.3" }
 
 [workspace]
-members = ["libs/simple", "libs/derive", "libs/context"]
+members = ["libs/simple", "libs/derive", "libs/context", "libs/test"]
 
 [profile.dev]
 opt-level = 1
