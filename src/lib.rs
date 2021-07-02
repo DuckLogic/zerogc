@@ -1,5 +1,6 @@
 #![feature(
     const_panic, // RFC 2345 - Const asserts
+    generic_associated_types, // Needed for GcHandleSystem
 )]
 #![deny(missing_docs)]
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -208,12 +209,11 @@ pub unsafe trait GcSystem {
 ///
 /// This type-system hackery is needed because
 /// we need to place bounds on `T as GcBrand`
-// TODO: Remove when we get more powerful types
-pub unsafe trait GcHandleSystem<'gc, 'a, T: GcSafe + ?Sized + 'gc>: GcSystem
-    where T: GcErase<'a, Self::Id>,
-          <T as GcErase<'a, Self::Id>>::Erased: GcSafe {
+pub unsafe trait GcHandleSystem: GcSystem {
     /// The type of handles to this object.
-    type Handle: GcHandle<<T as GcErase<'a, Self::Id>>::Erased, System=Self>;
+    type Handle<'a, T>: GcHandle<<T as GcErase<'a, Self::Id>>::Erased, System=Self>
+        where T: ?Sized + GcSafe + GcErase<'a, Self::Id>,
+                <T as GcErase<'a, Self::Id>>::Erased: GcSafe;
 
     /// Create a handle to the specified GC pointer,
     /// which can be used without a context
@@ -222,7 +222,9 @@ pub unsafe trait GcHandleSystem<'gc, 'a, T: GcSafe + ?Sized + 'gc>: GcSystem
     ///
     /// The system is implicit in the [Gc]
     #[doc(hidden)]
-    fn create_handle(gc: Gc<'gc, T, Self::Id>) -> Self::Handle;
+    fn create_handle<'gc, 'a, T>(gc: Gc<'gc, T, Self::Id>) -> Self::Handle<'a, T>
+        where T: ?Sized + GcSafe + GcErase<'a, Self::Id>,
+             <T as GcErase<'a, Self::Id>>::Erased: GcSafe;
 }
 
 /// The context of garbage collection,
@@ -321,7 +323,7 @@ pub unsafe trait GcContext: Sized {
 ///
 /// Some garbage collectors implement more complex interfaces,
 /// so implementing this is optional
-pub unsafe trait GcSimpleAlloc<'gc, T: GcSafe + 'gc>: GcContext + 'gc {
+pub unsafe trait GcSimpleAlloc: GcContext {
     /// Allocate the specified object in this garbage collector,
     /// binding it to the lifetime of this collector.
     ///
@@ -334,7 +336,7 @@ pub unsafe trait GcSimpleAlloc<'gc, T: GcSafe + 'gc>: GcContext + 'gc {
     ///
     /// This gives a immutable reference to the resulting object.
     /// Once allocated, the object can only be correctly modified with a `GcCell`
-    fn alloc(&'gc self, value: T) -> Gc<'gc, T, Self::Id>;
+    fn alloc<'gc, T: GcSafe + 'gc>(&'gc self, value: T) -> Gc<'gc, T, Self::Id>;
 }
 /// The internal representation of a frozen context
 ///
@@ -468,11 +470,11 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
 
     /// Create a handle to this object, which can be used without a context
     #[inline]
-    pub fn create_handle<'a>(&self) -> <Id::System as GcHandleSystem<'gc, 'a, T>>::Handle
-        where Id::System: GcHandleSystem<'gc, 'a, T>,
+    pub fn create_handle<'a>(&self) -> <Id::System as GcHandleSystem>::Handle<'a, T>
+        where Id::System: GcHandleSystem,
               T: GcErase<'a, Id> + 'a,
               <T as GcErase<'a, Id>>::Erased: GcSafe + 'a {
-        <Id::System as GcHandleSystem<'gc, 'a, T>>::create_handle(*self)
+        <Id::System as GcHandleSystem>::create_handle(*self)
     }
 
     /// Get a reference to the system
@@ -628,6 +630,21 @@ pub unsafe trait GcHandle<T: GcSafe + ?Sized>: Clone + NullTrace {
     /// The type of [CollectorId] used with this sytem
     type Id: CollectorId;
 
+    /// Associate this handle with the specified context,
+    /// allowing its underlying object to be accessed
+    /// as long as the context is valid.
+    ///
+    /// The underlying object can be accessed just like any
+    /// other object that would be allocated from the context.
+    /// It'll be properly collected and can even be used as a root
+    /// at the next safepoint.
+    fn bind_to<'new_gc>(&self, context: &'new_gc <Self::System as GcSystem>::Context) -> Gc<
+        'new_gc,
+        <T as GcRebrand<'new_gc, Self::Id>>::Branded,
+        Self::Id
+    > where T: GcRebrand<'new_gc, Self::Id>,
+            <T as GcRebrand<'new_gc, Self::Id>>::Branded: GcSafe;
+
     /// Access this handle inside the closure,
     /// possibly associating it with the specified
     ///
@@ -645,30 +662,6 @@ pub unsafe trait GcHandle<T: GcSafe + ?Sized>: Clone + NullTrace {
      * How much does it limit flexibility?
      */
     fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R;
-}
-/// Trait for binding [GcHandle]s to contexts
-/// using [GcBindHandle::bind_to]
-///
-/// This is separate from the [GcHandle] trait
-/// because Rust doesn't have Generic Associated Types
-///
-/// TODO: Remove when we get more powerful types
-pub unsafe trait GcBindHandle<'new_gc, T: GcSafe + ?Sized>: GcHandle<T>
-    where T: GcRebrand<'new_gc, Self::Id>,
-          <T as GcRebrand<'new_gc, Self::Id>>::Branded: GcSafe {
-    /// Associate this handle with the specified context,
-    /// allowing its underlying object to be accessed
-    /// as long as the context is valid.
-    ///
-    /// The underlying object can be accessed just like any
-    /// other object that would be allocated from the context.
-    /// It'll be properly collected and can even be used as a root
-    /// at the next safepoint.
-    fn bind_to(&self, context: &'new_gc <Self::System as GcSystem>::Context) -> Gc<
-        'new_gc,
-        <T as GcRebrand<'new_gc, Self::Id>>::Branded,
-        Self::Id
-    >;
 }
 
 /// Safely trigger a write barrier before

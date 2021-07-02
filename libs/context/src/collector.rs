@@ -342,10 +342,10 @@ impl<C: RawCollectorImpl> WeakCollectorRef<C> {
 pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
     fn alloc<'gc, T: GcSafe + 'gc>(context: &'gc CollectorContext<Self>, value: T) -> Gc<'gc, T, CollectorId<Self>>;
 }
-unsafe impl<'gc, T, C> GcSimpleAlloc<'gc, T> for CollectorContext<C>
-    where T: GcSafe + 'gc, C: RawSimpleAlloc {
+unsafe impl<C> GcSimpleAlloc for CollectorContext<C>
+    where C: RawSimpleAlloc {
     #[inline]
-    fn alloc(&'gc self, value: T) -> Gc<'gc, T, Self::Id> {
+    fn alloc<'gc, T>(&'gc self, value: T) -> Gc<'gc, T, Self::Id> where T: GcSafe + 'gc, {
         C::alloc(self, value)
     }
 }
