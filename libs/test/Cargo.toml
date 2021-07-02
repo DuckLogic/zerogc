@@ -1,0 +1,46 @@
+[package]
+name = "zerogc-test"
+description = "The custom test harness for zerogc collectors"
+version = "0.2.0-alpha.3"
+authors = ["Techcable <Techcable@techcable.net>"]
+repository = "https://github.com/DuckLogic/zerogc"
+readme = "../../README.md"
+license = "MIT"
+edition = "2018"
+# For internal use only
+publish = false
+
+[[bin]]
+name = "zerogc-test"
+main = "src/main.rs"
+
+[dependencies]
+zerogc = { path = "../..", version = "0.2.0-alpha.3" }
+zerogc-derive = { path = "../derive", version = "0.2.0-alpha.3"}
+# Concurrency
+parking_lot = "0.11"
+crossbeam-utils = "0.8"
+# Logging
+slog = "2.7"
+slog-term = "2.6"
+# Error handling
+anyhow = "1"
+# Used for binary_trees_parallel examle
+rayon = "1.3"
+# CLI
+clap = { version = "3.0.0-beta.2", optional = true }
+
+[dependencies.zerogc-simple]
+path = "../simple"
+version = "0.2.0-alpha.3"
+no-default-features = true
+optional = true
+
+[features]
+default = ["simple", "cli"]
+# Enable the simple collector,
+simple = ["zerogc-simple", "zerogc-simple/sync", "zerogc-simple/small-object-arenas"]
+# Enable multiple collectors (for the simple collector)
+simple-multiple = ["zerogc-simple/multiple-collectors"]
+# Enable features needed for the CLI
+cli = ["clap"]
