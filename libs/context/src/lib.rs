@@ -2,6 +2,7 @@
     negative_impls, // !Send is much cleaner than `PhantomData<Rc>`
     untagged_unions, // I want to avoid ManuallyDrop in unions
     const_fn_trait_bound, // So generics + const fn are unstable, huh?
+    generic_associated_types, // GcHandle
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
 //! The implementation of (GcContext)[`::zerogc::GcContext`] that is

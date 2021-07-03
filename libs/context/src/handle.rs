@@ -8,7 +8,7 @@ use core::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use zerogc::{Trace, GcSafe, GcErase, GcRebrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
+use zerogc::{Trace, GcSafe, GcErase, GcRebrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem};
 use crate::{Gc, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef, CollectionManager};
 use crate::collector::RawCollectorImpl;
 
@@ -417,30 +417,10 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C
     type System = CollectorRef<C>;
     type Id = CollectorId<C>;
 
-    fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R {
-        self.collector.ensure_valid(|collector| unsafe {
-            /*
-             * This should be sufficient to ensure
-             * the value won't be collected or relocated.
-             *
-             * Note that this is implemented using a read lock,
-             * so recursive calls will deadlock.
-             * This is preferable to using `recursive_read`,
-             * since that could starve writers (collectors).
-             */
-            C::Manager::prevent_collection(collector.as_ref(), || {
-                let value = self.inner.as_ref().value
-                    .load(Ordering::Acquire) as *mut T;
-                func(&*value)
-            })
-        })
-    }
-}
-unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
-    where T: GcSafe, T: GcRebrand<'new_gc, CollectorId<C>>,
-          T::Branded: GcSafe, C: RawHandleImpl {
     #[inline]
-    fn bind_to(&self, context: &'new_gc CollectorContext<C>) -> Gc<'new_gc, T::Branded, CollectorId<C>> {
+    fn bind_to<'new_gc>(&self, context: &'new_gc CollectorContext<C>) -> Gc<'new_gc, T::Branded, CollectorId<C>>
+        where T: GcRebrand<'new_gc, Self::Id>,
+              <T as GcRebrand<'new_gc, Self::Id>>::Branded: GcSafe {
         /*
          * We can safely assume the object will
          * be as valid as long as the context.
@@ -472,6 +452,24 @@ unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
         }
     }
 
+    fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R {
+        self.collector.ensure_valid(|collector| unsafe {
+            /*
+             * This should be sufficient to ensure
+             * the value won't be collected or relocated.
+             *
+             * Note that this is implemented using a read lock,
+             * so recursive calls will deadlock.
+             * This is preferable to using `recursive_read`,
+             * since that could starve writers (collectors).
+             */
+            C::Manager::prevent_collection(collector.as_ref(), || {
+                let value = self.inner.as_ref().value
+                    .load(Ordering::Acquire) as *mut T;
+                func(&*value)
+            })
+        })
+    }
 }
 unsafe impl<T: GcSafe, C: RawHandleImpl> Trace for GcHandle<T, C> {
     /// See docs on reachability
@@ -595,16 +593,23 @@ unsafe impl<T: GcSafe + Sync, C: RawHandleImpl + Sync> Send for GcHandle<T, C> {
 /// Requires that the collector is thread-safe.
 unsafe impl<T: GcSafe + Sync, C: RawHandleImpl + Sync> Sync for GcHandle<T, C> {}
 
+#[doc(hidden)]
+pub trait GcSafeErase<'a, Id: ::zerogc::CollectorId>: GcErase<'a, Id> + GcSafe
+    where <Self as GcErase<'a, Id>>::Erased: GcSafe {
+}
 /// We support handles
-unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for CollectorRef<C>
-    where C: RawHandleImpl,
-          T: GcSafe + 'gc,
-          T: GcErase<'a, CollectorId<C>>,
-          T::Erased: GcSafe {
-    type Handle = GcHandle<T::Erased, C>;
+unsafe impl<C> GcHandleSystem for CollectorRef<C>
+    where C: RawHandleImpl, {
+    type Handle<'a, T>
+        where T: GcSafe + ?Sized + GcErase<'a, CollectorId<C>>,
+              <T as GcErase<'a, CollectorId<C>>>::Erased: GcSafe
+            = GcHandle<<T as GcErase<'a, Self::Id>>::Erased, C>;
 
     #[inline]
-    fn create_handle(gc: Gc<'gc, T, CollectorId<C>>) -> Self::Handle {
+    fn create_handle<'gc, 'a, T>(gc: Gc<'gc, T, CollectorId<C>>) -> Self::Handle<'a, T>
+        where T: ?Sized + GcSafe + 'gc,
+              T: GcErase<'a, CollectorId<C>>,
+              T::Erased: GcSafe {
         unsafe {
             let collector = gc.collector_id();
             let value = gc.as_raw_ptr();

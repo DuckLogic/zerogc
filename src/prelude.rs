@@ -21,8 +21,6 @@ pub use crate::{
 pub use crate::{
     GcSafe, GcErase, GcRebrand, Trace, TraceImmutable, NullTrace
 };
-// Hack traits
-pub use crate::{GcBindHandle};
 // TODO: Should this trait be auto-imported???
 pub use crate::CollectorId;
 // Utils
