@@ -12,6 +12,8 @@ use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc, NullTrace, TraceImmutab
 
 use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
+use zerogc::vec::GcVec;
+use zerogc::vec::repr::GcVecRepr;
 
 /// A specific implementation of a collector
 pub unsafe trait RawCollectorImpl: 'static + Sized {
@@ -20,6 +22,8 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     /// The simple collector implements this as
     /// a trait object pointer.
     type DynTracePtr: Copy + Debug + 'static;
+    /// The configuration
+    type Config: Sized + Default;
 
     /// A pointer to this collector
     ///
@@ -31,6 +35,8 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
 
     /// The context
     type RawContext: RawContext<Self>;
+    /// The raw representation of a vec
+    type RawVecRepr: GcVecRepr;
 
     /// True if this collector is a singleton
     ///
@@ -50,18 +56,18 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     /// Initialize an instance of the collector
     ///
     /// Must panic if the collector is not a singleton
-    fn init(logger: Logger) -> NonNull<Self>;
+    fn init(config: Self::Config, logger: Logger) -> NonNull<Self>;
 
     /// The id of this collector
     #[inline]
     fn id(&self) -> CollectorId<Self> {
         CollectorId { ptr: unsafe { Self::Ptr::from_raw(self as *const _ as *mut _) } }
     }
-    unsafe fn gc_write_barrier<'gc, T, V>(
-        owner: &Gc<'gc, T, CollectorId<Self>>,
+    unsafe fn gc_write_barrier<'gc, O, V>(
+        owner: &Gc<'gc, O, CollectorId<Self>>,
         value: &Gc<'gc, V, CollectorId<Self>>,
         field_offset: usize
-    ) where T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc;
+    ) where O: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc;
     /// The logger associated with this collector
     fn logger(&self) -> &Logger;
 
@@ -90,7 +96,7 @@ pub unsafe trait SingletonCollector: RawCollectorImpl<Ptr=PhantomData<&'static S
     /// Initialize the global singleton
     ///
     /// Panics if already initialized
-    fn init_global(logger: Logger);
+    fn init_global(config: Self::Config, logger: Logger);
 }
 
 impl<C: RawCollectorImpl> PartialEq for CollectorId<C> {
@@ -278,6 +284,7 @@ impl<C: RawCollectorImpl> CollectorId<C> {
 }
 unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     type System = CollectorRef<C>;
+    type RawVecRepr = C::RawVecRepr;
 
     #[inline]
     fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self where T: GcSafe + ?Sized + 'gc, 'gc: 'a {
@@ -286,11 +293,11 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
 
 
     #[inline(always)]
-    unsafe fn gc_write_barrier<'gc, T, V>(
-        owner: &Gc<'gc, T, Self>,
+    unsafe fn gc_write_barrier<'gc, O, V>(
+        owner: &Gc<'gc, O, Self>,
         value: &Gc<'gc, V, Self>,
         field_offset: usize
-    ) where T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {
+    ) where O: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {
         C::gc_write_barrier(owner, value, field_offset)
     }
 
@@ -341,12 +348,32 @@ impl<C: RawCollectorImpl> WeakCollectorRef<C> {
 
 pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
     fn alloc<'gc, T: GcSafe + 'gc>(context: &'gc CollectorContext<Self>, value: T) -> Gc<'gc, T, CollectorId<Self>>;
+    unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> (CollectorId<Self>, *mut T)
+        where T: GcSafe + 'gc;
+    fn alloc_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> GcVec<'gc, T, CollectorContext<Self>> where T: GcSafe + 'gc;
 }
-unsafe impl<'gc, T, C> GcSimpleAlloc<'gc, T> for CollectorContext<C>
-    where T: GcSafe + 'gc, C: RawSimpleAlloc {
+unsafe impl<C> GcSimpleAlloc for CollectorContext<C>
+    where C: RawSimpleAlloc {
     #[inline]
-    fn alloc(&'gc self, value: T) -> Gc<'gc, T, Self::Id> {
+    fn alloc<'gc, T>(&'gc self, value: T) -> Gc<'gc, T, Self::Id>
+        where T: GcSafe + 'gc {
         C::alloc(self, value)
+    }
+
+    #[inline]
+    unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> (Self::Id, *mut T)
+        where T: GcSafe + 'gc {
+        C::alloc_uninit_slice(self, len)
+    }
+
+    #[inline]
+    fn alloc_vec<'gc, T>(&'gc self) -> GcVec<'gc, T, Self> where T: GcSafe + 'gc {
+        self.alloc_vec_with_capacity(0)
+    }
+
+    #[inline]
+    fn alloc_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> GcVec<'gc, T, Self> where T: GcSafe + 'gc {
+        C::alloc_vec_with_capacity(self, capacity)
     }
 }
 
@@ -371,26 +398,26 @@ unsafe impl<C: SyncCollector> Sync for CollectorRef<C> {}
 #[doc(hidden)]
 pub trait CollectorInit<C: RawCollectorImpl<Ptr=Self>>: CollectorPtr<C> {
     fn create() -> CollectorRef<C> {
-        Self::with_logger(Logger::root(
+        Self::with_logger(C::Config::default(), Logger::root(
             slog::Discard,
             o!()
         ))
     }
-    fn with_logger(logger: Logger) -> CollectorRef<C>;
+    fn with_logger(config: C::Config, logger: Logger) -> CollectorRef<C>;
 }
 
 impl<C: RawCollectorImpl<Ptr=NonNull<C>>> CollectorInit<C> for NonNull<C> {
-    fn with_logger(logger: Logger) -> CollectorRef<C> {
+    fn with_logger(config: C::Config, logger: Logger) -> CollectorRef<C> {
         assert!(!C::SINGLETON);
-        let raw_ptr = C::init(logger);
+        let raw_ptr = C::init(config, logger);
         CollectorRef { ptr: raw_ptr }
     }
 }
 impl<C> CollectorInit<C> for PhantomData<&'static C>
     where C: SingletonCollector {
-    fn with_logger(logger: Logger) -> CollectorRef<C> {
+    fn with_logger(config: C::Config, logger: Logger) -> CollectorRef<C> {
         assert!(C::SINGLETON);
-        C::init_global(logger); // TODO: Is this safe?
+        C::init_global(config, logger); // TODO: Is this safe?
         // NOTE: The raw pointer is implicit (now that we're leaked)
         CollectorRef { ptr: PhantomData }
     }
@@ -405,7 +432,11 @@ impl<C: RawCollectorImpl> CollectorRef<C> {
 
     #[inline]
     pub fn with_logger(logger: Logger) -> Self where C::Ptr: CollectorInit<C> {
-        <C::Ptr as CollectorInit<C>>::with_logger(logger)
+        Self::with_config(C::Config::default(), logger)
+    }
+
+    pub fn with_config(config: C::Config, logger: Logger) -> Self where C::Ptr: CollectorInit<C> {
+        <C::Ptr as CollectorInit<C>>::with_logger(config, logger)
     }
 
     #[inline]

@@ -172,6 +172,13 @@ impl MacroInput {
         }
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
+        let id_type: Type = match self.options.collector_id {
+            Some(ref tp) => tp.clone(),
+            None => {
+                generics.params.push(parse_quote!(Id: #zerogc_crate::CollectorId));
+                parse_quote!(Id)
+            }
+        };
         let default_bounds: Vec<TypeParamBound> = match requirements {
             Some(TraitRequirements::Where(ref explicit_requirements)) => {
                 generics.make_where_clause().predicates
@@ -185,9 +192,9 @@ impl MacroInput {
             Some(TraitRequirements::Never) => unreachable!(),
             None => {
                 if rebrand {
-                    vec![parse_quote!(#zerogc_crate::GcRebrand<'new_gc, Id>)]
+                    vec![parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>)]
                 } else {
-                    vec![parse_quote!(#zerogc_crate::GcErase<'min, Id>)]
+                    vec![parse_quote!(#zerogc_crate::GcErase<'min, #id_type>)]
                 }
             }
         };
@@ -236,7 +243,6 @@ impl MacroInput {
          */
         generics.make_where_clause().predicates
             .extend(self.bounds.trace_where_clause(&self.params).predicates);
-        generics.params.push(parse_quote!(Id: #zerogc_crate::CollectorId));
         if rebrand {
             generics.params.push(parse_quote!('new_gc));
         } else {
@@ -244,9 +250,9 @@ impl MacroInput {
         }
         let (impl_generics, _, where_clause) = generics.split_for_impl();
         let target_trait = if rebrand {
-            quote!(#zerogc_crate::GcRebrand<'new_gc, Id>)
+            quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>)
         } else {
-            quote!(#zerogc_crate::GcErase<'min, Id>)
+            quote!(#zerogc_crate::GcErase<'min, #id_type>)
         };
         fn rewrite_brand_trait(
             target: &Type, trait_name: &str, target_params: &HashSet<Ident>,
@@ -278,7 +284,7 @@ impl MacroInput {
                 rewrite_brand_trait(
                     &self.target_type, "GcRebrand",
                     &target_params,
-                    parse_quote!(#zerogc_crate::GcRebrand<'new_gc, Id>),
+                    parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>),
                     parse_quote!(Branded)
                 )
             }, Ok)?;
@@ -288,7 +294,7 @@ impl MacroInput {
                 rewrite_brand_trait(
                     &self.target_type, "GcErase",
                     &target_params,
-                    parse_quote!(#zerogc_crate::GcErase<'min, Id>),
+                    parse_quote!(#zerogc_crate::GcErase<'min, #id_type>),
                     parse_quote!(Erased)
                 )
             })?;
@@ -378,6 +384,7 @@ impl Parse for MacroInput {
             "visit" [VisitClosure] opt => visit_closure;
             "trace_mut" [VisitClosure] opt => trace_mut_closure;
             "trace_immutable" [VisitClosure] opt => trace_immutable_closure;
+            "collector_id" [Type] opt => collector_id;
         });
         let bounds = res.bounds.unwrap_or_default();
         if let Some(TraitRequirements::Never) = bounds.trace  {
@@ -439,7 +446,8 @@ impl Parse for MacroInput {
                 branded_type: res.branded_type,
                 erased_type: res.erased_type,
                 needs_trace: res.needs_trace,
-                needs_drop: res.needs_drop
+                needs_drop: res.needs_drop,
+                collector_id: res.collector_id
             },
             visit: visit_impl
         })
@@ -598,6 +606,8 @@ pub struct StandardOptions {
     needs_trace: Expr,
     /// A (constant) expression determining whether the type should be dropped
     needs_drop: Expr,
+    /// The fixed id of the collector, or `None` if the type can work with any collector
+    collector_id: Option<Type>
 }
 
 /// The visit implementation.

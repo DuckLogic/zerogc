@@ -25,29 +25,14 @@ pub const MINIMUM_WORDS: usize = 2;
 /// Past this we have to fallback to the global allocator
 pub const MAXIMUM_SMALL_WORDS: usize = 32;
 /// The alignment of elements in the arena
-pub const ARENA_ELEMENT_ALIGN: usize = ARENA_HEADER_LAYOUT.align();
-/// The size of headers in the arena
-///
-/// This is the same regardless of the underlying object format
-const ARENA_HEADER_LAYOUT: Layout = Layout::new::<GcHeader>();
+pub const ARENA_ELEMENT_ALIGN: usize = std::mem::align_of::<GcHeader>();
 
 use crate::layout::{GcHeader};
 
-#[inline]
-pub const fn small_object_size(layout: Layout) -> usize {
-    let header_layout = ARENA_HEADER_LAYOUT;
-    header_layout.size() + header_layout
-        .padding_needed_for(layout.align())
-        + layout.size()
-}
-#[inline]
+[inline]
 pub const fn fits_small_object(layout: Layout) -> bool {
-    small_object_size(layout) <= MAXIMUM_SMALL_WORDS * std::mem::size_of::<usize>()
+    layout.size() <= MAXIMUM_SMALL_WORDS * std::mem::size_of::<usize>()
         && layout.align() <= ARENA_ELEMENT_ALIGN
-}
-#[inline]
-pub const fn is_small_object<T>() -> bool {
-    fits_small_object(Layout::new::<T>())
 }
 
 pub(crate) struct Chunk {
@@ -201,11 +186,11 @@ impl ArenaState {
         self.current_chunk.store(ptr);
     }
     #[inline]
-    fn alloc(&self, element_size: usize) -> NonNull<GcHeader> {
+    fn alloc(&self, element_size: usize) -> NonNull<u8> {
         unsafe {
             let chunk = &*self.current_chunk().as_ptr();
             match chunk.try_alloc(element_size) {
-                Some(header) => header.cast(),
+                Some(header) => header,
                 None => self.alloc_fallback(element_size)
             }
         }
@@ -229,7 +214,7 @@ impl ArenaState {
             self.force_current_chunk(NonNull::from(&**chunks.last().unwrap()));
             self.current_chunk().as_ref()
                 .try_alloc(element_size).unwrap()
-                .cast::<GcHeader>()
+                .cast::<u8>()
         }
     }
 }
@@ -291,10 +276,12 @@ impl SmallArena {
         }
     }
     #[inline]
-    pub(crate) fn alloc(&self) -> NonNull<GcHeader> {
+    pub(crate) fn alloc(&self) -> NonNull<u8> {
         // Check the free list
         if let Some(free) = self.free.take_free() {
-            free
+            let res = free.as_ptr().sub(match free.as_ref().type_info.layout {
+                Layout::new
+            })
         } else {
             self.state.alloc(self.element_size)
         }
@@ -357,17 +344,14 @@ impl SmallArenaList {
     pub fn iter(&self) -> impl Iterator<Item=&SmallArena> + '_ {
         self.arenas.iter().filter_map(OnceCell::get)
     }
-    #[inline] // This should be constant folded away (size/align is const)
-    pub fn find<T>(&self) -> Option<&SmallArena> {
-        if std::mem::align_of::<T>() > ARENA_ELEMENT_ALIGN {
-            return None
-        }
-        if !is_small_object::<T>() {
+    #[inline] // This should hopefully be constant folded away (layout is const)
+    pub fn find(&self, layout: Layout) -> Option<&SmallArena> {
+        if !fits_small_object(layout) {
             return None
         }
         // Divide round up
         let word_size = mem::size_of::<usize>();
-        let num_words = (small_object_size(Layout::new::<T>()) + (word_size - 1))
+        let num_words = (small_object_size(layout) + (word_size - 1))
             / word_size;
         self.find_raw(num_words)
     }

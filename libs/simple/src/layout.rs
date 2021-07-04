@@ -8,18 +8,21 @@
 //!
 //! However, `zerogc-simple` is committed to a stable ABI, so this should (hopefully)
 //! be relatively well documented.
-use std::mem::{ManuallyDrop};
+use std::mem::{self, };
 use std::marker::PhantomData;
 use std::cell::Cell;
-
-use zerogc_context::field_offset;
-use zerogc_derive::NullTrace;
-use crate::{RawMarkState, CollectorId, DynTrace, MarkVisitor};
 use std::ffi::c_void;
 use std::alloc::Layout;
-use zerogc::{GcSafe, Trace};
-use std::mem;
 
+use zerogc::{GcSafe, Trace};
+use zerogc::vec::repr::{GcVecRepr, ReallocFailedError};
+
+use zerogc_context::field_offset;
+use zerogc_derive::{NullTrace, unsafe_gc_impl};
+
+use crate::{RawMarkState, CollectorId, DynTrace, MarkVisitor};
+use crate::alloc::fits_small_object;
+use std::ptr::NonNull;
 
 /// Everything but the lower 2 bits of mark data are unused
 /// for CollectorId.
@@ -109,29 +112,45 @@ impl SimpleMarkDataSnapshot {
 }
 
 /// Marker for an unknown GC object
-pub(crate) struct DynamicObj;
+#[repr(C)]
+pub struct DynamicObj;
+unsafe_gc_impl!(
+    target => DynamicObj,
+    params => [],
+    NEEDS_TRACE => true,
+    NEEDS_DROP => true,
+    null_trace => never,
+    visit => |self, visitor| {
+        unreachable!()
+    }
+);
 
 #[repr(C)]
-pub(crate) struct BigGcObject<T = DynamicObj> {
-    pub(crate) header: GcHeader,
-    /// This is dropped using dynamic type info
-    pub(crate) static_value: ManuallyDrop<T>
+pub(crate) struct BigGcObject {
+    pub(crate) header: NonNull<GcHeader>
 }
-impl<T> BigGcObject<T> {
+impl BigGcObject {
     #[inline]
-    pub(crate) unsafe fn into_dynamic_box(val: Box<Self>) -> Box<BigGcObject<DynamicObj>> {
-        std::mem::transmute::<Box<BigGcObject<T>>, Box<BigGcObject<DynamicObj>>>(val)
+    pub unsafe fn header(&self) -> &GcHeader {
+        self.header.as_ref()
+    }
+    #[inline]
+    pub unsafe fn from_ptr(header: *mut GcHeader) -> BigGcObject {
+        debug_assert!(!header.is_null());
+        BigGcObject { header: NonNull::new_unchecked(header) }
     }
 }
-impl<T> Drop for BigGcObject<T> {
+impl Drop for BigGcObject {
     fn drop(&mut self) {
         unsafe {
-            let type_info = self.header.type_info;
+            let type_info = self.header().type_info;
             if let Some(func) = type_info.drop_func {
-                func((&self.header as *const GcHeader as *const u8 as *mut u8)
+                func((self.header.as_ptr() as *const u8 as *mut u8)
                     .add(type_info.value_offset)
                     .cast());
             }
+            let layout = type_info.determine_total_layout(self.header.as_ptr());
+            std::alloc::dealloc(self.header.as_ptr().cast(), layout);
         }
     }
 }
@@ -147,6 +166,109 @@ impl GcArrayHeader {
         GcHeader::value_offset_for(align) + field_offset!(GcArrayHeader, common_header)
     }
 }
+/// A header for a Gc vector
+#[repr(C)]
+pub struct GcVecHeader {
+    pub(crate) capacity: usize,
+    pub(crate) len: Cell<usize>,
+    pub(crate) common_header: GcHeader
+}
+impl GcVecHeader {
+    #[inline]
+    pub(crate) const fn vec_value_offset(align: usize) -> usize {
+        GcHeader::value_offset_for(align) + field_offset!(GcVecHeader, common_header)
+    }
+}
+
+/// The raw representation of a vector in the simple collector
+///
+/// NOTE: Length and capacity are stored implicitly in the [GcVecHeader]
+#[repr(C)]
+pub struct SimpleVecRepr<T: GcSafe> {
+    marker: PhantomData<T>,
+}
+impl<T: GcSafe> SimpleVecRepr<T> {
+    /// Get the in-memory layout for a [SimpleVecRepr],
+    /// including its header
+    #[inline]
+    pub fn layout(capacity: usize) -> Layout {
+        Layout::new::<GcVecHeader>()
+            .extend(Layout::array::<T>(capacity).unwrap()).unwrap().0
+    }
+    #[inline]
+    fn header(&self) -> *mut GcVecHeader {
+        unsafe {
+            (self as *const Self as *mut Self as *mut u8)
+                .sub(GcVecHeader::vec_value_offset(std::mem::align_of::<T>()))
+                .cast()
+        }
+    }
+}
+unsafe impl<T: GcSafe> GcVecRepr for SimpleVecRepr<T> {
+    /// We do support reallocation, but only for large sized vectors
+    const SUPPORTS_REALLOC: bool = true;
+
+    #[inline]
+    fn element_layout(&self) -> Layout {
+        Layout::new::<T>()
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        unsafe { (*self.header()).len.get() }
+    }
+
+    #[inline]
+    unsafe fn set_len(&self, len: usize) {
+        debug_assert!(len <= self.capacity());
+        (*self.header()).len.set(len);
+    }
+
+    #[inline]
+    fn capacity(&self) -> usize {
+        unsafe { (*self.header()).capacity }
+    }
+
+    fn realloc_in_place(&self, new_capacity: usize) -> Result<(), ReallocFailedError> {
+        if !fits_small_object(Self::layout(new_capacity)) {
+            // TODO: Use allocator api for realloc
+            todo!("Big object realloc")
+        } else {
+            Err(ReallocFailedError::SizeUnsupported)
+        }
+    }
+
+    unsafe fn ptr(&self) -> *const c_void {
+        todo!()
+    }
+}
+unsafe_gc_impl!(
+    target => SimpleVecRepr<T>,
+    params => [T: GcSafe],
+    NEEDS_TRACE => T::NEEDS_TRACE,
+    NEEDS_DROP => T::NEEDS_DROP,
+    null_trace => { where T: ::zerogc::NullTrace },
+    trace_mut => |self, visitor| {
+        // Trace our innards
+        unsafe {
+            let start: *mut T = self.ptr() as *const T as *mut T;
+            for i in 0..self.len() {
+                visitor.visit(&mut *start.add(i))?;
+            }
+        }
+        Ok(())
+    },
+    trace_immutable => |self, visitor| {
+        // Trace our innards
+        unsafe {
+            let start: *mut T = self.ptr() as *const T as *mut T;
+            for i in 0..self.len() {
+                visitor.visit_immutable(&*start.add(i))?;
+            }
+        }
+        Ok(())
+    }
+);
 
 /// A header for a GC object
 ///
@@ -205,12 +327,17 @@ impl GcHeader {
 pub enum GcTypeLayout {
     /// A type with a fixed, statically-known layout
     Fixed(Layout),
-    /// An array, whose type can vary at runtime
+    /// An array, whose size can vary at runtime
     Array {
         /// The fixed layout of elements in the array
         ///
         /// The overall alignment of the array is equal to the alignment of each element,
         /// however the size may vary at runtime.
+        element_layout: Layout
+    },
+    /// A vector, whose capacity can vary from instance to instance
+    Vec {
+        /// The fixed layout of elements in the vector.
         element_layout: Layout
     }
 }
@@ -240,6 +367,13 @@ impl GcType {
                     .cast::<GcArrayHeader>();
                 element_layout.repeat((*header).len).unwrap().0
                     .pad_to_align().size()
+            },
+            GcTypeLayout::Vec { element_layout } => {
+                let header = (header as *mut u8)
+                    .sub(field_offset!(GcVecHeader, common_header))
+                    .cast::<GcVecHeader>();
+                element_layout.repeat((*header).capacity).unwrap().0
+                    .pad_to_align().size()
             }
         }
     }
@@ -250,12 +384,70 @@ impl GcType {
             GcTypeLayout::Fixed(_) => {}
             GcTypeLayout::Array { .. } => {
                 res += field_offset!(GcArrayHeader, common_header);
+            },
+            GcTypeLayout::Vec { .. } => {
+                res += field_offset!(GcVecHeader, common_header);
             }
         }
         res
     }
+    pub(crate) unsafe fn determine_total_layout(&self, header: *mut GcHeader) -> Layout {
+        Layout::from_size_align_unchecked(
+            self.determine_total_size(header),
+            match self.layout {
+                GcTypeLayout::Fixed(inner) => inner.align(),
+                GcTypeLayout::Array { element_layout } |
+                GcTypeLayout::Vec { element_layout } => element_layout.align()
+            }
+        )
+    }
 }
 
+pub(crate) trait StaticVecType {
+    const STATIC_VEC_TYPE: &'static GcType;
+}
+impl<T: GcSafe> StaticVecType for T {
+    const STATIC_VEC_TYPE: &'static GcType = &GcType {
+        layout: GcTypeLayout::Vec {
+            element_layout: Layout::new::<T>(),
+        },
+        // We have same alignment as our members
+        value_offset: GcVecHeader::vec_value_offset(std::mem::align_of::<T>()),
+        trace_func: if T::NEEDS_TRACE {
+            Some({
+                unsafe fn visit<T: Trace>(val: *mut c_void, visitor: &mut MarkVisitor) {
+                    let len = (*(val as *mut u8)
+                        .sub(GcVecHeader::vec_value_offset(std::mem::align_of::<T>()))
+                        .cast::<GcVecHeader>()).len.get();
+                    let slice = std::slice::from_raw_parts_mut(
+                        val as *mut T,
+                        len
+                    );
+                    let Ok(()) = <[T] as Trace>::visit(slice, visitor);
+                }
+                visit::<T> as unsafe fn(*mut c_void, &mut MarkVisitor)
+            })
+        } else {
+            None
+        },
+        drop_func: if T::NEEDS_DROP {
+            Some({
+                unsafe fn drop_gc_vec<T: GcSafe>(val: *mut c_void) {
+                    let len = (*(val as *mut u8)
+                        .sub(GcVecHeader::vec_value_offset(std::mem::align_of::<T>()))
+                        .cast::<GcArrayHeader>()).len;
+                    std::ptr::drop_in_place::<[T]>(std::ptr::slice_from_raw_parts_mut(
+                        val as *mut T,
+                        len
+                    ));
+                }
+                drop_gc_vec::<T> as unsafe fn(*mut c_void)
+            })
+        } else {
+            None
+        }
+    };
+}
 pub(crate) trait StaticGcType {
     const VALUE_OFFSET: usize;
     const STATIC_TYPE: &'static GcType;

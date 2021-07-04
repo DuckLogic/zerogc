@@ -8,9 +8,14 @@ use core::cell::Cell;
 /// Get the offset of the specified field within a structure
 #[macro_export]
 macro_rules! field_offset {
-    ($target:ty, $($field:ident).+) => {
-        unsafe { (core::ptr::addr_of!((*(std::ptr::null_mut::<$target>()))$(.$field)*) as usize) }
-    };
+    ($target:ty, $($field:ident).+) => {{
+        const OFFSET: usize = {
+            let uninit = core::mem::MaybeUninit::<$target>::uninit();
+            unsafe { ((core::ptr::addr_of!((*uninit.as_ptr())$(.$field)*)) as *const u8)
+                .offset_from(uninit.as_ptr() as *const u8) as usize }
+        };
+        OFFSET
+    }};
 }
 
 #[cfg(feature = "sync")]
