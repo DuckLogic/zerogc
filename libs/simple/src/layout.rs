@@ -43,6 +43,69 @@ pub struct SimpleMarkData {
     fmt: PhantomData<CollectorId>
 }
 
+/// Marker type for an unknown header
+pub(crate) struct UnknownHeader(());
+
+/// The layout of an object's header
+#[derive(Debug)]
+pub struct HeaderLayout<H> {
+    /// The overall size of the header
+    pub header_size: usize,
+    /// The offset of the 'common' header,
+    /// starting from the start of the real header
+    pub common_header_offset: usize,
+    marker: PhantomData<*mut H>
+}
+impl<H> Copy for HeaderLayout<H> {}
+impl<H> Clone for HeaderLayout<H> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<H> HeaderLayout<H> {
+    #[inline]
+    pub(crate) const fn into_unknown(self) -> HeaderLayout<UnknownHeader> {
+        HeaderLayout {
+            header_size: self.header_size,
+            common_header_offset: self.common_header_offset,
+            marker: PhantomData
+        }
+    }
+    /// The alignment of the header
+    ///
+    /// NOTE: All headers have the same alignment
+    pub const ALIGN: usize = std::mem::align_of::<GcHeader>();
+    #[inline]
+    pub(crate) const unsafe fn common_header(self, ptr: *mut H) -> *mut GcHeader {
+        (ptr as *mut u8).add(self.common_header_offset).cast()
+    }
+    #[inline]
+    pub(crate) const unsafe fn from_common_header(self, ptr: *mut GcHeader) -> *mut H {
+        (ptr as *mut u8).sub(self.common_header_offset).cast()
+    }
+    /// Get the header from the specified value pointer
+    #[inline]
+    pub const unsafe fn from_value_ptr<T: ?Sized>(self, ptr: *mut T) -> *mut H {
+        let align = std::mem::align_of_val(&*ptr);
+        (ptr as *mut u8).sub(self.value_offset(align)).cast()
+    }
+    /// Get the in-memory layout of the header (doesn't include the value)
+    #[inline]
+    pub const fn layout(&self) -> Layout {
+        unsafe {
+            Layout::from_size_align_unchecked(self.header_size, Self::ALIGN)
+        }
+    }
+    /// Get the offset of the value from the start of the header,
+    /// given the alignment of its value
+    #[inline]
+    pub const fn value_offset(&self, align: usize) -> usize {
+        let padding = self.layout().padding_needed_for(align);
+        self.header_size + padding
+    }
+}
 
 impl SimpleMarkData {
     /// Create mark data from a specified snapshot
@@ -146,11 +209,13 @@ impl Drop for BigGcObject {
             let type_info = self.header().type_info;
             if let Some(func) = type_info.drop_func {
                 func((self.header.as_ptr() as *const u8 as *mut u8)
-                    .add(type_info.value_offset)
+                    .add(type_info.value_offset_from_common_header)
                     .cast());
             }
             let layout = type_info.determine_total_layout(self.header.as_ptr());
-            std::alloc::dealloc(self.header.as_ptr().cast(), layout);
+            let actual_header = type_info.header_layout()
+                .from_common_header(self.header.as_ptr());
+            std::alloc::dealloc(actual_header.cast(), layout);
         }
     }
 }
@@ -161,10 +226,11 @@ pub struct GcArrayHeader {
     pub(crate) common_header: GcHeader
 }
 impl GcArrayHeader {
-    #[inline]
-    pub(crate) const fn array_value_offset(align: usize) -> usize {
-        GcHeader::value_offset_for(align) + field_offset!(GcArrayHeader, common_header)
-    }
+    pub(crate) const LAYOUT: HeaderLayout<Self> = HeaderLayout {
+        header_size: std::mem::size_of::<Self>(),
+        common_header_offset: field_offset!(GcArrayHeader, common_header),
+        marker: PhantomData
+    };
 }
 /// A header for a Gc vector
 #[repr(C)]
@@ -174,10 +240,11 @@ pub struct GcVecHeader {
     pub(crate) common_header: GcHeader
 }
 impl GcVecHeader {
-    #[inline]
-    pub(crate) const fn vec_value_offset(align: usize) -> usize {
-        GcHeader::value_offset_for(align) + field_offset!(GcVecHeader, common_header)
-    }
+    pub(crate) const LAYOUT: HeaderLayout<Self> = HeaderLayout {
+        common_header_offset: field_offset!(GcVecHeader, common_header),
+        header_size: std::mem::size_of::<GcVecHeader>(),
+        marker: PhantomData
+    };
 }
 
 /// The raw representation of a vector in the simple collector
@@ -199,7 +266,7 @@ impl<T: GcSafe> SimpleVecRepr<T> {
     fn header(&self) -> *mut GcVecHeader {
         unsafe {
             (self as *const Self as *mut Self as *mut u8)
-                .sub(GcVecHeader::vec_value_offset(std::mem::align_of::<T>()))
+                .sub(GcVecHeader::LAYOUT.value_offset(std::mem::align_of::<T>()))
                 .cast()
         }
     }
@@ -282,6 +349,12 @@ pub struct GcHeader {
     pub mark_data: SimpleMarkData
 }
 impl GcHeader {
+    /// The layout of the header
+    pub const LAYOUT: HeaderLayout<Self> = HeaderLayout {
+        header_size: std::mem::size_of::<Self>(),
+        common_header_offset: 0,
+        marker: PhantomData
+    };
     /// Create a new header
     #[inline]
     pub fn new(type_info: &'static GcType, mark_data: SimpleMarkData) -> Self {
@@ -293,17 +366,9 @@ impl GcHeader {
         unsafe {
             (self as *const GcHeader as *mut GcHeader as *mut u8)
                 // NOTE: This takes into account the possibility of `BigGcObject`
-                .add(self.type_info.value_offset)
+                .add(self.type_info.value_offset_from_common_header)
                 .cast::<c_void>()
         }
-    }
-    pub(crate) const fn value_offset_for(align: usize) -> usize {
-        // NOTE: Header
-        let layout = Layout::new::<GcHeader>();
-        let regular_padding = layout.padding_needed_for(align);
-        let array_padding = Layout::new::<GcArrayHeader>().padding_needed_for(align);
-        debug_assert!(regular_padding == array_padding);
-        layout.size() + regular_padding
     }
     /// Get the [GcHeader] for the specified value, assuming that its been allocated by this collector.
     ///
@@ -311,7 +376,7 @@ impl GcHeader {
     /// Assumes the value was allocated in the simple collector.
     #[inline]
     pub unsafe fn from_value_ptr<T: ?Sized>(ptr: *mut T) -> *mut GcHeader {
-        (ptr as *mut u8).sub(GcHeader::value_offset_for(std::mem::align_of_val(&*ptr))).cast()
+        GcHeader::LAYOUT.from_value_ptr(ptr)
     }
     #[inline]
     pub(crate) fn raw_mark_state(&self) -> RawMarkState {
@@ -350,7 +415,7 @@ pub struct GcType {
     /// The offset of the value from the start of the header
     ///
     /// This varies depending on the type's alignment
-    pub value_offset: usize,
+    pub value_offset_from_common_header: usize,
     /// The function to trace the type, or `None` if it doesn't need to be traced
     pub trace_func: Option<unsafe fn(*mut c_void, &mut MarkVisitor)>,
     /// The function to drop the type, or `None` if it doesn't need to be dropped
@@ -358,48 +423,45 @@ pub struct GcType {
 }
 impl GcType {
     #[inline]
+    fn align(&self) -> usize {
+        match self.layout {
+            GcTypeLayout::Fixed(fixed) => fixed.align(),
+            GcTypeLayout::Array { element_layout } |
+            GcTypeLayout::Vec { element_layout } => element_layout.align()
+        }
+    }
+    pub(crate) fn header_layout(&self) -> HeaderLayout<UnknownHeader> {
+        match self.layout {
+            GcTypeLayout::Fixed(_) => GcHeader::LAYOUT.into_unknown(),
+            GcTypeLayout::Array { .. } => GcArrayHeader::LAYOUT.into_unknown(),
+            GcTypeLayout::Vec { .. } => GcVecHeader::LAYOUT.into_unknown()
+        }
+    }
+    #[inline]
     unsafe fn determine_size(&self, header: *mut GcHeader) -> usize {
         match self.layout {
             GcTypeLayout::Fixed(layout) => layout.size(),
             GcTypeLayout::Array { element_layout } => {
-                let header = (header as *mut u8)
-                    .sub(field_offset!(GcArrayHeader, common_header))
-                    .cast::<GcArrayHeader>();
-                element_layout.repeat((*header).len).unwrap().0
-                    .pad_to_align().size()
+                let header = GcArrayHeader::LAYOUT.from_common_header(header);
+                element_layout.repeat((*header).len).unwrap().0.size()
             },
             GcTypeLayout::Vec { element_layout } => {
-                let header = (header as *mut u8)
-                    .sub(field_offset!(GcVecHeader, common_header))
-                    .cast::<GcVecHeader>();
-                element_layout.repeat((*header).capacity).unwrap().0
-                    .pad_to_align().size()
+                let header = GcVecHeader::LAYOUT.from_common_header(header);
+                element_layout.repeat((*header).capacity).unwrap().0.size()
             }
         }
     }
     #[inline]
     pub(crate) unsafe fn determine_total_size(&self, header: *mut GcHeader) -> usize {
-        let mut res = self.value_offset + self.determine_size(header);
-        match self.layout {
-            GcTypeLayout::Fixed(_) => {}
-            GcTypeLayout::Array { .. } => {
-                res += field_offset!(GcArrayHeader, common_header);
-            },
-            GcTypeLayout::Vec { .. } => {
-                res += field_offset!(GcVecHeader, common_header);
-            }
-        }
-        res
+        self.determine_total_layout(header).size()
     }
+    #[inline]
     pub(crate) unsafe fn determine_total_layout(&self, header: *mut GcHeader) -> Layout {
-        Layout::from_size_align_unchecked(
-            self.determine_total_size(header),
-            match self.layout {
-                GcTypeLayout::Fixed(inner) => inner.align(),
-                GcTypeLayout::Array { element_layout } |
-                GcTypeLayout::Vec { element_layout } => element_layout.align()
-            }
-        )
+        self.header_layout().layout()
+            .extend(Layout::from_size_align_unchecked(
+                self.determine_size(header),
+                self.align()
+            )).unwrap().0.pad_to_align()
     }
 }
 
@@ -411,14 +473,16 @@ impl<T: GcSafe> StaticVecType for T {
         layout: GcTypeLayout::Vec {
             element_layout: Layout::new::<T>(),
         },
-        // We have same alignment as our members
-        value_offset: GcVecHeader::vec_value_offset(std::mem::align_of::<T>()),
+        value_offset_from_common_header: {
+            // We have same alignment as our members
+            let align = std::mem::align_of::<T>();
+            let header_layout = GcVecHeader::LAYOUT;
+            header_layout.value_offset(align) - header_layout.common_header_offset
+        },
         trace_func: if T::NEEDS_TRACE {
             Some({
                 unsafe fn visit<T: Trace>(val: *mut c_void, visitor: &mut MarkVisitor) {
-                    let len = (*(val as *mut u8)
-                        .sub(GcVecHeader::vec_value_offset(std::mem::align_of::<T>()))
-                        .cast::<GcVecHeader>()).len.get();
+                    let len = (*GcVecHeader::LAYOUT.from_value_ptr(val as *mut T)).len.get();
                     let slice = std::slice::from_raw_parts_mut(
                         val as *mut T,
                         len
@@ -433,9 +497,7 @@ impl<T: GcSafe> StaticVecType for T {
         drop_func: if T::NEEDS_DROP {
             Some({
                 unsafe fn drop_gc_vec<T: GcSafe>(val: *mut c_void) {
-                    let len = (*(val as *mut u8)
-                        .sub(GcVecHeader::vec_value_offset(std::mem::align_of::<T>()))
-                        .cast::<GcArrayHeader>()).len;
+                    let len = (*GcVecHeader::LAYOUT.from_value_ptr(val as *mut T)).len.get();
                     std::ptr::drop_in_place::<[T]>(std::ptr::slice_from_raw_parts_mut(
                         val as *mut T,
                         len
@@ -449,20 +511,20 @@ impl<T: GcSafe> StaticVecType for T {
     };
 }
 pub(crate) trait StaticGcType {
-    const VALUE_OFFSET: usize;
     const STATIC_TYPE: &'static GcType;
 }
 impl<T: GcSafe> StaticGcType for [T] {
-    const VALUE_OFFSET: usize = GcHeader::value_offset_for(std::mem::align_of::<T>());
     const STATIC_TYPE: &'static GcType = &GcType {
         layout: GcTypeLayout::Array { element_layout: Layout::new::<T>() },
-        value_offset: Self::VALUE_OFFSET,
+        value_offset_from_common_header: {
+            let header_layout = GcArrayHeader::LAYOUT;
+            header_layout.value_offset(std::mem::align_of::<T>()) - header_layout.common_header_offset
+        },
         trace_func: if <T as Trace>::NEEDS_TRACE {
             Some({
                 unsafe fn visit<T: Trace>(val: *mut c_void, visitor: &mut MarkVisitor) {
-                    let len = (*(val as *mut u8)
-                        .sub(GcArrayHeader::array_value_offset(std::mem::align_of::<T>()))
-                        .cast::<GcArrayHeader>()).len;
+                    let header = GcArrayHeader::LAYOUT.from_value_ptr(val as *mut T);
+                    let len = (*header).len;
                     let slice = std::slice::from_raw_parts_mut(
                         val as *mut T,
                         len
@@ -475,9 +537,7 @@ impl<T: GcSafe> StaticGcType for [T] {
         drop_func: if <T as GcSafe>::NEEDS_DROP {
             Some({
                 unsafe fn drop_gc_slice<T: GcSafe>(val: *mut c_void) {
-                    let len = (*(val as *mut u8)
-                        .sub(GcArrayHeader::array_value_offset(std::mem::align_of::<T>()))
-                        .cast::<GcArrayHeader>()).len;
+                    let len = (*GcArrayHeader::LAYOUT.from_value_ptr(val as *mut T)).len;
                     std::ptr::drop_in_place::<[T]>(std::ptr::slice_from_raw_parts_mut(
                         val as *mut T,
                         len
@@ -489,10 +549,9 @@ impl<T: GcSafe> StaticGcType for [T] {
     };
 }
 impl<T: GcSafe> StaticGcType for T {
-    const VALUE_OFFSET: usize = GcHeader::value_offset_for(std::mem::align_of::<T>());
     const STATIC_TYPE: &'static GcType = &GcType {
         layout: GcTypeLayout::Fixed(Layout::new::<T>()),
-        value_offset: Self::VALUE_OFFSET,
+        value_offset_from_common_header: GcHeader::LAYOUT.value_offset(std::mem::align_of::<T>()),
         trace_func: if <T as Trace>::NEEDS_TRACE {
             Some(unsafe { mem::transmute::<_, unsafe fn(*mut c_void, &mut MarkVisitor)>(
                 <T as DynTrace>::trace as fn(&mut T, &mut MarkVisitor),

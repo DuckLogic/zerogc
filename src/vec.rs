@@ -19,6 +19,13 @@ pub mod repr;
 /// This is simply an alias for `Gc<[T]>`
 #[repr(transparent)]
 pub struct GcArray<'gc, T: GcSafe + 'gc, Id: CollectorId>(pub Gc<'gc, [T], Id>);
+impl<'gc, T: GcSafe, Id: CollectorId> GcArray<'gc, T, Id> {
+    /// The value of the array as a slice
+    #[inline]
+    pub fn value(self) -> &'gc [T] {
+        self.0.value()
+    }
+}
 impl<'gc, T: GcSafe, Id: CollectorId> Deref for GcArray<'gc, T, Id> {
     type Target = &'gc [T];
 

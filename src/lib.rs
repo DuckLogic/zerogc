@@ -352,21 +352,56 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// It is unsafe to leave the range of memory `[len, capacity)` uninitialized.
     unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> (Self::Id, *mut T)
         where T: GcSafe + 'gc;
-    /// Allocate a slice by repeatedly copying a single value.
-    fn alloc_slice_copy<'gc, T>(&'gc self, val: T, len: usize) -> Gc<'gc, [T], Self::Id>
+    /// Allocate a slice, copied from the specified input
+    fn alloc_slice_copy<'gc, T>(&'gc self, src: &[T]) -> GcArray<'gc, T, Self::Id>
         where T: GcSafe + Copy + 'gc {
+        unsafe {
+            let (id, res_ptr) = self.alloc_uninit_slice::<T>(src.len());
+            res_ptr.copy_from_nonoverlapping(src.as_ptr(), src.len());
+            GcArray(Gc::from_raw(
+                id, NonNull::new_unchecked(std::ptr::slice_from_raw_parts_mut(
+                    res_ptr,
+                    src.len()
+                ))
+            ))
+        }
+    }
+    /// Allocate a slice by filling it with results from the specified closure.
+    ///
+    /// The closure receives the target index as its only argument.
+    ///
+    /// ## Safety
+    /// The closure must always succeed and never panic.
+    ///
+    /// Otherwise, the gc may end up tracing the values even though they are uninitialized.
+    #[inline]
+    fn alloc_slice_fill_with<'gc, T, F>(&'gc self, len: usize, mut func: F) -> GcArray<'gc, T, Self::Id>
+        where T: GcSafe + 'gc, F: FnMut(usize) -> T {
         unsafe {
             let (id, res_ptr) = self.alloc_uninit_slice::<T>(len);
             for i in 0..len {
-                res_ptr.add(i).write(val);
+                res_ptr.add(i).write(func(i));
             }
-            Gc::from_raw(
+            GcArray(Gc::from_raw(
                 id, NonNull::new_unchecked(std::ptr::slice_from_raw_parts_mut(
                     res_ptr,
                     len
                 ))
-            )
+            ))
         }
+    }
+    /// Allocate a slice of the specified length,
+    /// initializing everything to `None`
+    #[inline]
+    fn alloc_slice_none<'gc, T>(&'gc self, len: usize) -> GcArray<'gc, Option<T>, Self::Id>
+        where T: GcSafe + 'gc {
+        self.alloc_slice_fill_with(len, |_idx| None)
+    }
+    /// Allocate a slice by repeatedly copying a single value.
+    #[inline]
+    fn alloc_slice_fill_copy<'gc, T>(&'gc self, len: usize, val: T) -> GcArray<'gc, T, Self::Id>
+        where T: GcSafe + Copy + 'gc {
+        self.alloc_slice_fill_with(len, |_idx| val)
     }
     /// Create a new [GcVec] with zero initial length,
     /// with an implicit reference to this [GcContext].
