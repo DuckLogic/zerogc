@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use proc_macro2::{Ident, TokenStream, TokenTree};
+use proc_macro2::{Ident, TokenStream, TokenTree, Span};
 use syn::{
     GenericParam, WhereClause, Type, Expr, Error, Token, braced, bracketed,
     Generics, TypeParamBound, WherePredicate, PredicateType, parse_quote,
@@ -166,10 +166,6 @@ impl MacroInput {
     fn expand_brand_impl(&self, rebrand: bool /* true => rebrand, false => erase */) -> Result<Option<TokenStream>, Error> {
         let zerogc_crate = zerogc_crate();
         let requirements = if rebrand { self.bounds.rebrand.clone() } else { self.bounds.erase.clone() };
-        if let Some(TraitRequirements::Never) = requirements  {
-            // They are requesting that we dont implement
-            return Ok(None);
-        }
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
         let id_type: Type = match self.options.collector_id {
@@ -179,23 +175,26 @@ impl MacroInput {
                 parse_quote!(Id)
             }
         };
-        let default_bounds: Vec<TypeParamBound> = match requirements {
+
+        let (generate_implicit, default_bounds): (bool, Vec<TypeParamBound>) = match requirements {
             Some(TraitRequirements::Where(ref explicit_requirements)) => {
                 generics.make_where_clause().predicates
                     .extend(explicit_requirements.predicates.iter().cloned());
                 // they have explicit requirements -> no default bounds
-                vec![]
+                (false, vec![])
             }
             Some(TraitRequirements::Always) => {
-                vec![] // always should implement
+                (false, vec![]) // always should implement (even without implicit bounds)
             },
-            Some(TraitRequirements::Never) => unreachable!(),
+            Some(TraitRequirements::Never) => {
+                return Ok(None); // They are requesting we dont implement it at all
+            },
             None => {
-                if rebrand {
+                (true, if rebrand {
                     vec![parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>)]
                 } else {
                     vec![parse_quote!(#zerogc_crate::GcErase<'min, #id_type>)]
-                }
+                })
             }
         };
         // generate default bounds
@@ -204,6 +203,7 @@ impl MacroInput {
                 // no defaults to generate
                 break
             }
+            if !generate_implicit { break } // skip generating implicit bounds
             match param {
                 GenericParam::Type(ref tp) => {
                     let type_name = &tp.ident;
@@ -235,14 +235,16 @@ impl MacroInput {
                 _ => {}
             }
         }
-        /*
-         * If we don't have explicit specification,
-         * extend the with the trace clauses
-         *
-         * TODO: Do we need to apply to the `Branded`/`Erased` types
-         */
-        generics.make_where_clause().predicates
-            .extend(self.bounds.trace_where_clause(&self.params).predicates);
+        if generate_implicit {
+            /*
+             * If we don't have explicit specification,
+             * extend the with the trace clauses
+             *
+             * TODO: Do we need to apply to the `Branded`/`Erased` types
+             */
+            generics.make_where_clause().predicates
+                .extend(self.bounds.trace_where_clause(&self.params).predicates);
+        }
         if rebrand {
             generics.params.push(parse_quote!('new_gc));
         } else {
@@ -510,18 +512,33 @@ pub struct CustomBounds {
 }
 impl CustomBounds {
     fn trace_where_clause(&self, generic_params: &[GenericParam]) -> WhereClause {
-        let zerogc_crate = zerogc_crate();
-        create_clause_with_default(
-            &self.trace, generic_params,
-            vec![parse_quote!(#zerogc_crate::Trace)]
-        ).unwrap_or_else(|| unreachable!("Trace must always be implemented"))
+        match self.trace {
+            Some(TraitRequirements::Never) => unreachable!("Trace must always be implemented"),
+            Some(TraitRequirements::Always) => empty_clause(), // No requirements
+            Some(TraitRequirements::Where(ref explicit)) => explicit.clone(),
+            None => {
+                // generate the implicit requiremnents
+                let zerogc_crate = zerogc_crate();
+                create_clause_with_default(
+                    &self.trace, generic_params,
+                    vec![parse_quote!(#zerogc_crate::Trace)]
+                ).unwrap_or_else(|| unreachable!("Trace must always be implemented"))
+            }
+        }
     }
     fn trace_immutable_clause(&self, generic_params: &[GenericParam]) -> Option<WhereClause> {
-        let zerogc_crate = zerogc_crate();
-        create_clause_with_default(
-            &self.trace_immutable, generic_params,
-            vec![parse_quote!(#zerogc_crate::TraceImmutable)]
-        )
+        match self.trace_immutable {
+            Some(TraitRequirements::Never) => None, // skip this impl
+            Some(TraitRequirements::Always) => Some(empty_clause()), // No requirements
+            Some(TraitRequirements::Where(ref explicit)) => Some(explicit.clone()),
+            None => {
+                let zerogc_crate = zerogc_crate();
+                create_clause_with_default(
+                    &self.trace_immutable, generic_params,
+                    vec![parse_quote!(#zerogc_crate::TraceImmutable)]
+                )
+            }
+        }
     }
     fn gcsafe_clause(&self, generic_params: &[GenericParam]) -> Option<WhereClause> {
         let zerogc_crate = zerogc_crate();
@@ -738,7 +755,12 @@ impl VisitImpl {
                 Ok(if mutable {
                     mutable_impl.clone()
                 } else {
-                    immutable.clone().unwrap()
+                    immutable.clone().ok_or_else(|| {
+                        Error::new(
+                            Span::call_site(),
+                            "Expected a trace_immutable closure"
+                        )
+                    })?
                 })
             }
         }
