@@ -15,6 +15,88 @@ use std::cell::RefCell;
 
 use zerogc_context::utils::AtomicCell;
 
+const DEBUG_INTERNAL_ALLOCATOR: bool = cfg!(zerogc_simple_debug_alloc);
+mod debug {
+    pub const PADDING: u32 = 0xDEADBEAF;
+    pub const UNINIT: u32 = 0xCAFEBABE;
+    pub const PADDING_TIMES: usize = 16;
+    pub const PADDING_BYTES: usize = PADDING_TIMES * 4;
+    pub unsafe fn pad_memory_block(ptr: *mut u8, size: usize) {
+        assert!(super::DEBUG_INTERNAL_ALLOCATOR);
+        let start = ptr.sub(PADDING_BYTES);
+        for i in 0..PADDING_TIMES {
+            (start as *mut u32).add(i).write(PADDING);
+        }
+        let end = ptr.add(size);
+        for i in 0..PADDING_TIMES {
+            (end as *mut u32).add(i).write(PADDING);
+        }
+    }
+    pub unsafe fn mark_memory_uninit(ptr: *mut u8, size: usize) {
+        assert!(super::DEBUG_INTERNAL_ALLOCATOR);
+        let (blocks, leftover) = (size / 4, size % 4);
+        for i in 0..blocks {
+            (ptr as *mut u32).add(i).write(UNINIT);
+        }
+        let leftover_ptr = ptr.add(blocks * 4);
+        debug_assert_eq!(leftover_ptr.wrapping_add(leftover), ptr.add(size));
+        for i in 0..leftover {
+            leftover_ptr.add(i).write(0xF0);
+        }
+    }
+    pub unsafe fn assert_padded(ptr: *mut u8, size: usize) {
+        assert!(super::DEBUG_INTERNAL_ALLOCATOR);
+        let start = ptr.sub(PADDING_BYTES);
+        let end = ptr.add(size);
+        let start_padding = std::slice::from_raw_parts(
+            start as *const u8 as *const u32,
+            PADDING_TIMES
+        );
+        let region = std::slice::from_raw_parts(
+            ptr as *const u8,
+            size
+        );
+        let end_padding = std::slice::from_raw_parts(
+            end as *const u8 as *const u32,
+            PADDING_TIMES
+        );
+        let print_memory_region = || {
+            use std::fmt::Write;
+            let mut res = String::new();
+            for &val in start_padding {
+                write!(&mut res, "{:X}", val).unwrap();
+            }
+            res.push_str("||");
+            for &b in region {
+                write!(&mut res, "{:X}", b).unwrap();
+            }
+            res.push_str("||");
+            for &val in end_padding {
+                write!(&mut res, "{:X}", val).unwrap();
+            }
+            res
+        };
+        // Closest to farthest
+        for (idx, &block) in start_padding.iter().rev().enumerate() {
+            if block == PADDING { continue }
+            assert_eq!(
+                block, PADDING,
+                "Unexpected start padding (offset -{}) w/ {}",
+                idx * 4,
+                print_memory_region()
+            );
+        }
+        for (idx, &block) in end_padding.iter().enumerate() {
+            if block == PADDING { continue }
+            assert_eq!(
+                block, PADDING,
+                "Unexpected end padding (offset {}) w/ {}",
+                idx * 4,
+                print_memory_region()
+            )
+        }
+    }
+}
 /// The minimum size of supported memory (in words)
 ///
 /// Since the header takes at least one word,
@@ -71,10 +153,6 @@ impl Chunk {
                 return None
             }
         }
-    }
-    #[inline]
-    fn current(&self) -> *mut u8 {
-        self.current.load()
     }
     #[inline]
     fn capacity(&self) -> usize {
@@ -200,7 +278,11 @@ pub(crate) struct FreeList {
     next: AtomicCell<Option<NonNull<FreeSlot>>>
 }
 impl FreeList {
-    pub(crate) unsafe fn add_free(&self, free: *mut UnknownHeader) {
+    unsafe fn add_free(&self, free: *mut UnknownHeader, size: usize) {
+        if DEBUG_INTERNAL_ALLOCATOR {
+            debug::assert_padded(free as *mut u8, size);
+            debug::mark_memory_uninit(free as *mut u8, size);
+        }
         let new_slot = free as *mut FreeSlot;
         let mut next = self.next.load();
         loop {
@@ -212,14 +294,6 @@ impl FreeList {
                 }
             }
         }
-    }
-    #[inline]
-    pub(crate) fn next_free(&self) -> Option<NonNull<FreeSlot>> {
-        self.next.load()
-    }
-    #[inline]
-    pub(crate) unsafe fn set_next_free(&self, next: Option<NonNull<FreeSlot>>) {
-        self.next.store(next)
     }
     #[inline]
     fn take_free(&self) -> Option<NonNull<u8>> {
@@ -248,7 +322,7 @@ pub struct SmallArena {
 
 impl SmallArena {
     pub(crate) unsafe fn add_free(&self, obj: *mut UnknownHeader) {
-        self.free.add_free(obj)
+        self.free.add_free(obj, self.element_size)
     }
     #[cold] // Initialization is the slow path
     fn with_words(num_words: usize) -> SmallArena {
@@ -266,6 +340,15 @@ impl SmallArena {
         // Check the free list
         if let Some(free) = self.free.take_free() {
             free.cast()
+        } else if DEBUG_INTERNAL_ALLOCATOR {
+            let mem = self.state.alloc(self.element_size + debug::PADDING_BYTES * 2)
+                .as_ptr() as *mut u8;
+            unsafe {
+                let mem = mem.add(debug::PADDING_BYTES);
+                debug::pad_memory_block(mem, self.element_size);
+                debug::mark_memory_uninit(mem, self.element_size);
+                NonNull::new_unchecked(mem).cast()
+            }
         } else {
             self.state.alloc(self.element_size)
         }
@@ -313,9 +396,6 @@ impl SmallArenaList {
                 >(arenas)
             }
         }
-    }
-    pub fn iter(&self) -> impl Iterator<Item=&SmallArena> + '_ {
-        self.arenas.iter().filter_map(OnceCell::get)
     }
     #[inline] // This should hopefully be constant folded away (layout is const)
     pub fn find(&self, layout: Layout) -> Option<&SmallArena> {

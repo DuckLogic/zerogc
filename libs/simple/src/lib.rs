@@ -351,6 +351,13 @@ pub(crate) struct SimpleAlloc {
     mark_inverted: AtomicBool,
     allocated_size: AtomicUsize
 }
+#[derive(Debug)]
+struct TargetLayout<H> {
+    value_layout: Layout,
+    header_layout: HeaderLayout<H>,
+    value_offset: usize,
+    overall_layout: Layout
+}
 impl SimpleAlloc {
     fn new() -> SimpleAlloc {
         SimpleAlloc {
@@ -392,14 +399,25 @@ impl SimpleAlloc {
                     unreachable!("Invalid collector id")
                 }
                 #[cfg(not(debug_assertions))] {
-                    std::hint::unreachable_unchecked()
+                    unsafe { std::hint::unreachable_unchecked() }
                 }
             }
         };
-        let (header, value_ptr) = if let Some(arena) = self.small_arenas.find(value_layout) {
-            unsafe { self.alloc_layout_small(arena, header_layout, value_layout) }
+        let (mut overall_layout, value_offset) = header_layout.layout()
+            .extend(value_layout).unwrap();
+        debug_assert_eq!(header_layout.value_offset(value_layout.align()), value_offset);
+        overall_layout  = overall_layout.pad_to_align();
+        debug_assert_eq!(
+            value_offset,
+            header_layout.value_offset(value_layout.align())
+        );
+        let target_layout = TargetLayout {
+            header_layout, value_offset, value_layout, overall_layout
+        };
+        let (header, value_ptr) = if let Some(arena) = self.small_arenas.find(target_layout.overall_layout) {
+            unsafe { self.alloc_layout_small(arena, target_layout) }
         } else {
-            self.alloc_layout_big(header_layout, value_layout)
+            self.alloc_layout_big(target_layout)
         };
         unsafe {
             header_layout.common_header(header).write(GcHeader::new(
@@ -413,45 +431,34 @@ impl SimpleAlloc {
         (header, value_ptr)
     }
     #[inline]
-    unsafe fn alloc_layout_small<H>(&self, arena: &SmallArena, header_layout: HeaderLayout<H>, value_layout: Layout) -> (*mut H, *mut u8) {
-        let (mut overall_layout, value_offset) = header_layout.layout()
-            .extend(value_layout).unwrap();
-        overall_layout = overall_layout.pad_to_align();
-        debug_assert_eq!(
-            value_offset,
-            header_layout.value_offset(value_layout.align())
-        );
+    unsafe fn alloc_layout_small<H>(&self, arena: &SmallArena, target_layout: TargetLayout<H>) -> (*mut H, *mut u8) {
         let ptr = arena.alloc();
         debug_assert_eq!(
-            ptr.as_ptr() as usize % header_layout.layout().align(),
+            ptr.as_ptr() as usize % target_layout.header_layout.layout().align(),
             0
         );
-        self.add_allocated_size(overall_layout.size());
+        self.add_allocated_size(target_layout.overall_layout.size());
         {
             let mut lock = self.small_objects.lock();
-            lock.push((ptr.as_ptr() as *mut u8).add(header_layout.common_header_offset).cast());
+            lock.push((ptr.as_ptr() as *mut u8).add(target_layout.header_layout.common_header_offset).cast());
         }
-        (ptr.as_ptr().cast(), (ptr.as_ptr() as *mut u8).add(value_offset))
+        (ptr.as_ptr().cast(), (ptr.as_ptr() as *mut u8).add(target_layout.value_offset))
     }
-    fn alloc_layout_big<H>(&self, header_layout: HeaderLayout<H>, value_layout: Layout) -> (*mut H, *mut u8) {
-        let (mut overall_layout, value_offset) = header_layout.layout()
-            .extend(value_layout).unwrap();
-        debug_assert_eq!(header_layout.value_offset(value_layout.align()), value_offset);
-        overall_layout  = overall_layout.pad_to_align();
+    fn alloc_layout_big<H>(&self, target_layout: TargetLayout<H>) -> (*mut H, *mut u8) {
         let header: *mut H;
         let value_ptr = unsafe {
-            header = std::alloc::alloc(overall_layout).cast();
-            (header as *mut u8).add(value_offset)
+            header = std::alloc::alloc(target_layout.overall_layout).cast();
+            (header as *mut u8).add(target_layout.value_offset)
         };
         {
             unsafe {
                 let mut objs = self.big_objects.lock();
                 let common_header = (header as *mut u8)
-                    .add(header_layout.common_header_offset)
+                    .add(target_layout.header_layout.common_header_offset)
                     .cast();
                 objs.push(BigGcObject::from_ptr(common_header));
             }
-            self.add_allocated_size(overall_layout.size());
+            self.add_allocated_size(target_layout.overall_layout.size());
         }
         (header, value_ptr)
     }
@@ -486,7 +493,7 @@ impl SimpleAlloc {
             }
             let overall_layout = type_info.determine_total_layout(freed_common_header);
             let actual_start = type_info.header_layout()
-                .from_common_header(freed_common_header) ;
+                .from_common_header(freed_common_header);
             self.small_arenas.find(overall_layout).unwrap().add_free(actual_start)
         });
         // Clear large objects
