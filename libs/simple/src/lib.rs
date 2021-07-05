@@ -69,7 +69,7 @@ use crate::layout::{StaticGcType, GcType, SimpleVecRepr, DynamicObj, StaticVecTy
 use zerogc_context::collector::{RawSimpleAlloc, RawCollectorImpl};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 use zerogc_context::{CollectionManager as AbstractCollectionManager, RawContext as AbstractRawContext, CollectorContext};
-use zerogc::vec::{GcVec, GcRawVec};
+use zerogc::vec::{GcRawVec};
 
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
@@ -136,6 +136,8 @@ pub type CollectorId = ::zerogc_context::CollectorId<RawSimpleCollector>;
 pub type Gc<'gc, T> = ::zerogc::Gc<'gc, T, CollectorId>;
 /// A garbage collected array, allocated in the "simple" collector
 pub type GcArray<'gc, T> = ::zerogc::vec::GcArray<'gc, T, CollectorId>;
+/// A garbage colelcted vector, allocated in the "simple" collector
+pub type GcVec<'gc, T> = ::zerogc::vec::GcVec<'gc, T, SimpleCollectorContext>;
 
 #[cfg(not(feature = "multiple-collectors"))]
 static GLOBAL_COLLECTOR: AtomicPtr<RawSimpleCollector> = AtomicPtr::new(std::ptr::null_mut());
@@ -164,7 +166,7 @@ unsafe impl RawSimpleAlloc for RawSimpleCollector {
         (context.collector().id(), ptr.cast())
     }
 
-    fn alloc_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> GcVec<'gc, T, CollectorContext<Self>> where T: GcSafe + 'gc {
+    fn alloc_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> GcVec<'gc, T> where T: GcSafe + 'gc {
         let ptr = if capacity == 0 {
             NonNull::dangling()
         } else {
