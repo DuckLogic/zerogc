@@ -73,12 +73,28 @@ pub struct GcVec<'gc, T: GcSafe, Ctx: GcSimpleAlloc> {
     pub raw: GcRawVec<'gc, T, Ctx::Id>
 }
 impl<'gc, T: GcSafe, Ctx: GcSimpleAlloc> GcVec<'gc, T, Ctx> {
+    /// Convert this vector into its underlying [GcRawVec]
+    #[inline]
+    pub fn into_raw(self) -> GcRawVec<'gc, T, Ctx::Id> {
+        self.raw
+    }
     /// Reserve enough capacity for the specified number of additional elements.
     #[inline]
     pub fn reserve(&mut self, amount: usize) {
         let remaining = self.raw.capacity() - self.raw.len();
         if remaining < amount {
             self.grow(amount);
+        }
+    }
+    /// Extend the vector with elements copied from the specified slice
+    #[inline]
+    pub fn extend_from_slice(&mut self, src: &[T])
+        where T: Copy {
+        self.reserve(src.len());
+        // TODO: Write barriers?
+        unsafe {
+            (self.raw.as_repr_mut().ptr() as *mut T).add(self.len())
+                .copy_from_nonoverlapping(src.as_ptr(), src.len())
         }
     }
     /// Push the specified value onto the vector
@@ -116,17 +132,17 @@ unsafe_gc_impl!(
     params => ['gc, T: GcSafe, Ctx: GcSimpleAlloc],
     bounds => {
         TraceImmutable => never,
-        GcRebrand => { where T: GcRebrand<'new_gc, Ctx::Id> },
-        GcErase => { where T: GcErase<'min, Ctx::Id> },
+        Trace => { where T: GcSafe },
+        GcRebrand => never,
+        GcErase => never,
     },
-    branded_type => <T as GcRebrand<'new_gc, Ctx::Id>>::Branded,
-    erased_type => <T as GcErase<'min, Ctx::Id>>::Erased,
     null_trace => never,
     NEEDS_TRACE => true,
     NEEDS_DROP => T::NEEDS_DROP /* if our inner type needs a drop */,
     trace_mut => |self, visitor| {
         unsafe { visitor.visit_vec::<T, _>(self.raw.as_repr_mut()) }
     },
+    collector_id => Ctx::Id
 );
 impl<'gc, T: GcSafe, Ctx: GcSimpleAlloc> Deref for GcVec<'gc, T, Ctx> {
     type Target = GcRawVec<'gc, T, Ctx::Id>;
@@ -308,11 +324,17 @@ unsafe_gc_impl!(
     collector_id => Id,
     bounds => {
         TraceImmutable => never,
-        GcRebrand => { where T: GcRebrand<'new_gc, Id> },
-        GcErase => { where T: GcErase<'min, Id> },
+        GcRebrand => {
+            where T: GcSafe + GcRebrand<'new_gc, Id>,
+                <T as GcRebrand<'new_gc, Id>>::Branded: GcSafe
+        },
+        GcErase => {
+            where T: GcSafe + GcErase<'min, Id>,
+                <T as GcErase<'min, Id>>::Erased: GcSafe
+        },
     },
-    branded_type => <T as GcRebrand<'new_gc, Id>>::Branded,
-    erased_type => <T as GcErase<'min, Id>>::Erased,
+    branded_type => GcRawVec<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,
+    erased_type => GcRawVec<'min, <T as GcErase<'min, Id>>::Erased, Id>,
     null_trace => never,
     NEEDS_TRACE => true,
     NEEDS_DROP => T::NEEDS_DROP /* if our inner type needs a drop */,
