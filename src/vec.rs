@@ -123,8 +123,18 @@ impl<'gc, T: GcSafe, Ctx: GcSimpleAlloc> GcVec<'gc, T, Ctx> {
                 Err(ReallocFailedError::SizeUnsupported) => {} // fallthrough to realloc
             }
         }
-        // Just allocate a new one!
-        self.raw = self.context.alloc_vec_with_capacity(new_capacity).raw;
+        // Just allocate a new one, copying from the old
+        let mut new_mem = self.context.alloc_vec_with_capacity(new_capacity).raw;
+        // TODO: Write barriers
+        unsafe {
+            (new_mem.as_repr_mut().ptr() as *mut T).copy_from_nonoverlapping(
+                self.raw.as_ptr() as *const T,
+                self.raw.len()
+            );
+            new_mem.as_repr_mut().set_len(self.raw.len());
+            let mut old_mem = std::mem::replace(&mut self.raw, new_mem);
+            old_mem.as_repr_mut().set_len(0); // We don't want to drop the old elements
+        }
     }
 }
 unsafe_gc_impl!(
@@ -259,7 +269,7 @@ impl<'gc, T: GcSafe, Id: CollectorId> GcRawVec<'gc, T, Id> {
             unsafe {
                 // TODO: Write barriers....
                 (self.as_ptr() as *mut T).add(old_len).write(val);
-                self.repr.set_len(old_len);
+                self.repr.set_len(old_len + 1);
             }
             Ok(())
         } else {
@@ -310,14 +320,6 @@ impl<'gc, T: GcSafe, Id: CollectorId> Deref for GcRawVec<'gc, T, Id> {
         self.as_slice() // &'gc > &'self
     }
 }
-impl<'gc, T: GcSafe, Id: CollectorId> Drop for GcRawVec<'gc, T, Id> {
-    fn drop(&mut self) {
-        unsafe { std::ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut(
-            self.as_ptr() as *mut T,
-             self.len()
-        )) }
-    }
-}
 unsafe_gc_impl!(
     target => GcRawVec<'gc, T, Id>,
     params => ['gc, T: GcSafe, Id: CollectorId],
@@ -337,7 +339,7 @@ unsafe_gc_impl!(
     erased_type => GcRawVec<'min, <T as GcErase<'min, Id>>::Erased, Id>,
     null_trace => never,
     NEEDS_TRACE => true,
-    NEEDS_DROP => T::NEEDS_DROP /* if our inner type needs a drop */,
+    NEEDS_DROP => false, // GcVecRepr is responsible for Drop
     trace_mut => |self, visitor| {
         unsafe { visitor.visit_vec::<T, Id>(self.as_repr_mut()) }
     },
