@@ -64,12 +64,13 @@ use zerogc::{GcSafe, Trace, GcVisitor};
 use zerogc_context::utils::{ThreadId, MemorySize};
 
 use crate::alloc::{SmallArenaList, SmallArena};
-use crate::layout::{StaticGcType, GcType, SimpleVecRepr, DynamicObj, StaticVecType, SimpleMarkData, SimpleMarkDataSnapshot, GcHeader, BigGcObject, HeaderLayout, GcArrayHeader, GcVecHeader};
+use crate::layout::{StaticGcType, GcType, SimpleVecRepr, DynamicObj, StaticVecType, SimpleMarkData, SimpleMarkDataSnapshot, GcHeader, BigGcObject, HeaderLayout, GcArrayHeader, GcVecHeader, GcTypeLayout};
 
 use zerogc_context::collector::{RawSimpleAlloc, RawCollectorImpl};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 use zerogc_context::{CollectionManager as AbstractCollectionManager, RawContext as AbstractRawContext, CollectorContext};
 use zerogc::vec::{GcRawVec};
+use std::cell::Cell;
 
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
@@ -115,6 +116,9 @@ impl Default for GcConfig {
         }
     }
 }
+
+/// The alignment of the singleton empty vector
+const EMPTY_VEC_ALIGNMENT: usize = std::mem::align_of::<usize>();
 
 #[cfg(feature = "sync")]
 type RawContext<C> = zerogc_context::state::sync::RawContext<C>;
@@ -166,20 +170,40 @@ unsafe impl RawSimpleAlloc for RawSimpleCollector {
         (context.collector().id(), ptr.cast())
     }
 
+    #[inline]
+    fn alloc_vec<'gc, T>(context: &'gc CollectorContext<Self>) -> GcVec<'gc, T> where T: GcSafe + 'gc {
+        if std::mem::align_of::<T>() > EMPTY_VEC_ALIGNMENT {
+            // We have to do an actual allocation because we want higher alignment :(
+            return Self::alloc_vec_with_capacity(context, 0)
+        }
+        let header = context.collector().heap.empty_vec();
+        // NOTE: Assuming header is already initialized
+        unsafe {
+            debug_assert_eq!((*header).len.get(), 0);
+            debug_assert_eq!((*header).capacity, 0);
+        }
+        let id = context.collector().id();
+        let ptr = unsafe { NonNull::new_unchecked((header as *mut u8)
+            .add(GcVecHeader::LAYOUT.value_offset(EMPTY_VEC_ALIGNMENT))) };
+        GcVec {
+            raw: unsafe { GcRawVec::from_repr(Gc::from_raw(id, ptr.cast())) },
+            context
+        }
+    }
+
     fn alloc_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> GcVec<'gc, T> where T: GcSafe + 'gc {
-        let ptr = if capacity == 0 {
-            NonNull::dangling()
-        } else {
-            let (header, value_ptr) = context.collector().heap.allocator.alloc_layout(
-                GcVecHeader::LAYOUT,
-                SimpleVecRepr::<T>::layout(capacity),
-                <T as StaticVecType>::STATIC_VEC_TYPE
-            );
-            unsafe {
-                (*header).capacity = capacity;
-                (*header).len.set(0);
-                NonNull::new_unchecked(value_ptr as *mut SimpleVecRepr<T>)
-            }
+        if capacity == 0 && std::mem::align_of::<T>() <= EMPTY_VEC_ALIGNMENT {
+            return Self::alloc_vec(context)
+        }
+        let (header, value_ptr) = context.collector().heap.allocator.alloc_layout(
+            GcVecHeader::LAYOUT,
+            SimpleVecRepr::<T>::layout(capacity),
+            <T as StaticVecType>::STATIC_VEC_TYPE
+        );
+        let ptr = unsafe {
+            (*header).capacity = capacity;
+            (*header).len.set(0);
+            NonNull::new_unchecked(value_ptr as *mut SimpleVecRepr<T>)
         };
         let id = context.collector().id();
         GcVec {
@@ -241,7 +265,8 @@ unsafe impl DynTrace for GcHandleListWrapper {
 struct GcHeap {
     config: Arc<GcConfig>,
     threshold: AtomicUsize,
-    allocator: SimpleAlloc
+    allocator: SimpleAlloc,
+    cached_empty_vec: Cell<Option<*mut GcVecHeader>>
 }
 impl GcHeap {
     fn new(config: Arc<GcConfig>) -> GcHeap {
@@ -252,7 +277,43 @@ impl GcHeap {
                 config.initial_threshold
             }),
             allocator: SimpleAlloc::new(),
-            config
+            config, cached_empty_vec: Cell::new(None)
+        }
+    }
+    #[inline]
+    pub fn empty_vec(&self) -> *mut GcVecHeader {
+        match self.cached_empty_vec.get() {
+            Some(cached) => cached,
+            None => {
+                let res = self.create_empty_vec();
+                self.cached_empty_vec.set(Some(self.create_empty_vec()));
+                res
+            }
+        }
+    }
+    #[cold]
+    fn create_empty_vec<'gc>(&self) -> *mut GcVecHeader {
+        const DUMMY_LAYOUT: Layout = unsafe { Layout::from_size_align_unchecked(
+            0, EMPTY_VEC_ALIGNMENT
+        ) };
+        const DUMMY_TYPE: GcType = GcType {
+            layout: GcTypeLayout::Vec {
+                element_layout: DUMMY_LAYOUT,
+            },
+            value_offset_from_common_header: GcVecHeader::LAYOUT
+                .value_offset_from_common_header(EMPTY_VEC_ALIGNMENT),
+            drop_func: None,
+            trace_func: None
+        };
+        let (header, _) = self.allocator.alloc_layout(
+            GcVecHeader::LAYOUT,
+            DUMMY_LAYOUT,
+            &DUMMY_TYPE
+        );
+        unsafe {
+            (*header).capacity = 0;
+            (*header).len.set(0);
+            header
         }
     }
     #[inline]

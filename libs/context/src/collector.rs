@@ -350,7 +350,10 @@ pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
     fn alloc<'gc, T: GcSafe + 'gc>(context: &'gc CollectorContext<Self>, value: T) -> Gc<'gc, T, CollectorId<Self>>;
     unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> (CollectorId<Self>, *mut T)
         where T: GcSafe + 'gc;
-    fn alloc_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> GcVec<'gc, T, CollectorContext<Self>> where T: GcSafe + 'gc;
+    fn alloc_vec<'gc, T>(context: &'gc CollectorContext<Self>) -> GcVec<'gc, T, CollectorContext<Self>>
+        where T: GcSafe + 'gc;
+    fn alloc_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> GcVec<'gc, T, CollectorContext<Self>>
+        where T: GcSafe + 'gc;
 }
 unsafe impl<C> GcSimpleAlloc for CollectorContext<C>
     where C: RawSimpleAlloc {
@@ -368,7 +371,7 @@ unsafe impl<C> GcSimpleAlloc for CollectorContext<C>
 
     #[inline]
     fn alloc_vec<'gc, T>(&'gc self) -> GcVec<'gc, T, Self> where T: GcSafe + 'gc {
-        self.alloc_vec_with_capacity(0)
+        C::alloc_vec(self)
     }
 
     #[inline]

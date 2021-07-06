@@ -5,7 +5,6 @@ use zerogc::safepoint;
 use zerogc_derive::Trace;
 
 use zerogc_simple::{SimpleCollector, GcArray, GcVec, Gc, CollectorId as SimpleCollectorId, GcConfig};
-use zerogc::vec::GcRawVec;
 
 fn test_collector() -> SimpleCollector {
     let mut config = GcConfig::default();

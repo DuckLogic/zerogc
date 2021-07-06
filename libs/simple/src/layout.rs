@@ -66,6 +66,10 @@ impl<H> Clone for HeaderLayout<H> {
 
 impl<H> HeaderLayout<H> {
     #[inline]
+    pub(crate) const fn value_offset_from_common_header(&self, align: usize) -> usize {
+        self.value_offset(align) - self.common_header_offset
+    }
+    #[inline]
     pub(crate) const fn into_unknown(self) -> HeaderLayout<UnknownHeader> {
         HeaderLayout {
             header_size: self.header_size,
@@ -272,8 +276,8 @@ impl<T: GcSafe> SimpleVecRepr<T> {
     }
 }
 unsafe impl<T: GcSafe> GcVecRepr for SimpleVecRepr<T> {
-    /// We do support reallocation, but only for large sized vectors
-    const SUPPORTS_REALLOC: bool = true;
+    /// Right now, there is no stable API for in-place re-allocation
+    const SUPPORTS_REALLOC: bool = false;
 
     #[inline]
     fn element_layout(&self) -> Layout {
@@ -296,17 +300,9 @@ unsafe impl<T: GcSafe> GcVecRepr for SimpleVecRepr<T> {
         unsafe { (*self.header()).capacity }
     }
 
-    fn realloc_in_place(&self, new_capacity: usize) -> Result<(), ReallocFailedError> {
-        if !fits_small_object(Self::layout(new_capacity)) {
-            // TODO: Use allocator api for realloc
-            todo!("Big object realloc")
-        } else {
-            Err(ReallocFailedError::SizeUnsupported)
-        }
-    }
-
+    #[inline]
     unsafe fn ptr(&self) -> *const c_void {
-        todo!()
+        self as *const Self as *const c_void // We are actually just a GC pointer to the value ptr
     }
 }
 unsafe_gc_impl!(
@@ -476,8 +472,7 @@ impl<T: GcSafe> StaticVecType for T {
         value_offset_from_common_header: {
             // We have same alignment as our members
             let align = std::mem::align_of::<T>();
-            let header_layout = GcVecHeader::LAYOUT;
-            header_layout.value_offset(align) - header_layout.common_header_offset
+            GcArrayHeader::LAYOUT.value_offset_from_common_header(align)
         },
         trace_func: if T::NEEDS_TRACE {
             Some({
@@ -517,8 +512,7 @@ impl<T: GcSafe> StaticGcType for [T] {
     const STATIC_TYPE: &'static GcType = &GcType {
         layout: GcTypeLayout::Array { element_layout: Layout::new::<T>() },
         value_offset_from_common_header: {
-            let header_layout = GcArrayHeader::LAYOUT;
-            header_layout.value_offset(std::mem::align_of::<T>()) - header_layout.common_header_offset
+            GcArrayHeader::LAYOUT.value_offset_from_common_header(std::mem::align_of::<T>())
         },
         trace_func: if <T as Trace>::NEEDS_TRACE {
             Some({
@@ -551,7 +545,9 @@ impl<T: GcSafe> StaticGcType for [T] {
 impl<T: GcSafe> StaticGcType for T {
     const STATIC_TYPE: &'static GcType = &GcType {
         layout: GcTypeLayout::Fixed(Layout::new::<T>()),
-        value_offset_from_common_header: GcHeader::LAYOUT.value_offset(std::mem::align_of::<T>()),
+        value_offset_from_common_header: {
+            GcHeader::LAYOUT.value_offset_from_common_header(std::mem::align_of::<T>())
+        },
         trace_func: if <T as Trace>::NEEDS_TRACE {
             Some(unsafe { mem::transmute::<_, unsafe fn(*mut c_void, &mut MarkVisitor)>(
                 <T as DynTrace>::trace as fn(&mut T, &mut MarkVisitor),
