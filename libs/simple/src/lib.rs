@@ -197,7 +197,7 @@ unsafe impl RawSimpleAlloc for RawSimpleCollector {
         }
         let (header, value_ptr) = context.collector().heap.allocator.alloc_layout(
             GcVecHeader::LAYOUT,
-            SimpleVecRepr::<T>::layout(capacity),
+            Layout::array::<T>(capacity).unwrap(),
             <T as StaticVecType>::STATIC_VEC_TYPE
         );
         let ptr = unsafe {
@@ -266,6 +266,7 @@ struct GcHeap {
     config: Arc<GcConfig>,
     threshold: AtomicUsize,
     allocator: SimpleAlloc,
+    // TODO: This needs to be traced!!
     cached_empty_vec: Cell<Option<*mut GcVecHeader>>
 }
 impl GcHeap {

@@ -15,7 +15,7 @@ use std::ffi::c_void;
 use std::alloc::Layout;
 
 use zerogc::{GcSafe, Trace};
-use zerogc::vec::repr::{GcVecRepr, ReallocFailedError};
+use zerogc::vec::repr::{GcVecRepr,};
 
 use zerogc_context::field_offset;
 use zerogc_derive::{NullTrace, unsafe_gc_impl};
@@ -259,13 +259,6 @@ pub struct SimpleVecRepr<T: GcSafe> {
     marker: PhantomData<T>,
 }
 impl<T: GcSafe> SimpleVecRepr<T> {
-    /// Get the in-memory layout for a [SimpleVecRepr],
-    /// including its header
-    #[inline]
-    pub fn layout(capacity: usize) -> Layout {
-        Layout::new::<GcVecHeader>()
-            .extend(Layout::array::<T>(capacity).unwrap()).unwrap().0
-    }
     #[inline]
     fn header(&self) -> *mut GcVecHeader {
         unsafe {
