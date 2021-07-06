@@ -429,13 +429,13 @@ pub(crate) trait SyncCollectorImpl: RawCollectorImpl<Manager=CollectionManager<S
                 unreachable!("cant free while collection is in progress")
             },
         }
-        // Now drop the Box
-        drop(Box::from_raw(raw));
         /*
          * Notify all threads waiting for contexts to be valid.
          * TODO: I think this is really only useful if we're waiting....
          */
         self.manager().valid_contexts_wait.notify_all();
+        // Now drop the Box
+        drop(Box::from_raw(raw));
     }
     /// Wait until the specified collection is finished
     ///

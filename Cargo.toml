@@ -9,6 +9,7 @@ edition = "2018"
 readme = "README.md"
 
 [dependencies]
+scopeguard = "1.1"
 # Manually included tracing support for third party libraries
 # Providing support for these important libraries,
 # gives zerogc 'batteries included' support.
@@ -18,9 +19,6 @@ zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.3" }
 
 [workspace]
 members = ["libs/simple", "libs/derive", "libs/context"]
-
-[profile.dev]
-opt-level = 1
 
 [features]
 default = ["std"]

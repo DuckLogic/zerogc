@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use proc_macro2::{Ident, TokenStream, TokenTree};
+use proc_macro2::{Ident, TokenStream, TokenTree, Span};
 use syn::{
     GenericParam, WhereClause, Type, Expr, Error, Token, braced, bracketed,
     Generics, TypeParamBound, WherePredicate, PredicateType, parse_quote,
@@ -166,29 +166,35 @@ impl MacroInput {
     fn expand_brand_impl(&self, rebrand: bool /* true => rebrand, false => erase */) -> Result<Option<TokenStream>, Error> {
         let zerogc_crate = zerogc_crate();
         let requirements = if rebrand { self.bounds.rebrand.clone() } else { self.bounds.erase.clone() };
-        if let Some(TraitRequirements::Never) = requirements  {
-            // They are requesting that we dont implement
-            return Ok(None);
-        }
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
-        let default_bounds: Vec<TypeParamBound> = match requirements {
+        let id_type: Type = match self.options.collector_id {
+            Some(ref tp) => tp.clone(),
+            None => {
+                generics.params.push(parse_quote!(Id: #zerogc_crate::CollectorId));
+                parse_quote!(Id)
+            }
+        };
+
+        let (generate_implicit, default_bounds): (bool, Vec<TypeParamBound>) = match requirements {
             Some(TraitRequirements::Where(ref explicit_requirements)) => {
                 generics.make_where_clause().predicates
                     .extend(explicit_requirements.predicates.iter().cloned());
                 // they have explicit requirements -> no default bounds
-                vec![]
+                (false, vec![])
             }
             Some(TraitRequirements::Always) => {
-                vec![] // always should implement
+                (false, vec![]) // always should implement (even without implicit bounds)
             },
-            Some(TraitRequirements::Never) => unreachable!(),
+            Some(TraitRequirements::Never) => {
+                return Ok(None); // They are requesting we dont implement it at all
+            },
             None => {
-                if rebrand {
-                    vec![parse_quote!(#zerogc_crate::GcRebrand<'new_gc, Id>)]
+                (true, if rebrand {
+                    vec![parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>)]
                 } else {
-                    vec![parse_quote!(#zerogc_crate::GcErase<'min, Id>)]
-                }
+                    vec![parse_quote!(#zerogc_crate::GcErase<'min, #id_type>)]
+                })
             }
         };
         // generate default bounds
@@ -197,6 +203,7 @@ impl MacroInput {
                 // no defaults to generate
                 break
             }
+            if !generate_implicit { break } // skip generating implicit bounds
             match param {
                 GenericParam::Type(ref tp) => {
                     let type_name = &tp.ident;
@@ -228,15 +235,16 @@ impl MacroInput {
                 _ => {}
             }
         }
-        /*
-         * If we don't have explicit specification,
-         * extend the with the trace clauses
-         *
-         * TODO: Do we need to apply to the `Branded`/`Erased` types
-         */
-        generics.make_where_clause().predicates
-            .extend(self.bounds.trace_where_clause(&self.params).predicates);
-        generics.params.push(parse_quote!(Id: #zerogc_crate::CollectorId));
+        if generate_implicit {
+            /*
+             * If we don't have explicit specification,
+             * extend the with the trace clauses
+             *
+             * TODO: Do we need to apply to the `Branded`/`Erased` types
+             */
+            generics.make_where_clause().predicates
+                .extend(self.bounds.trace_where_clause(&self.params).predicates);
+        }
         if rebrand {
             generics.params.push(parse_quote!('new_gc));
         } else {
@@ -244,9 +252,9 @@ impl MacroInput {
         }
         let (impl_generics, _, where_clause) = generics.split_for_impl();
         let target_trait = if rebrand {
-            quote!(#zerogc_crate::GcRebrand<'new_gc, Id>)
+            quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>)
         } else {
-            quote!(#zerogc_crate::GcErase<'min, Id>)
+            quote!(#zerogc_crate::GcErase<'min, #id_type>)
         };
         fn rewrite_brand_trait(
             target: &Type, trait_name: &str, target_params: &HashSet<Ident>,
@@ -278,7 +286,7 @@ impl MacroInput {
                 rewrite_brand_trait(
                     &self.target_type, "GcRebrand",
                     &target_params,
-                    parse_quote!(#zerogc_crate::GcRebrand<'new_gc, Id>),
+                    parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>),
                     parse_quote!(Branded)
                 )
             }, Ok)?;
@@ -288,7 +296,7 @@ impl MacroInput {
                 rewrite_brand_trait(
                     &self.target_type, "GcErase",
                     &target_params,
-                    parse_quote!(#zerogc_crate::GcErase<'min, Id>),
+                    parse_quote!(#zerogc_crate::GcErase<'min, #id_type>),
                     parse_quote!(Erased)
                 )
             })?;
@@ -378,6 +386,7 @@ impl Parse for MacroInput {
             "visit" [VisitClosure] opt => visit_closure;
             "trace_mut" [VisitClosure] opt => trace_mut_closure;
             "trace_immutable" [VisitClosure] opt => trace_immutable_closure;
+            "collector_id" [Type] opt => collector_id;
         });
         let bounds = res.bounds.unwrap_or_default();
         if let Some(TraitRequirements::Never) = bounds.trace  {
@@ -439,7 +448,8 @@ impl Parse for MacroInput {
                 branded_type: res.branded_type,
                 erased_type: res.erased_type,
                 needs_trace: res.needs_trace,
-                needs_drop: res.needs_drop
+                needs_drop: res.needs_drop,
+                collector_id: res.collector_id
             },
             visit: visit_impl
         })
@@ -502,18 +512,33 @@ pub struct CustomBounds {
 }
 impl CustomBounds {
     fn trace_where_clause(&self, generic_params: &[GenericParam]) -> WhereClause {
-        let zerogc_crate = zerogc_crate();
-        create_clause_with_default(
-            &self.trace, generic_params,
-            vec![parse_quote!(#zerogc_crate::Trace)]
-        ).unwrap_or_else(|| unreachable!("Trace must always be implemented"))
+        match self.trace {
+            Some(TraitRequirements::Never) => unreachable!("Trace must always be implemented"),
+            Some(TraitRequirements::Always) => empty_clause(), // No requirements
+            Some(TraitRequirements::Where(ref explicit)) => explicit.clone(),
+            None => {
+                // generate the implicit requiremnents
+                let zerogc_crate = zerogc_crate();
+                create_clause_with_default(
+                    &self.trace, generic_params,
+                    vec![parse_quote!(#zerogc_crate::Trace)]
+                ).unwrap_or_else(|| unreachable!("Trace must always be implemented"))
+            }
+        }
     }
     fn trace_immutable_clause(&self, generic_params: &[GenericParam]) -> Option<WhereClause> {
-        let zerogc_crate = zerogc_crate();
-        create_clause_with_default(
-            &self.trace_immutable, generic_params,
-            vec![parse_quote!(#zerogc_crate::TraceImmutable)]
-        )
+        match self.trace_immutable {
+            Some(TraitRequirements::Never) => None, // skip this impl
+            Some(TraitRequirements::Always) => Some(empty_clause()), // No requirements
+            Some(TraitRequirements::Where(ref explicit)) => Some(explicit.clone()),
+            None => {
+                let zerogc_crate = zerogc_crate();
+                create_clause_with_default(
+                    &self.trace_immutable, generic_params,
+                    vec![parse_quote!(#zerogc_crate::TraceImmutable)]
+                )
+            }
+        }
     }
     fn gcsafe_clause(&self, generic_params: &[GenericParam]) -> Option<WhereClause> {
         let zerogc_crate = zerogc_crate();
@@ -598,6 +623,8 @@ pub struct StandardOptions {
     needs_trace: Expr,
     /// A (constant) expression determining whether the type should be dropped
     needs_drop: Expr,
+    /// The fixed id of the collector, or `None` if the type can work with any collector
+    collector_id: Option<Type>
 }
 
 /// The visit implementation.
@@ -728,7 +755,12 @@ impl VisitImpl {
                 Ok(if mutable {
                     mutable_impl.clone()
                 } else {
-                    immutable.clone().unwrap()
+                    immutable.clone().ok_or_else(|| {
+                        Error::new(
+                            Span::call_site(),
+                            "Expected a trace_immutable closure"
+                        )
+                    })?
                 })
             }
         }

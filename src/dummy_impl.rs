@@ -118,6 +118,7 @@ unsafe impl TraceImmutable for DummyCollectorId {
 unsafe impl NullTrace for DummyCollectorId {}
 unsafe impl CollectorId for DummyCollectorId {
     type System = DummySystem;
+    type RawVecRepr = crate::vec::repr::Unsupported;
 
     #[inline]
     fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: GcSafe + ?Sized + 'gc, 'gc: 'a {

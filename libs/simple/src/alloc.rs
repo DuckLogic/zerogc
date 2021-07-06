@@ -15,6 +15,88 @@ use std::cell::RefCell;
 
 use zerogc_context::utils::AtomicCell;
 
+const DEBUG_INTERNAL_ALLOCATOR: bool = cfg!(zerogc_simple_debug_alloc);
+mod debug {
+    pub const PADDING: u32 = 0xDEADBEAF;
+    pub const UNINIT: u32 = 0xCAFEBABE;
+    pub const PADDING_TIMES: usize = 16;
+    pub const PADDING_BYTES: usize = PADDING_TIMES * 4;
+    pub unsafe fn pad_memory_block(ptr: *mut u8, size: usize) {
+        assert!(super::DEBUG_INTERNAL_ALLOCATOR);
+        let start = ptr.sub(PADDING_BYTES);
+        for i in 0..PADDING_TIMES {
+            (start as *mut u32).add(i).write(PADDING);
+        }
+        let end = ptr.add(size);
+        for i in 0..PADDING_TIMES {
+            (end as *mut u32).add(i).write(PADDING);
+        }
+    }
+    pub unsafe fn mark_memory_uninit(ptr: *mut u8, size: usize) {
+        assert!(super::DEBUG_INTERNAL_ALLOCATOR);
+        let (blocks, leftover) = (size / 4, size % 4);
+        for i in 0..blocks {
+            (ptr as *mut u32).add(i).write(UNINIT);
+        }
+        let leftover_ptr = ptr.add(blocks * 4);
+        debug_assert_eq!(leftover_ptr.wrapping_add(leftover), ptr.add(size));
+        for i in 0..leftover {
+            leftover_ptr.add(i).write(0xF0);
+        }
+    }
+    pub unsafe fn assert_padded(ptr: *mut u8, size: usize) {
+        assert!(super::DEBUG_INTERNAL_ALLOCATOR);
+        let start = ptr.sub(PADDING_BYTES);
+        let end = ptr.add(size);
+        let start_padding = std::slice::from_raw_parts(
+            start as *const u8 as *const u32,
+            PADDING_TIMES
+        );
+        let region = std::slice::from_raw_parts(
+            ptr as *const u8,
+            size
+        );
+        let end_padding = std::slice::from_raw_parts(
+            end as *const u8 as *const u32,
+            PADDING_TIMES
+        );
+        let print_memory_region = || {
+            use std::fmt::Write;
+            let mut res = String::new();
+            for &val in start_padding {
+                write!(&mut res, "{:X}", val).unwrap();
+            }
+            res.push_str("||");
+            for &b in region {
+                write!(&mut res, "{:X}", b).unwrap();
+            }
+            res.push_str("||");
+            for &val in end_padding {
+                write!(&mut res, "{:X}", val).unwrap();
+            }
+            res
+        };
+        // Closest to farthest
+        for (idx, &block) in start_padding.iter().rev().enumerate() {
+            if block == PADDING { continue }
+            assert_eq!(
+                block, PADDING,
+                "Unexpected start padding (offset -{}) w/ {}",
+                idx * 4,
+                print_memory_region()
+            );
+        }
+        for (idx, &block) in end_padding.iter().enumerate() {
+            if block == PADDING { continue }
+            assert_eq!(
+                block, PADDING,
+                "Unexpected end padding (offset {}) w/ {}",
+                idx * 4,
+                print_memory_region()
+            )
+        }
+    }
+}
 /// The minimum size of supported memory (in words)
 ///
 /// Since the header takes at least one word,
@@ -25,29 +107,14 @@ pub const MINIMUM_WORDS: usize = 2;
 /// Past this we have to fallback to the global allocator
 pub const MAXIMUM_SMALL_WORDS: usize = 32;
 /// The alignment of elements in the arena
-pub const ARENA_ELEMENT_ALIGN: usize = ARENA_HEADER_LAYOUT.align();
-/// The size of headers in the arena
-///
-/// This is the same regardless of the underlying object format
-const ARENA_HEADER_LAYOUT: Layout = Layout::new::<GcHeader>();
+pub const ARENA_ELEMENT_ALIGN: usize = std::mem::align_of::<GcHeader>();
 
-use crate::layout::{GcHeader};
+use crate::layout::{GcHeader, UnknownHeader};
 
-#[inline]
-pub const fn small_object_size(layout: Layout) -> usize {
-    let header_layout = ARENA_HEADER_LAYOUT;
-    header_layout.size() + header_layout
-        .padding_needed_for(layout.align())
-        + layout.size()
-}
 #[inline]
 pub const fn fits_small_object(layout: Layout) -> bool {
-    small_object_size(layout) <= MAXIMUM_SMALL_WORDS * std::mem::size_of::<usize>()
+    layout.size() <= MAXIMUM_SMALL_WORDS * std::mem::size_of::<usize>()
         && layout.align() <= ARENA_ELEMENT_ALIGN
-}
-#[inline]
-pub const fn is_small_object<T>() -> bool {
-    fits_small_object(Layout::new::<T>())
 }
 
 pub(crate) struct Chunk {
@@ -88,10 +155,6 @@ impl Chunk {
         }
     }
     #[inline]
-    fn current(&self) -> *mut u8 {
-        self.current.load()
-    }
-    #[inline]
     fn capacity(&self) -> usize {
         self.end as usize - self.start as usize
     }
@@ -107,38 +170,11 @@ impl Drop for Chunk {
     }
 }
 
-/// We use zero as our marker value.
-///
-/// `GcHeader::type_info` is the first field of the header
-/// and it will never be null (its a reference).
-/// Therefore this marker will never conflict with a valid header.
-pub const FREE_SLOT_MARKER: usize = 0;
+/// A slot in the free list
 #[repr(C)]
 pub struct FreeSlot {
-    /// Marker for the slot, initialized to `FREE_SLOT_MARKER`
-    pub marker: usize,
     /// Pointer to the previous free slot
-    pub(crate) prev_free: Option<NonNull<MaybeFreeSlot>>,
-}
-#[repr(C)]
-pub(crate) union MaybeFreeSlot {
-    pub free: FreeSlot,
-    pub header: GcHeader,
-}
-
-impl MaybeFreeSlot {
-    #[inline]
-    pub unsafe fn is_free(&self) -> bool {
-        self.free.marker == FREE_SLOT_MARKER
-    }
-    #[inline]
-    pub unsafe fn mark_free(&mut self, prev: Option<NonNull<MaybeFreeSlot>>) {
-        debug_assert!(!self.is_free());
-        self.free = FreeSlot {
-            marker: FREE_SLOT_MARKER,
-            prev_free: prev
-        };
-    }
+    pub(crate) prev_free: Option<NonNull<FreeSlot>>,
 }
 pub const NUM_SMALL_ARENAS: usize = 15;
 const INITIAL_SIZE: usize = 512;
@@ -201,7 +237,7 @@ impl ArenaState {
         self.current_chunk.store(ptr);
     }
     #[inline]
-    fn alloc(&self, element_size: usize) -> NonNull<GcHeader> {
+    fn alloc(&self, element_size: usize) -> NonNull<UnknownHeader> {
         unsafe {
             let chunk = &*self.current_chunk().as_ptr();
             match chunk.try_alloc(element_size) {
@@ -213,7 +249,7 @@ impl ArenaState {
 
     #[cold]
     #[inline(never)]
-    fn alloc_fallback(&self, element_size: usize) -> NonNull<GcHeader> {
+    fn alloc_fallback(&self, element_size: usize) -> NonNull<UnknownHeader> {
         let mut chunks = self.lock_chunks();
         // Now that we hold the lock, check the current chunk again
         unsafe {
@@ -229,7 +265,7 @@ impl ArenaState {
             self.force_current_chunk(NonNull::from(&**chunks.last().unwrap()));
             self.current_chunk().as_ref()
                 .try_alloc(element_size).unwrap()
-                .cast::<GcHeader>()
+                .cast::<UnknownHeader>()
         }
     }
 }
@@ -239,19 +275,28 @@ impl ArenaState {
 /// This is a lock-free linked list
 #[derive(Default)]
 pub(crate) struct FreeList {
-    next: AtomicCell<Option<NonNull<MaybeFreeSlot>>>
+    next: AtomicCell<Option<NonNull<FreeSlot>>>
 }
 impl FreeList {
-    #[inline]
-    pub(crate) fn next_free(&self) -> Option<NonNull<MaybeFreeSlot>> {
-        self.next.load()
+    unsafe fn add_free(&self, free: *mut UnknownHeader, size: usize) {
+        if DEBUG_INTERNAL_ALLOCATOR {
+            debug::assert_padded(free as *mut u8, size);
+            debug::mark_memory_uninit(free as *mut u8, size);
+        }
+        let new_slot = free as *mut FreeSlot;
+        let mut next = self.next.load();
+        loop {
+            (*new_slot).prev_free = next;
+            match self.next.compare_exchange(next, Some(NonNull::new_unchecked(new_slot))) {
+                Ok(_) => break,
+                Err(actual_next) => {
+                    next = actual_next;
+                }
+            }
+        }
     }
     #[inline]
-    pub(crate) unsafe fn set_next_free(&self, next: Option<NonNull<MaybeFreeSlot>>) {
-        self.next.store(next)
-    }
-    #[inline]
-    fn take_free(&self) -> Option<NonNull<GcHeader>> {
+    fn take_free(&self) -> Option<NonNull<u8>> {
         loop {
             let next_free = match self.next.load() {
                 Some(free) => free,
@@ -261,13 +306,9 @@ impl FreeList {
             unsafe {
                 if self.next.compare_exchange(
                     Some(next_free),
-                    next_free.as_ref().free.prev_free
+                    next_free.as_ref().prev_free
                 ).is_err() { continue /* retry */ }
-                debug_assert_eq!(
-                    next_free.as_ref().free.marker,
-                    FREE_SLOT_MARKER
-                );
-                return Some(NonNull::from(&next_free.as_ref().header))
+                return Some(next_free.cast())
             }
         }
     }
@@ -276,9 +317,13 @@ impl FreeList {
 pub struct SmallArena {
     pub(crate) element_size: usize,
     state: ArenaState,
-    pub(crate) free: FreeList
+    free: FreeList,
 }
+
 impl SmallArena {
+    pub(crate) unsafe fn add_free(&self, obj: *mut UnknownHeader) {
+        self.free.add_free(obj, self.element_size)
+    }
     #[cold] // Initialization is the slow path
     fn with_words(num_words: usize) -> SmallArena {
         assert!(num_words >= MINIMUM_WORDS);
@@ -291,23 +336,21 @@ impl SmallArena {
         }
     }
     #[inline]
-    pub(crate) fn alloc(&self) -> NonNull<GcHeader> {
+    pub(crate) fn alloc(&self) -> NonNull<UnknownHeader> {
         // Check the free list
         if let Some(free) = self.free.take_free() {
-            free
+            free.cast()
+        } else if DEBUG_INTERNAL_ALLOCATOR {
+            let mem = self.state.alloc(self.element_size + debug::PADDING_BYTES * 2)
+                .as_ptr() as *mut u8;
+            unsafe {
+                let mem = mem.add(debug::PADDING_BYTES);
+                debug::pad_memory_block(mem, self.element_size);
+                debug::mark_memory_uninit(mem, self.element_size);
+                NonNull::new_unchecked(mem).cast()
+            }
         } else {
             self.state.alloc(self.element_size)
-        }
-    }
-    pub(crate) unsafe fn for_each<F: FnMut(*mut MaybeFreeSlot)>(&self, mut func: F) {
-        let chunks = self.state.lock_chunks();
-        for chunk in &*chunks {
-            let mut ptr = chunk.start;
-            let end = chunk.current();
-            while ptr < end {
-                func(ptr as *mut MaybeFreeSlot);
-                ptr = ptr.add(self.element_size);
-            }
         }
     }
 }
@@ -354,20 +397,14 @@ impl SmallArenaList {
             }
         }
     }
-    pub fn iter(&self) -> impl Iterator<Item=&SmallArena> + '_ {
-        self.arenas.iter().filter_map(OnceCell::get)
-    }
-    #[inline] // This should be constant folded away (size/align is const)
-    pub fn find<T>(&self) -> Option<&SmallArena> {
-        if std::mem::align_of::<T>() > ARENA_ELEMENT_ALIGN {
-            return None
-        }
-        if !is_small_object::<T>() {
+    #[inline] // This should hopefully be constant folded away (layout is const)
+    pub fn find(&self, layout: Layout) -> Option<&SmallArena> {
+        if !fits_small_object(layout) {
             return None
         }
         // Divide round up
         let word_size = mem::size_of::<usize>();
-        let num_words = (small_object_size(Layout::new::<T>()) + (word_size - 1))
+        let num_words = (layout.size() + (word_size - 1))
             / word_size;
         self.find_raw(num_words)
     }

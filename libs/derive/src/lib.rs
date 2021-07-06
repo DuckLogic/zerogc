@@ -732,6 +732,12 @@ fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
     };
     for param in &mut generics.params {
         let rewritten_param: GenericArgument;
+        fn unsupported_lifetime_param(lt: &Lifetime) -> Error {
+            Error::new(
+                lt.span(),
+                "Unless Self: NullTrace, derive(GcErase) is currently unable to handle lifetimes"
+            )
+        }
         match param {
             GenericParam::Type(ref mut type_param) => {
                 let param_name = &type_param.ident;
@@ -740,7 +746,20 @@ fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
                     rewritten_params.push(parse_quote!(#param_name));
                     continue
                 }
-                let original_bounds = type_param.bounds.iter().cloned().collect::<Vec<_>>();
+                fn rewrite_bound(bound: &TypeParamBound, info: &GcTypeInfo) -> Result<TypeParamBound, Error> {
+                    match bound {
+                        TypeParamBound::Trait(ref t) => Ok(TypeParamBound::Trait(t.clone())),
+                        TypeParamBound::Lifetime(ref lt) if *lt == info.config.gc_lifetime() => {
+                            Ok(parse_quote!('new_gc))
+                        },
+                        TypeParamBound::Lifetime(ref lt) => {
+                            return Err(unsupported_lifetime_param(lt))
+                        }
+                    }
+                }
+                let original_bounds = type_param.bounds.iter()
+                    .map(|bound| rewrite_bound(bound, info))
+                    .collect::<Result<Vec<_>, _>>()?;
                 type_param.bounds.push(parse_quote!(#zerogc_crate::GcErase<'min, #collector_id>));
                 type_param.bounds.push(parse_quote!('min));
                 let rewritten_type: Type = parse_quote!(<#param_name as #zerogc_crate::GcErase<'min, #collector_id>>::Erased);
@@ -754,13 +773,10 @@ fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
             },
             GenericParam::Lifetime(ref l) => {
                 if l.lifetime == info.config.gc_lifetime() {
-                    rewritten_param = parse_quote!('static);
+                    rewritten_param = parse_quote!('min);
                     assert!(!info.config.ignored_lifetimes.contains(&l.lifetime));
                 } else {
-                    return Err(Error::new(
-                        l.span(),
-                        "Unless Self: NullTrace, derive(GcErase) is currently unable to handle lifetimes"
-                    ))
+                    return Err(unsupported_lifetime_param(&l.lifetime))
                 }
             },
             GenericParam::Const(ref param) => {
@@ -881,6 +897,12 @@ fn impl_rebrand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
     };
     for param in &mut generics.params {
         let rewritten_param: GenericArgument;
+        fn unsupported_lifetime_param(lt: &Lifetime) -> Error {
+            Error::new(
+                lt.span(),
+                "Unless Self: NullTrace, derive(GcRebrand) is currently unable to handle lifetimes"
+            )
+        }
         match param {
             GenericParam::Type(ref mut type_param) => {
                 let param_name = &type_param.ident;
@@ -888,7 +910,20 @@ fn impl_rebrand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
                     rewritten_params.push(parse_quote!(#param_name));
                     continue
                 }
-                let original_bounds = type_param.bounds.iter().cloned().collect::<Vec<_>>();
+                let original_bounds = type_param.bounds.iter()
+                    .map(|bound| rewrite_bound(bound, info))
+                    .collect::<Result<Vec<_>, Error>>()?;
+                fn rewrite_bound(bound: &TypeParamBound, info: &GcTypeInfo) -> Result<TypeParamBound, Error> {
+                    match bound {
+                        TypeParamBound::Trait(ref t) => Ok(TypeParamBound::Trait(t.clone())),
+                        TypeParamBound::Lifetime(ref lt) if *lt == info.config.gc_lifetime() => {
+                            Ok(parse_quote!('new_gc))
+                        },
+                        TypeParamBound::Lifetime(ref lt) => {
+                            return Err(unsupported_lifetime_param(lt))
+                        }
+                    }
+                }
                 type_param.bounds.push(parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #collector_id>));
                 let rewritten_type: Type = parse_quote!(<#param_name as #zerogc_crate::GcRebrand<'new_gc, #collector_id>>::Branded);
                 rewritten_restrictions.push(WherePredicate::Type(PredicateType {
@@ -904,10 +939,7 @@ fn impl_rebrand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
                     rewritten_param = parse_quote!('new_gc);
                     assert!(!info.config.ignored_lifetimes.contains(&l.lifetime));
                 } else {
-                    return Err(Error::new(
-                        l.span(),
-                        "Unless Self: NullTrace, derive(GcRebrand) is currently unable to handle lifetimes"
-                    ))
+                    return Err(unsupported_lifetime_param(&l.lifetime));
                 }
             },
             GenericParam::Const(ref param) => {
@@ -962,7 +994,7 @@ fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
     let zerogc_crate = zerogc_crate();
     let name = &target.ident;
     let generics = add_trait_bounds_except(
-        &target.generics, parse_quote!(zerogc::Trace),
+        &target.generics, parse_quote!(#zerogc_crate::Trace),
         &info.config.ignore_params, None
     )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();

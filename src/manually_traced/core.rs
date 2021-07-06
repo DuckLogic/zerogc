@@ -267,9 +267,6 @@ unsafe_gc_impl! {
 
 /*
  * Implements tracing for slices, by tracing all the objects they refer to.
- *
- * NOTE: We cannot currently implement `GcRebrand` + `GcErase`
- * because we are unsized :((
  */
 unsafe_gc_impl! {
     target => [T],

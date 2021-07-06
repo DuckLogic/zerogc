@@ -31,8 +31,12 @@
     ptr_metadata, // Needed to abstract over Sized/unsized types
     // Used for const layout computation:
     const_raw_ptr_deref,
-    const_raw_ptr_to_usize_cast,
     const_ptr_offset,
+    const_align_of_val,
+    // Needed for field_offset!
+    const_ptr_offset_from,
+    const_maybe_uninit_as_ptr,
+    const_refs_to_cell,
 )]
 #![feature(drain_filter)]
 #![allow(
@@ -43,9 +47,7 @@
     clippy::vtable_address_comparisons,
 )]
 use std::alloc::Layout;
-use std::ptr::{NonNull, addr_of_mut};
-use std::mem::{ManuallyDrop};
-#[cfg(feature = "multiple-collectors")]
+use std::ptr::{NonNull,};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 #[cfg(not(feature = "multiple-collectors"))]
@@ -53,6 +55,7 @@ use std::sync::atomic::AtomicPtr;
 #[cfg(not(feature = "multiple-collectors"))]
 use std::marker::PhantomData;
 use std::any::{TypeId};
+use std::ops::{Deref, DerefMut};
 
 use slog::{Logger, FnValue, debug};
 
@@ -60,30 +63,30 @@ use zerogc::{GcSafe, Trace, GcVisitor};
 
 use zerogc_context::utils::{ThreadId, MemorySize};
 
-use crate::alloc::{SmallArenaList, small_object_size};
-use crate::layout::{StaticGcType, GcType};
+use crate::alloc::{SmallArenaList, SmallArena};
+use crate::layout::{StaticGcType, GcType, SimpleVecRepr, DynamicObj, StaticVecType, SimpleMarkData, SimpleMarkDataSnapshot, GcHeader, BigGcObject, HeaderLayout, GcArrayHeader, GcVecHeader, GcTypeLayout};
 
-use zerogc_context::collector::{RawSimpleAlloc};
+use zerogc_context::collector::{RawSimpleAlloc, RawCollectorImpl};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
-use zerogc_context::{
-    CollectionManager as AbstractCollectionManager,
-    RawContext as AbstractRawContext
-};
-use crate::layout::{SimpleMarkData, SimpleMarkDataSnapshot, GcHeader, BigGcObject};
-use std::ops::{Deref, DerefMut};
+use zerogc_context::{CollectionManager as AbstractCollectionManager, RawContext as AbstractRawContext, CollectorContext};
+use zerogc::vec::{GcRawVec};
+use std::cell::Cell;
 
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
 #[cfg(not(feature = "small-object-arenas"))]
 mod alloc {
-    pub const fn is_small_object<T>() -> bool {
+    use std::alloc::Layout;
+    use crate::layout::UnknownHeader;
+
+    pub const fn fits_small_object(_layout: Layout) -> bool {
         false
     }
-    pub const fn small_object_size<T>() -> usize {
-        unimplemented!()
-    }
-    pub struct FakeArena;
-    impl FakeArena {
+    pub struct SmallArena;
+    impl SmallArena {
+        pub(crate) fn add_free(&self, _free: *mut UnknownHeader) {
+            unimplemented!()
+        }
         pub(crate) fn alloc(&self) -> std::ptr::NonNull<super::GcHeader> {
             unimplemented!()
         }
@@ -92,10 +95,30 @@ mod alloc {
     impl SmallArenaList {
         // Create dummy
         pub fn new() -> Self { SmallArenaList }
-        pub fn find<T>(&self) -> Option<FakeArena> { None }
+        pub fn find(&self, _layout: Layout) -> Option<&SmallArena> { None }
     }
 }
 pub mod layout;
+
+/// The configuration for a garbage collection
+pub struct GcConfig {
+    /// Whether to always force a collection at safepoints,
+    /// regardless of whether the heuristics say.
+    pub always_force_collect: bool,
+    /// The initial threshold to trigger garbage collection (in bytes)
+    pub initial_threshold: usize,
+}
+impl Default for GcConfig {
+    fn default() -> Self {
+        GcConfig {
+            always_force_collect: false,
+            initial_threshold: 2048,
+        }
+    }
+}
+
+/// The alignment of the singleton empty vector
+const EMPTY_VEC_ALIGNMENT: usize = std::mem::align_of::<usize>();
 
 #[cfg(feature = "sync")]
 type RawContext<C> = zerogc_context::state::sync::RawContext<C>;
@@ -115,14 +138,78 @@ pub type SimpleCollectorContext = ::zerogc_context::CollectorContext<RawSimpleCo
 pub type CollectorId = ::zerogc_context::CollectorId<RawSimpleCollector>;
 /// A garbage collected pointer, allocated in the "simple" collector
 pub type Gc<'gc, T> = ::zerogc::Gc<'gc, T, CollectorId>;
+/// A garbage collected array, allocated in the "simple" collector
+pub type GcArray<'gc, T> = ::zerogc::vec::GcArray<'gc, T, CollectorId>;
+/// A garbage colelcted vector, allocated in the "simple" collector
+pub type GcVec<'gc, T> = ::zerogc::vec::GcVec<'gc, T, SimpleCollectorContext>;
 
 #[cfg(not(feature = "multiple-collectors"))]
 static GLOBAL_COLLECTOR: AtomicPtr<RawSimpleCollector> = AtomicPtr::new(std::ptr::null_mut());
 
 unsafe impl RawSimpleAlloc for RawSimpleCollector {
-    #[inline]
     fn alloc<'gc, T>(context: &'gc SimpleCollectorContext, value: T) -> Gc<'gc, T> where T: GcSafe + 'gc {
-        context.collector().heap.allocator.alloc(value)
+        unsafe {
+            let (_header, ptr) = context.collector().heap.allocator.alloc_layout(
+                GcHeader::LAYOUT,
+                Layout::new::<T>(),
+                T::STATIC_TYPE
+            );
+            let ptr = ptr as *mut T;
+            ptr.write(value);
+            Gc::from_raw(context.collector().id(), NonNull::new_unchecked(ptr))
+        }
+    }
+
+    unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> (CollectorId, *mut T) where T: GcSafe + 'gc {
+        let (header, ptr) = context.collector().heap.allocator.alloc_layout(
+            GcArrayHeader::LAYOUT,
+            Layout::array::<T>(len).unwrap(),
+            <[T] as StaticGcType>::STATIC_TYPE
+        );
+        (*header).len = len;
+        (context.collector().id(), ptr.cast())
+    }
+
+    #[inline]
+    fn alloc_vec<'gc, T>(context: &'gc CollectorContext<Self>) -> GcVec<'gc, T> where T: GcSafe + 'gc {
+        if std::mem::align_of::<T>() > EMPTY_VEC_ALIGNMENT {
+            // We have to do an actual allocation because we want higher alignment :(
+            return Self::alloc_vec_with_capacity(context, 0)
+        }
+        let header = context.collector().heap.empty_vec();
+        // NOTE: Assuming header is already initialized
+        unsafe {
+            debug_assert_eq!((*header).len.get(), 0);
+            debug_assert_eq!((*header).capacity, 0);
+        }
+        let id = context.collector().id();
+        let ptr = unsafe { NonNull::new_unchecked((header as *mut u8)
+            .add(GcVecHeader::LAYOUT.value_offset(EMPTY_VEC_ALIGNMENT))) };
+        GcVec {
+            raw: unsafe { GcRawVec::from_repr(Gc::from_raw(id, ptr.cast())) },
+            context
+        }
+    }
+
+    fn alloc_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> GcVec<'gc, T> where T: GcSafe + 'gc {
+        if capacity == 0 && std::mem::align_of::<T>() <= EMPTY_VEC_ALIGNMENT {
+            return Self::alloc_vec(context)
+        }
+        let (header, value_ptr) = context.collector().heap.allocator.alloc_layout(
+            GcVecHeader::LAYOUT,
+            Layout::array::<T>(capacity).unwrap(),
+            <T as StaticVecType>::STATIC_VEC_TYPE
+        );
+        let ptr = unsafe {
+            (*header).capacity = capacity;
+            (*header).len.set(0);
+            NonNull::new_unchecked(value_ptr as *mut SimpleVecRepr<T>)
+        };
+        let id = context.collector().id();
+        GcVec {
+            raw: unsafe { GcRawVec::from_repr(Gc::from_raw(id, ptr.cast())) },
+            context
+        }
     }
 }
 
@@ -175,22 +262,75 @@ unsafe impl DynTrace for GcHandleListWrapper {
 }
 
 
-/// The initial memory usage to start a collection
-const INITIAL_COLLECTION_THRESHOLD: usize = 2048;
-
 struct GcHeap {
+    config: Arc<GcConfig>,
     threshold: AtomicUsize,
-    allocator: SimpleAlloc
+    allocator: SimpleAlloc,
+    // NOTE: This is only public so it can be traced
+    cached_empty_vec: Cell<Option<*mut GcVecHeader>>
 }
 impl GcHeap {
-    fn new(threshold: usize) -> GcHeap {
+    fn new(config: Arc<GcConfig>) -> GcHeap {
         GcHeap {
-            threshold: AtomicUsize::new(threshold),
-            allocator: SimpleAlloc::new()
+            threshold: AtomicUsize::new(if config.always_force_collect {
+                0
+            } else {
+                config.initial_threshold
+            }),
+            allocator: SimpleAlloc::new(),
+            config, cached_empty_vec: Cell::new(None)
+        }
+    }
+    #[inline]
+    pub fn empty_vec(&self) -> *mut GcVecHeader {
+        match self.cached_empty_vec.get() {
+            Some(cached) => cached,
+            None => {
+                let res = self.create_empty_vec();
+                self.cached_empty_vec.set(Some(self.create_empty_vec()));
+                res
+            }
+        }
+    }
+    #[cold]
+    fn create_empty_vec<'gc>(&self) -> *mut GcVecHeader {
+        const DUMMY_LAYOUT: Layout = unsafe { Layout::from_size_align_unchecked(
+            0, EMPTY_VEC_ALIGNMENT
+        ) };
+        const DUMMY_TYPE: GcType = GcType {
+            layout: GcTypeLayout::Vec {
+                element_layout: DUMMY_LAYOUT,
+            },
+            value_offset_from_common_header: GcVecHeader::LAYOUT
+                .value_offset_from_common_header(EMPTY_VEC_ALIGNMENT),
+            drop_func: None,
+            trace_func: None
+        };
+        let (header, _) = self.allocator.alloc_layout(
+            GcVecHeader::LAYOUT,
+            DUMMY_LAYOUT,
+            &DUMMY_TYPE
+        );
+        unsafe {
+            (*header).capacity = 0;
+            (*header).len.set(0);
+            header
         }
     }
     #[inline]
     fn should_collect_relaxed(&self) -> bool {
+        /*
+         * Double check that 'config.always_force_collect' implies
+         * a threshold of zero.
+         *
+         * NOTE: This is not part of the ABI, it's only for internal debugging
+         */
+        if cfg!(debug_assertions) && self.config.always_force_collect {
+            debug_assert_eq!(
+                self.threshold.load(Ordering::Relaxed),
+                0
+            );
+        }
         /*
          * Going with relaxed ordering because it's not essential
          * that we see updates immediately.
@@ -247,11 +387,11 @@ impl<T> From<T> for Lock<T> {
     }
 }
 #[cfg(not(feature = "sync"))]
-impl<'a, T> ILock<'a, T> for Lock<T> {
+impl<'a, T: 'a> ILock<'a, T> for Lock<T> {
     type Guard = ::std::cell::RefMut<'a, T>;
 
     #[inline]
-    fn lock(&self) -> Self::Guard {
+    fn lock(&'a self) -> Self::Guard {
         self.0.borrow_mut()
     }
 
@@ -267,12 +407,20 @@ impl<'a, T> ILock<'a, T> for Lock<T> {
 pub(crate) struct SimpleAlloc {
     collector_id: Option<CollectorId>,
     small_arenas: SmallArenaList,
-    big_objects: Lock<Vec<Box<BigGcObject>>>,
+    big_objects: Lock<Vec<BigGcObject>>,
+    small_objects: Lock<Vec<*mut GcHeader>>,
     /// Whether the meaning of the mark bit is currently inverted.
     ///
     /// This flips every collection
     mark_inverted: AtomicBool,
     allocated_size: AtomicUsize
+}
+#[derive(Debug)]
+struct TargetLayout<H> {
+    value_layout: Layout,
+    header_layout: HeaderLayout<H>,
+    value_offset: usize,
+    overall_layout: Layout
 }
 impl SimpleAlloc {
     fn new() -> SimpleAlloc {
@@ -281,6 +429,7 @@ impl SimpleAlloc {
             allocated_size: AtomicUsize::new(0),
             small_arenas: SmallArenaList::new(),
             big_objects: Lock::from(Vec::new()),
+            small_objects: Lock::from(Vec::new()),
             mark_inverted: AtomicBool::new(false),
         }
     }
@@ -306,112 +455,116 @@ impl SimpleAlloc {
     }
 
     #[inline]
-    fn alloc<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
-        if let Some(arena) = self.small_arenas.find::<T>() {
-            let header = arena.alloc();
-            unsafe {
-                let collector_id_ptr = match self.collector_id {
-                    Some(ref collector) => collector,
-                    None => {
-                        #[cfg(debug_assertions)] {
-                            unreachable!("Invalid collector id")
-                        }
-                        #[cfg(not(debug_assertions))] {
-                            std::hint::unreachable_unchecked()
-                        }
-                    }
-                };
-                let _value_ptr = header.as_ptr().write(GcHeader::new(
-                    T::STATIC_TYPE,
-                    SimpleMarkData::from_snapshot(SimpleMarkDataSnapshot::new(
-                        MarkState::White.to_raw(self.mark_inverted()),
-                        collector_id_ptr as *const _ as *mut _,
-                    ))
-                ));
-                let value_ptr = header.as_ref().value().cast::<T>();
-                value_ptr.write(value);
-                self.add_allocated_size(small_object_size(Layout::new::<T>()));
-                Gc::from_raw(
-                    *collector_id_ptr,
-                    NonNull::new_unchecked(value_ptr),
-                )
+    fn alloc_layout<H>(&self, header_layout: HeaderLayout<H>, value_layout: Layout, static_type: &'static GcType) -> (*mut H, *mut u8) {
+        let collector_id_ptr = match self.collector_id {
+            Some(ref collector) => collector,
+            None => {
+                #[cfg(debug_assertions)] {
+                    unreachable!("Invalid collector id")
+                }
+                #[cfg(not(debug_assertions))] {
+                    unsafe { std::hint::unreachable_unchecked() }
+                }
             }
+        };
+        let (mut overall_layout, value_offset) = header_layout.layout()
+            .extend(value_layout).unwrap();
+        debug_assert_eq!(header_layout.value_offset(value_layout.align()), value_offset);
+        overall_layout  = overall_layout.pad_to_align();
+        debug_assert_eq!(
+            value_offset,
+            header_layout.value_offset(value_layout.align())
+        );
+        let target_layout = TargetLayout {
+            header_layout, value_offset, value_layout, overall_layout
+        };
+        let (header, value_ptr) = if let Some(arena) = self.small_arenas.find(target_layout.overall_layout) {
+            unsafe { self.alloc_layout_small(arena, target_layout) }
         } else {
-            self.alloc_big(value)
-        }
-    }
-    fn alloc_big<T: GcSafe>(&self, value: T) -> Gc<'_, T> {
-        let collector_id = self.collector_id.as_ref().unwrap();
-        let mut object = Box::new(BigGcObject {
-            header: GcHeader::new(
-                T::STATIC_TYPE,
+            self.alloc_layout_big(target_layout)
+        };
+        unsafe {
+            header_layout.common_header(header).write(GcHeader::new(
+                static_type,
                 SimpleMarkData::from_snapshot(SimpleMarkDataSnapshot::new(
                     MarkState::White.to_raw(self.mark_inverted()),
-                    collector_id as *const _ as *mut _
+                    collector_id_ptr as *const _ as *mut _,
                 ))
-            ),
-            static_value: ManuallyDrop::new(value),
-        });
-        let gc = unsafe { Gc::from_raw(
-            self.collector_id.unwrap(),
-            NonNull::new_unchecked(&mut *object.static_value),
-        ) };
-        {
-            let size = std::mem::size_of::<BigGcObject<T>>();
-            {
-                let mut objs = self.big_objects.lock();
-                objs.push(unsafe { BigGcObject::into_dynamic_box(object) });
-            }
-            self.add_allocated_size(size);
+            ));
         }
-        gc
+        (header, value_ptr)
+    }
+    #[inline]
+    unsafe fn alloc_layout_small<H>(&self, arena: &SmallArena, target_layout: TargetLayout<H>) -> (*mut H, *mut u8) {
+        let ptr = arena.alloc();
+        debug_assert_eq!(
+            ptr.as_ptr() as usize % target_layout.header_layout.layout().align(),
+            0
+        );
+        self.add_allocated_size(target_layout.overall_layout.size());
+        {
+            let mut lock = self.small_objects.lock();
+            lock.push((ptr.as_ptr() as *mut u8).add(target_layout.header_layout.common_header_offset).cast());
+        }
+        (ptr.as_ptr().cast(), (ptr.as_ptr() as *mut u8).add(target_layout.value_offset))
+    }
+    fn alloc_layout_big<H>(&self, target_layout: TargetLayout<H>) -> (*mut H, *mut u8) {
+        let header: *mut H;
+        let value_ptr = unsafe {
+            header = std::alloc::alloc(target_layout.overall_layout).cast();
+            (header as *mut u8).add(target_layout.value_offset)
+        };
+        {
+            unsafe {
+                let mut objs = self.big_objects.lock();
+                let common_header = (header as *mut u8)
+                    .add(target_layout.header_layout.common_header_offset)
+                    .cast();
+                objs.push(BigGcObject::from_ptr(common_header));
+            }
+            self.add_allocated_size(target_layout.overall_layout.size());
+        }
+        (header, value_ptr)
     }
     unsafe fn sweep(&self) {
         let mut expected_size = self.allocated_size();
         let mut actual_size = 0;
         // Clear small arenas
-        #[cfg(feature = "small-object-arenas")]
-        for arena in self.small_arenas.iter() {
-            let mut last_free = arena.free.next_free();
-            let mark_inverted = self.mark_inverted.load(Ordering::SeqCst);
-            arena.for_each(|slot| {
-                if (*slot).is_free() {
+        let was_mark_inverted = self.mark_inverted.load(Ordering::SeqCst);
+        self.small_objects.lock().drain_filter(|&mut common_header| {
+            let total_size = (*common_header).type_info.determine_total_size(common_header);
+            match (*common_header).raw_mark_state().resolve(was_mark_inverted) {
+                MarkState::White => {
+                    // Free the object, dropping if necessary
+                    expected_size -= total_size;
+                    true // Drain, implicitly adding to free list
+                },
+                MarkState::Grey => panic!("All grey objects should've been processed"),
+                MarkState::Black => {
                     /*
-                     * Just ignore this. It's already part of our linked list
-                     * of allocated objects.
+                     * Retain the object
+                     * State will be implicitly set to white
+                     * by inverting mark the meaning of the mark bits.
                      */
-                } else {
-                    let total_size = (*slot).header.type_info.determine_total_size(addr_of_mut!((*slot).header));
-                    match (*slot).header.raw_mark_state().resolve(mark_inverted) {
-                        MarkState::White => {
-                            // Free the object, dropping if necessary
-                            expected_size -= total_size;
-                            if let Some(func) = (*slot).header.type_info.drop_func {
-                                func((*slot).header.value());
-                            }
-                            // Add to free list
-                            (*slot).mark_free(last_free);
-                            last_free = Some(NonNull::new_unchecked(slot));
-                        },
-                        MarkState::Grey => panic!("All grey objects should've been processed"),
-                        MarkState::Black => {
-                            /*
-                             * Retain the object
-                             * State will be implicitly set to white
-                             * by inverting mark the meaning of the mark bits.
-                             */
-                            actual_size += total_size;
-                        },
-                    }
+                    actual_size += total_size;
+                    false // keep
                 }
-            });
-            arena.free.set_next_free(last_free);
-        }
+            }
+        }).for_each(|freed_common_header| {
+            let type_info = (*freed_common_header).type_info;
+            if let Some(func) = type_info.drop_func {
+                func((*freed_common_header).value());
+            }
+            let overall_layout = type_info.determine_total_layout(freed_common_header);
+            let actual_start = type_info.header_layout()
+                .from_common_header(freed_common_header);
+            self.small_arenas.find(overall_layout).unwrap().add_free(actual_start)
+        });
         // Clear large objects
-        let was_mark_inverted = self.mark_inverted();
+        debug_assert_eq!(was_mark_inverted, self.mark_inverted());
         self.big_objects.lock().drain_filter(|big_item| {
-            let total_size = big_item.header.type_info.determine_total_size(addr_of_mut!(big_item.header));
-            match big_item.header.mark_data.load_snapshot().state.resolve(was_mark_inverted) {
+            let total_size = big_item.header().type_info.determine_total_size(big_item.header.as_ptr());
+            match big_item.header().mark_data.load_snapshot().state.resolve(was_mark_inverted) {
                 MarkState::White => {
                     // Free the object
                     expected_size -= total_size;
@@ -458,10 +611,12 @@ pub struct RawSimpleCollector {
     manager: CollectionManager<Self>,
     /// Tracks object handles
     handle_list: GcHandleList<Self>,
+    config: Arc<GcConfig>
 }
 
 unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector {
     type DynTracePtr = NonNull<dyn DynTrace>;
+    type Config = GcConfig;
 
     #[cfg(feature = "multiple-collectors")]
     type Ptr = NonNull<Self>;
@@ -473,6 +628,8 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
 
     type RawContext = RawContext<Self>;
 
+    type RawVecRepr = SimpleVecRepr<DynamicObj>;
+
     const SINGLETON: bool = cfg!(not(feature = "multiple-collectors"));
 
     const SYNC: bool = cfg!(feature = "sync");
@@ -481,8 +638,8 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     fn id_for_gc<'a, 'gc, T>(gc: &'a Gc<'gc, T>) -> &'a CollectorId where 'gc: 'a, T: GcSafe + ?Sized + 'gc {
         #[cfg(feature = "multiple-collectors")] {
             unsafe {
-                let mark_data = GcHeader::from_value_ptr(gc.as_raw_ptr());
-                &*(&*mark_data).mark_data.load_snapshot().collector_id_ptr
+                let header = GcHeader::from_value_ptr(gc.as_raw_ptr());
+                &*(&*header).mark_data.load_snapshot().collector_id_ptr
             }
         }
         #[cfg(not(feature = "multiple-collectors"))] {
@@ -503,14 +660,14 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     }
 
     #[cfg(not(feature = "multiple-collectors"))]
-    fn init(_logger: Logger) -> NonNull<Self> {
+    fn init(config: GcConfig, _logger: Logger) -> NonNull<Self> {
         panic!("Not a singleton")
     }
 
     #[cfg(feature = "multiple-collectors")]
-    fn init(logger: Logger) -> NonNull<Self> {
+    fn init(config: GcConfig, logger: Logger) -> NonNull<Self> {
         // We're assuming its safe to create multiple (as given by config)
-        let raw = unsafe { RawSimpleCollector::with_logger(logger) };
+        let raw = unsafe { RawSimpleCollector::with_logger(config, logger) };
         let mut collector = Arc::new(raw);
         let raw_ptr = unsafe { NonNull::new_unchecked(
             Arc::as_ptr(&collector) as *mut RawSimpleCollector
@@ -567,7 +724,7 @@ unsafe impl zerogc_context::collector::SingletonCollector for RawSimpleCollector
         GLOBAL_COLLECTOR.load(Ordering::Acquire)
     }
 
-    fn init_global(logger: Logger) {
+    fn init_global(config: GcConfig, logger: Logger) {
         let marker_ptr = NonNull::dangling().as_ptr();
         /*
          * There can only be one collector (due to configuration).
@@ -579,7 +736,7 @@ unsafe impl zerogc_context::collector::SingletonCollector for RawSimpleCollector
             Ordering::SeqCst, Ordering::SeqCst
         ), Ok(std::ptr::null_mut()), "Collector already exists");
         let mut raw = Box::new(
-            unsafe { RawSimpleCollector::with_logger(logger) }
+            unsafe { RawSimpleCollector::with_logger(config, logger) }
         );
         const GLOBAL_ID: CollectorId = unsafe { CollectorId::from_raw(PhantomData) };
         raw.heap.allocator.collector_id = Some(GLOBAL_ID);
@@ -595,12 +752,14 @@ unsafe impl zerogc_context::collector::SingletonCollector for RawSimpleCollector
     }
 }
 impl RawSimpleCollector {
-    unsafe fn with_logger(logger: Logger) -> Self {
+    unsafe fn with_logger(config: GcConfig, logger: Logger) -> Self {
+        let config = Arc::new(config);
         RawSimpleCollector {
             logger,
             manager: CollectionManager::new(),
-            heap: GcHeap::new(INITIAL_COLLECTION_THRESHOLD),
+            heap: GcHeap::new(Arc::clone(&config)),
             handle_list: GcHandleList::new(),
+            config
         }
     }
     #[cold]
@@ -609,21 +768,44 @@ impl RawSimpleCollector {
         &self, contexts: &[*mut RawContext<Self>]
     ) {
         debug_assert!(self.manager.is_collecting());
-        let roots: Vec<*mut dyn DynTrace> = contexts.iter()
-            .flat_map(|ctx| {
-                (**ctx).assume_valid_shadow_stack()
-                    .reverse_iter().map(NonNull::as_ptr)
-            })
-            .chain(std::iter::once(&self.handle_list
+        let roots = {
+            let mut roots: Vec<*mut dyn DynTrace> = Vec::new();
+            for ctx in contexts.iter() {
+                roots.extend((**ctx).assume_valid_shadow_stack()
+                    .reverse_iter().map(NonNull::as_ptr));
+            }
+            roots.push(&self.handle_list
                 // Cast to wrapper type
                 as *const GcHandleList<Self> as *const GcHandleListWrapper
                 // Make into virtual pointer
                 as *const dyn DynTrace
                 as *mut dyn DynTrace
-            ))
-            .collect();
+            );
+            #[repr(transparent)]
+            struct CachedEmptyVec(GcVecHeader);
+            unsafe impl DynTrace for CachedEmptyVec {
+                fn trace(&mut self, visitor: &mut MarkVisitor) {
+                    let cached_vec_header = self as *mut Self as *mut GcVecHeader;
+                    unsafe {
+                        let target_repr = (cached_vec_header as *mut u8)
+                            .add(GcVecHeader::LAYOUT.value_offset(EMPTY_VEC_ALIGNMENT))
+                            .cast::<SimpleVecRepr<()>>();
+                        let mut target_gc = *(&target_repr
+                            as *const *mut SimpleVecRepr<()>
+                            as *const Gc<SimpleVecRepr<DynamicObj>>);
+                        // TODO: Assert not moving?
+                        let Ok(()) = visitor.visit_vec::<(), _>(&mut target_gc);
+                    }
+                }
+            }
+            if let Some(cached_vec_header) = self.heap.cached_empty_vec.get() {
+                roots.push(cached_vec_header as *mut CachedEmptyVec as *mut dyn DynTrace)
+            }
+            roots
+        };
         let num_roots = roots.len();
         let mut task = CollectionTask {
+            config: &*self.config,
             expected_collector: self.heap.allocator.collector_id.unwrap(),
             roots, heap: &self.heap,
             grey_stack: if cfg!(feature = "implicit-grey-stack") {
@@ -645,6 +827,7 @@ impl RawSimpleCollector {
     }
 }
 struct CollectionTask<'a> {
+    config: &'a GcConfig,
     expected_collector: CollectorId,
     roots: Vec<*mut dyn DynTrace>,
     heap: &'a GcHeap,
@@ -677,7 +860,7 @@ impl<'a> CollectionTask<'a> {
                 };
                 if let Some(trace) = (*obj).type_info.trace_func {
                     (trace)(
-                        &mut *(*obj).value(),
+                        (*obj).value(),
                         &mut visitor
                     );
                 }
@@ -688,11 +871,18 @@ impl<'a> CollectionTask<'a> {
         // Sweep
         unsafe { self.heap.allocator.sweep() };
         let updated_size = self.heap.allocator.allocated_size();
-        // Update the threshold to be 150% of currently used size
-        self.heap.threshold.store(
-            updated_size + (updated_size / 2),
-            Ordering::SeqCst
-        );
+        if self.config.always_force_collect {
+            assert_eq!(
+                self.heap.threshold.load(Ordering::SeqCst),
+                0
+            );
+        } else {
+            // Update the threshold to be 150% of currently used size
+            self.heap.threshold.store(
+                updated_size + (updated_size / 2),
+                Ordering::SeqCst
+            );
+        }
     }
 }
 
@@ -759,12 +949,43 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
             Ok(())
         }
     }
+
+    #[inline]
+    unsafe fn visit_vec<'gc, T, Id>(&mut self, raw: &mut ::zerogc::Gc<'gc, Id::RawVecRepr, Id>) -> Result<(), Self::Err>
+        where T: GcSafe + 'gc, Id: ::zerogc::CollectorId {
+        // Just visit our innards as if they were a regular `Gc` reference
+        self.visit_gc(raw)
+    }
+
+    #[inline]
+    unsafe fn visit_array<'gc, T, Id>(&mut self, array: &mut ::zerogc::vec::GcArray<'gc, T, Id>) -> Result<(), Self::Err>
+        where T: GcSafe + 'gc, Id: ::zerogc::CollectorId {
+        if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
+            /*
+             * See comment in 'visit_gc'.
+             * Essentially this is a checked cast
+             */
+            let array = std::mem::transmute::<
+                &mut ::zerogc::vec::GcArray<'gc, T, Id>,
+                &mut ::zerogc::Gc<'gc, [T], crate::CollectorId>
+            >(array);
+            /*
+             * Check the collectors match. Otherwise we're mutating
+             * other people's data.
+             */
+            assert_eq!(*array.collector_id(), self.expected_collector);
+            self._visit_own_gc(array);
+            Ok(())
+        } else {
+            Ok(())
+        }
+    }
 }
 impl MarkVisitor<'_> {
     /// Visit a GC type whose [::zerogc::CollectorId] matches our own
     ///
     /// The caller should only use `GcVisitor::visit_gc()`
-    unsafe fn _visit_own_gc<'gc, T: GcSafe + 'gc>(&mut self, gc: &mut Gc<'gc, T>) {
+    unsafe fn _visit_own_gc<'gc, T: GcSafe + ?Sized + 'gc>(&mut self, gc: &mut Gc<'gc, T>) {
         // Verify this again (should be checked by caller)
         debug_assert_eq!(*gc.collector_id(), self.expected_collector);
         let header = GcHeader::from_value_ptr(gc.as_raw_ptr());
