@@ -266,7 +266,7 @@ struct GcHeap {
     config: Arc<GcConfig>,
     threshold: AtomicUsize,
     allocator: SimpleAlloc,
-    // TODO: This needs to be traced!!
+    // NOTE: This is only public so it can be traced
     cached_empty_vec: Cell<Option<*mut GcVecHeader>>
 }
 impl GcHeap {
@@ -768,19 +768,41 @@ impl RawSimpleCollector {
         &self, contexts: &[*mut RawContext<Self>]
     ) {
         debug_assert!(self.manager.is_collecting());
-        let roots: Vec<*mut dyn DynTrace> = contexts.iter()
-            .flat_map(|ctx| {
-                (**ctx).assume_valid_shadow_stack()
-                    .reverse_iter().map(NonNull::as_ptr)
-            })
-            .chain(std::iter::once(&self.handle_list
+        let roots = {
+            let mut roots: Vec<*mut dyn DynTrace> = Vec::new();
+            for ctx in contexts.iter() {
+                roots.extend((**ctx).assume_valid_shadow_stack()
+                    .reverse_iter().map(NonNull::as_ptr));
+            }
+            roots.push(&self.handle_list
                 // Cast to wrapper type
                 as *const GcHandleList<Self> as *const GcHandleListWrapper
                 // Make into virtual pointer
                 as *const dyn DynTrace
                 as *mut dyn DynTrace
-            ))
-            .collect();
+            );
+            #[repr(transparent)]
+            struct CachedEmptyVec(GcVecHeader);
+            unsafe impl DynTrace for CachedEmptyVec {
+                fn trace(&mut self, visitor: &mut MarkVisitor) {
+                    let cached_vec_header = self as *mut Self as *mut GcVecHeader;
+                    unsafe {
+                        let target_repr = (cached_vec_header as *mut u8)
+                            .add(GcVecHeader::LAYOUT.value_offset(EMPTY_VEC_ALIGNMENT))
+                            .cast::<SimpleVecRepr<()>>();
+                        let mut target_gc = *(&target_repr
+                            as *const *mut SimpleVecRepr<()>
+                            as *const Gc<SimpleVecRepr<DynamicObj>>);
+                        // TODO: Assert not moving?
+                        let Ok(()) = visitor.visit_vec::<(), _>(&mut target_gc);
+                    }
+                }
+            }
+            if let Some(cached_vec_header) = self.heap.cached_empty_vec.get() {
+                roots.push(cached_vec_header as *mut CachedEmptyVec as *mut dyn DynTrace)
+            }
+            roots
+        };
         let num_roots = roots.len();
         let mut task = CollectionTask {
             config: &*self.config,

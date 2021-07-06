@@ -90,11 +90,13 @@ impl<'gc, T: GcSafe, Ctx: GcSimpleAlloc> GcVec<'gc, T, Ctx> {
     #[inline]
     pub fn extend_from_slice(&mut self, src: &[T])
         where T: Copy {
+        let old_len = self.len();
         self.reserve(src.len());
         // TODO: Write barriers?
         unsafe {
             (self.raw.as_repr_mut().ptr() as *mut T).add(self.len())
-                .copy_from_nonoverlapping(src.as_ptr(), src.len())
+                .copy_from_nonoverlapping(src.as_ptr(), src.len());
+            self.raw.as_repr_mut().set_len(old_len + src.len());
         }
     }
     /// Push the specified value onto the vector
