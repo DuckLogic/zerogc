@@ -18,6 +18,16 @@
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
+/*
+ * Allows proc macros to access `::zeroc::$name`
+ *
+ * NOTE: I can't figure out a
+ * way to emulate $crate in a way
+ * that doesn't confuse integration
+ * tests with the main crate
+ */
+
+extern crate self as zerogc;
 
 /*
  * I want this library to use 'mostly' stable features,

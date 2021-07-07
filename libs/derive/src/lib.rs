@@ -20,18 +20,20 @@ mod macros;
 ///
 /// This is equivalant to `$crate` for regular macros
 pub(crate) fn zerogc_crate() -> TokenStream {
-    if is_bootstraping() {
-        quote!(crate)
-    } else {
-        quote!(::zerogc)
-    }
+    /*
+     * TODO: A way to detect $crate
+     * Checking environment variables
+     * doesn't work well because doctests
+     * and integration tests
+     * will falsely believe they should access
+     * `crate` instead of `zerogc`
+     *
+     * Instead, we re-export `extern crate self as zerogc`
+     * at the start of the main crate
+     */
+    quote!(::zerogc)
 }
 
-/// If we are currently compiling the base crate `zerogc` itself
-pub(crate) fn is_bootstraping() -> bool {
-    ::proc_macro::tracked_env::var("CARGO_CRATE_NAME")
-        .expect("Expected `CARGO_CRATE_NAME`") == "zerogc"
-}
 
 struct MutableFieldOpts {
     public: bool
