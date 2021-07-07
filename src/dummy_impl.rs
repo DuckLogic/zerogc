@@ -1,16 +1,13 @@
 //! Dummy collector implementation for testing
 
-use crate::{
-    Trace, TraceImmutable, GcVisitor, NullTrace, CollectorId,
-    GcSafe, GcSystem, GcContext,
-};
+use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable};
 use std::ptr::NonNull;
 
 /// Fake a [Gc] that points to the specified value
 ///
 /// This will never actually be collected
 /// and will always be valid
-pub fn gc<'gc, T: GcSafe + 'static>(ptr: &'static T) -> Gc<'gc, T> {
+pub fn gc<'gc, T: GcSafe + 'gc>(ptr: &'gc T) -> Gc<'gc, T> {
     unsafe {
         Gc::from_raw(
             DummyCollectorId { _priv: () },
@@ -46,7 +43,7 @@ unsafe impl GcContext for DummyContext {
     type System = DummySystem;
     type Id = DummyCollectorId;
 
-    unsafe fn basic_safepoint<T: Trace>(&mut self, _value: &mut &mut T) {
+    unsafe fn unchecked_safepoint<T: Trace>(&self, _value: &mut &mut T) {
         // safepoints are a nop since there is nothing to track
     }
 
@@ -95,6 +92,30 @@ impl DummySystem {
 unsafe impl GcSystem for DummySystem {
     type Id = DummyCollectorId;
     type Context = DummyContext;
+}
+unsafe impl GcSimpleAlloc for DummyContext {
+    fn alloc<'gc, T>(&'gc self, value: T) -> crate::Gc<'gc, T, Self::Id>
+        where T: GcSafe + 'gc {
+        gc(Box::leak(Box::new(value)))
+    }
+
+    unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> (Self::Id, *mut T)
+        where T: GcSafe + 'gc {
+        let mut res: Vec<T> = Vec::with_capacity(len);
+        res.set_len(len);
+        let res = Vec::leak(res);
+        (DummyCollectorId { _priv: () }, res.as_ptr() as *mut T)
+    }
+
+    fn alloc_vec<'gc, T>(&'gc self) -> crate::vec::GcVec<'gc, T, Self>
+        where T: GcSafe + 'gc {
+        todo!("Vec alloc")
+    }
+
+    fn alloc_vec_with_capacity<'gc, T>(&'gc self, _capacity: usize) -> crate::vec::GcVec<'gc, T, Self>
+        where T: GcSafe + 'gc {
+        todo!("Vec alloc")
+    }
 }
 
 /// The id for a [dummy gc pointer](Gc)
