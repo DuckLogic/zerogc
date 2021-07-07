@@ -168,7 +168,7 @@ unsafe impl<C: RawCollectorImpl> GcContext for CollectorContext<C> {
     type Id = CollectorId<C>;
 
     #[inline]
-    unsafe fn basic_safepoint<T: Trace>(&mut self, value: &mut &mut T) {
+    unsafe fn unchecked_safepoint<T: Trace>(&self, value: &mut &mut T) {
         debug_assert_eq!((*self.raw).state(), ContextState::Active);
         if (*self.raw).collector().should_collect() {
             self.trigger_basic_safepoint(value);
