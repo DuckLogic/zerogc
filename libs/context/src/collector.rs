@@ -313,6 +313,7 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
 }
 unsafe impl<C: RawCollectorImpl> Trace for CollectorId<C> {
     const NEEDS_TRACE: bool = false;
+    const NEEDS_DROP: bool = false;
     #[inline(always)]
     fn visit<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
         Ok(())

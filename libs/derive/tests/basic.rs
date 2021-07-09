@@ -80,7 +80,7 @@ fn check_id<'gc, Id: CollectorId>() {
     assert_copy::<Gc<'gc, Basic<'gc, Id>, Id>>();
     assert_copy::<Option<Gc<'gc, Basic<'gc, Id>, Id>>>();
 
-    assert!(<Basic<'gc, Id> as GcSafe>::NEEDS_DROP);
+    assert!(<Basic<'gc, Id> as Trace>::NEEDS_DROP);
 }
 
 #[derive(NullTrace)]
@@ -123,8 +123,8 @@ fn basic<'gc>() {
     };
     assert!(<Basic::<dummy_impl::DummyCollectorId> as Trace>::NEEDS_TRACE);
     assert!(<BasicCopy::<dummy_impl::DummyCollectorId> as Trace>::NEEDS_TRACE);
-    assert!(<Basic::<dummy_impl::DummyCollectorId> as GcSafe>::NEEDS_DROP);
-    assert!(!<BasicCopy::<dummy_impl::DummyCollectorId> as GcSafe>::NEEDS_DROP);
+    assert!(<Basic::<dummy_impl::DummyCollectorId> as Trace>::NEEDS_DROP);
+    assert!(!<BasicCopy::<dummy_impl::DummyCollectorId> as Trace>::NEEDS_DROP);
     assert_copy::<BasicCopy::<dummy_impl::DummyCollectorId>>();
     assert_null_trace::<NopTrace>();
     assert!(!<NopTrace as Trace>::NEEDS_TRACE);
@@ -137,10 +137,10 @@ fn basic<'gc>() {
      * We (unsafely) claimed drop-safety (w/ `unsafe_skip_drop`),
      * so we shouldn't generate a destructor
      *
-     * GcSafe::NEEDS_DROP should already be false (since we have no Drop fields),
+     * Trace::NEEDS_DROP should already be false (since we have no Drop fields),
      * however in this case `std::mem::needs_drop` is false since we have no dummy drop impl.
      */
-    assert!(!<UnsafeSkipped<'gc> as GcSafe>::NEEDS_DROP);
+    assert!(!<UnsafeSkipped<'gc> as Trace>::NEEDS_DROP);
     assert!(!std::mem::needs_drop::<UnsafeSkipped<'gc>>());
 
     /*
@@ -149,7 +149,7 @@ fn basic<'gc>() {
      * The `nop_trace` automatically implies `unsafe_skip_drop` (safely)
      */
     assert_null_trace::<NoDestructorNullTrace>();
-    assert!(!<NoDestructorNullTrace as GcSafe>::NEEDS_DROP);
+    assert!(!<NoDestructorNullTrace as Trace>::NEEDS_DROP);
     assert!(!std::mem::needs_drop::<NoDestructorNullTrace>());
 
 }

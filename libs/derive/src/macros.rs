@@ -117,6 +117,15 @@ impl MacroInput {
         let (impl_generics, _, where_clause) = generics.split_for_impl();
         let trait_name = if mutable { quote!(#zerogc_crate::Trace) } else { quote!(#zerogc_crate::TraceImmutable) };
         let visit_method_name = if mutable { quote!(visit) } else { quote!(visit_immutable) };
+        let needs_drop_const = if mutable {
+            let expr = &self.options.needs_drop;
+            Some(quote!(const NEEDS_DROP: bool = {
+                use #zerogc_crate::Trace;
+                #expr
+            };))
+        } else {
+            None
+        };
         let needs_trace_const = if mutable {
             let expr = &self.options.needs_trace;
             Some(quote!(const NEEDS_TRACE: bool = {
@@ -135,6 +144,7 @@ impl MacroInput {
         Ok(Some(quote! {
             unsafe impl #impl_generics #trait_name for #target_type #where_clause {
                 #needs_trace_const
+                #needs_drop_const
                 #[inline] // TODO: Should this be unconditional?
                 fn #visit_method_name<Visitor: #zerogc_crate::GcVisitor + ?Sized>(&#mutability self, visitor: &mut Visitor) -> Result<(), Visitor::Err> {
                     #visit_impl
@@ -151,16 +161,9 @@ impl MacroInput {
                 Some(clause) => clause.predicates,
                 None => return None // They are requesting we dont implement
             });
-        let needs_drop = &self.options.needs_drop;
         let (impl_generics, _, where_clause) = generics.split_for_impl();
         Some(quote! {
-            unsafe impl #impl_generics #zerogc_crate::GcSafe for #target_type #where_clause {
-                const NEEDS_DROP: bool = {
-                    // Import the trait so we can access `T::NEEDS_DROP`
-                    use #zerogc_crate::GcSafe;
-                    #needs_drop
-                };
-            }
+            unsafe impl #impl_generics #zerogc_crate::GcSafe for #target_type #where_clause {}
         })
     }
     fn expand_brand_impl(&self, rebrand: bool /* true => rebrand, false => erase */) -> Result<Option<TokenStream>, Error> {

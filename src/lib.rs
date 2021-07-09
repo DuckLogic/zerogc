@@ -661,9 +661,7 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
 }
 
 /// Double-indirection is completely safe
-unsafe impl<'gc, T: GcSafe + 'gc, Id: CollectorId> GcSafe for Gc<'gc, T, Id> {
-    const NEEDS_DROP: bool = true; // We are Copy
-}
+unsafe impl<'gc, T: GcSafe + 'gc, Id: CollectorId> GcSafe for Gc<'gc, T, Id> {}
 /// Rebrand
 unsafe impl<'gc, 'new_gc, T, Id> GcRebrand<'new_gc, Id> for Gc<'gc, T, Id>
     where T: GcSafe + ?Sized + GcRebrand<'new_gc, Id>,
@@ -680,6 +678,11 @@ unsafe impl<'gc, 'a, T, Id> GcErase<'a, Id> for Gc<'gc, T, Id>
 unsafe impl<'gc, T: GcSafe + 'gc, Id: CollectorId> Trace for Gc<'gc, T, Id> {
     // We always need tracing....
     const NEEDS_TRACE: bool = true;
+    /*
+     * However, we never need to be dropped
+     * because we are `Copy`
+     */
+    const NEEDS_DROP: bool = false;
 
     #[inline]
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
@@ -691,6 +694,7 @@ unsafe impl<'gc, T: GcSafe + 'gc, Id: CollectorId> Trace for Gc<'gc, T, Id> {
 }
 unsafe impl<'gc, T: GcSafe + 'gc, Id: CollectorId> Trace for Gc<'gc, [T], Id> {
     const NEEDS_TRACE: bool = true;
+    const NEEDS_DROP: bool = false;
 
     #[inline]
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
@@ -906,19 +910,11 @@ pub unsafe trait GcDirectBarrier<'gc, OwningRef>: Trace {
 /// and avoids a second pass over the objects
 /// to check for resurrected objects.
 pub unsafe trait GcSafe: Trace {
-    /// If this type needs a destructor run
-    ///
-    /// This is usually equivalent to `std::mem::needs_drop`.
-    /// However procedurally derived code can sometimes provide
-    /// a no-op drop implementation (for safety),
-    /// which would lead to a false positive with `std::mem::needs_drop()`
-    const NEEDS_DROP: bool;
-
     /// Assert this type is GC safe
     ///
     /// Only used by procedural derive
     #[doc(hidden)]
-    fn assert_gc_safe() {}
+    fn assert_gc_safe() where Self: Sized {}
 }
 /// Assert that a type implements Copy
 ///
@@ -1053,6 +1049,13 @@ pub unsafe trait Trace {
     ///
     /// If this is true `NullTrace` should (but doesn't have to) be implemented.
     const NEEDS_TRACE: bool;
+    /// If this type needs a destructor run.
+    ///
+    /// This is usually equivalent to [core::mem::needs_drop].
+    /// However, procedurally derived code can sometimes provide
+    /// a no-op drop implementation (for safety)
+    /// which would lead to a false positive with `core::mem::needs_drop()`
+    const NEEDS_DROP: bool;
     /// Visit each field in this type
     ///
     /// Users should never invoke this method, and always call the `V::visit` instead.

@@ -81,6 +81,8 @@ unsafe impl<'gc, OwningRef, Value> GcDirectBarrier<'gc, OwningRef> for GcCell<Va
 /// with a garbage collected type, as long as it is never mutated.
 unsafe impl<T: Trace + Copy> Trace for GcCell<T> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
+    /// Since T is Copy, we shouldn't need to be dropped
+    const NEEDS_DROP: bool = false;
 
     #[inline]
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
@@ -100,10 +102,7 @@ unsafe impl<T: GcSafe + NullTrace + Copy> TraceImmutable for GcCell<T> {
     }
 }
 unsafe impl<T: GcSafe + Copy + NullTrace> NullTrace for GcCell<T> {}
-unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {
-    /// Since T is Copy, we shouldn't need to be dropped
-    const NEEDS_DROP: bool = false;
-}
+unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {}
 unsafe impl<'min, T, Id> GcErase<'min, Id> for GcCell<T>
     where T: Trace + Copy + GcErase<'min, Id>, Id: CollectorId,
           T::Erased: Copy + Trace {

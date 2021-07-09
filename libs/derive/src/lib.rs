@@ -1000,7 +1000,6 @@ fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
         &info.config.ignore_params, None
     )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let fields: Vec<&Field>;
     let trace_impl: TokenStream;
     match target.data {
         Data::Struct(ref data) => {
@@ -1008,12 +1007,8 @@ fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
                 &data.fields,
                 &mut |member| quote!(&mut self.#member)
             )?;
-            fields = data.fields.iter().collect();
         },
         Data::Enum(ref data) => {
-            fields = data.variants.iter()
-                .flat_map(|var| var.fields.iter())
-                .collect();
             let mut match_arms = Vec::new();
             for variant in &data.variants {
                 let variant_name = &variant.ident;
@@ -1061,9 +1056,8 @@ fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
             ));
         },
     }
-    let fields = fields.into_iter()
-        .map(|field| Ok((field, GcFieldAttrs::find(&field.attrs)?)))
-        .collect::<Result<Vec<_>, Error>>()?;
+    let fields = collect_fields(target)?;
+    let does_need_drop = needs_drop(info, &*fields);
     let fields_need_trace = fields.iter()
         .filter_map(|(field, attrs)| {
             if attrs.unsafe_skip_trace {
@@ -1075,6 +1069,7 @@ fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
     Ok(quote! {
         unsafe impl #impl_generics #zerogc_crate::Trace for #name #ty_generics #where_clause {
             const NEEDS_TRACE: bool = false #(|| #fields_need_trace)*;
+            const NEEDS_DROP: bool = #does_need_drop;
 
             /*
              * The inline annotation adds this function's MIR to the metadata.
@@ -1087,6 +1082,26 @@ fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
             }
         }
     })
+}
+fn collect_fields(target: &DeriveInput) -> Result<Vec<(&Field, GcFieldAttrs)>, Error> {
+    let target_fields: Vec<&Field> = match target.data {
+        Data::Struct(ref data) => {
+            data.fields.iter().collect()
+        },
+        Data::Enum(ref data) => {
+            data.variants.iter()
+                .flat_map(|v| v.fields.iter())
+                .collect()
+        },
+        Data::Union(_) => {
+            return Err(Error::new(
+                target.ident.span(), "Unions are unsupported"
+            ))
+        },
+    };
+    target_fields.into_iter()
+        .map(|field| Ok((field, GcFieldAttrs::find(&field.attrs)?)))
+        .collect::<Result<Vec<_>, Error>>()
 }
 fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
     let zerogc_crate = zerogc_crate();
@@ -1104,37 +1119,7 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
         })
     )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let target_fields: Vec<&Field> = match target.data {
-        Data::Struct(ref data) => {
-            data.fields.iter().collect()
-        },
-        Data::Enum(ref data) => {
-            data.variants.iter()
-                .flat_map(|v| v.fields.iter())
-                .collect()
-        },
-        Data::Union(_) => {
-            return Err(Error::new(
-                name.span(), "Unions are unsupported for GcSafe"
-            ))
-        },
-    };
-    let target_fields = target_fields.into_iter()
-        .map(|field| Ok((field, GcFieldAttrs::find(&field.attrs)?)))
-        .collect::<Result<Vec<_>, Error>>()?;
-    let does_need_drop = if info.config.is_copy {
-        // If we're proven to be a copy type we don't need to be dropped
-        quote!(false)
-    } else {
-        let drop_assertions = target_fields.iter().filter_map(|(field, attrs)| {
-            if attrs.unsafe_skip_trace { return None }
-            let span = field.ty.span();
-            let field_type = &field.ty;
-            Some(quote_spanned!(span => <#field_type as #zerogc_crate::GcSafe>::NEEDS_DROP))
-        });
-        // We need to be dropped if any of our fields need to be dropped
-        quote!(false #(|| #drop_assertions)*)
-    };
+    let target_fields = collect_fields(target)?;
     let fake_drop_impl = if info.config.is_copy {
         /*
          * If this type can be proven to implement Copy,
@@ -1168,7 +1153,7 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
     let verify_gc_safe = if info.config.is_copy {
         quote!(#zerogc_crate::assert_copy::<Self>())
     } else {
-        let field_assertions = target_fields.iter().filter_map(|(field, attrs)| {
+        let field_assertions = target_fields.iter().filter_map(|&(field, ref attrs)| {
             if attrs.unsafe_skip_trace { return None }
             let span = field.ty.span();
             let field_type = &field.ty;
@@ -1179,8 +1164,6 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
     Ok(quote! {
         unsafe impl #impl_generics #zerogc_crate::GcSafe
             for #name #ty_generics #where_clause {
-            const NEEDS_DROP: bool = #does_need_drop;
-
             fn assert_gc_safe() {
                 #verify_gc_safe
             }
@@ -1189,6 +1172,22 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
     })
 }
 
+fn needs_drop(info: &GcTypeInfo, target_fields: &[(&Field, GcFieldAttrs)]) -> TokenStream {
+    let zerogc_crate = zerogc_crate();
+    if info.config.is_copy {
+        // If we're proven to be a copy type we don't need to be dropped
+        quote!(false)
+    } else {
+        let drop_assertions = target_fields.iter().filter_map(|(field, attrs)| {
+            if attrs.unsafe_skip_trace { return None }
+            let span = field.ty.span();
+            let field_type = &field.ty;
+            Some(quote_spanned!(span => <#field_type as #zerogc_crate::Trace>::NEEDS_DROP))
+        });
+        // We need to be dropped if any of our fields need to be dropped
+        quote!(false #(|| #drop_assertions)*)
+    }
+}
 
 fn impl_nop_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
     let zerogc_crate = zerogc_crate();
@@ -1198,27 +1197,10 @@ fn impl_nop_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream
         &info.config.ignore_params, None
     )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let target_fields: Vec<&Field>;
-    match target.data {
-        Data::Struct(ref data) => {
-            target_fields = data.fields.iter().collect();
-        },
-        Data::Enum(ref data) => {
-            target_fields = data.variants.iter()
-                .flat_map(|var| var.fields.iter())
-                .collect();
-        },
-        Data::Union(_) => {
-            return Err(Error::new(
-                name.span(),
-                "Unions can't #[derive(Trace)]"
-            ));
-        },
-    }
+    let target_fields = collect_fields(target)?;
     // TODO: We should have some sort of const-assertion for this....
     let trace_assertions = target_fields.iter()
-        .map(|&field| {
-            let field_attrs = GcFieldAttrs::find(&field.attrs)?;
+        .map(|&(field, ref field_attrs)| {
             let t = &field.ty;
             if field_attrs.unsafe_skip_trace {
                 return Ok(quote!());
@@ -1232,9 +1214,11 @@ fn impl_nop_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream
                 );
             })
         }).collect::<Result<Vec<_>, Error>>()?;
+    let needs_drop = needs_drop(info, &*target_fields);
     Ok(quote! {
         unsafe impl #impl_generics #zerogc_crate::Trace for #name #ty_generics #where_clause {
             const NEEDS_TRACE: bool = false;
+            const NEEDS_DROP: bool = #needs_drop;
 
             #[inline] // Should be const-folded away
             fn visit<Visitor: #zerogc_crate::GcVisitor + ?Sized>(&mut self, #[allow(unused)] visitor: &mut Visitor) -> Result<(), Visitor::Err> {

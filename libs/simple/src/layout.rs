@@ -21,7 +21,6 @@ use zerogc_context::field_offset;
 use zerogc_derive::{NullTrace, unsafe_gc_impl};
 
 use crate::{RawMarkState, CollectorId, DynTrace, MarkVisitor};
-use crate::alloc::fits_small_object;
 use std::ptr::NonNull;
 
 /// Everything but the lower 2 bits of mark data are unused
@@ -521,7 +520,7 @@ impl<T: GcSafe> StaticGcType for [T] {
                 visit::<T> as unsafe fn(*mut c_void, &mut MarkVisitor)
             })
         } else { None },
-        drop_func: if <T as GcSafe>::NEEDS_DROP {
+        drop_func: if <T as Trace>::NEEDS_DROP {
             Some({
                 unsafe fn drop_gc_slice<T: GcSafe>(val: *mut c_void) {
                     let len = (*GcArrayHeader::LAYOUT.from_value_ptr(val as *mut T)).len;
@@ -546,7 +545,7 @@ impl<T: GcSafe> StaticGcType for T {
                 <T as DynTrace>::trace as fn(&mut T, &mut MarkVisitor),
             ) })
         } else { None },
-        drop_func: if <T as GcSafe>::NEEDS_DROP {
+        drop_func: if <T as Trace>::NEEDS_DROP {
             unsafe { Some(mem::transmute::<_, unsafe fn(*mut c_void)>(
                 std::ptr::drop_in_place::<T> as unsafe fn(*mut T)
             )) }

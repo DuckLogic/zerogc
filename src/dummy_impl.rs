@@ -125,6 +125,7 @@ pub struct DummyCollectorId {
 }
 unsafe impl Trace for DummyCollectorId {
     const NEEDS_TRACE: bool = false;
+    const NEEDS_DROP: bool = false;
 
     fn visit<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
         Ok(())

@@ -476,6 +476,7 @@ unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
 unsafe impl<T: GcSafe, C: RawHandleImpl> Trace for GcHandle<T, C> {
     /// See docs on reachability
     const NEEDS_TRACE: bool = false;
+    const NEEDS_DROP: bool = true;
     #[inline(always)]
     fn visit<V>(&mut self, _visitor: &mut V) -> Result<(), V::Err>
         where V: zerogc::GcVisitor {
