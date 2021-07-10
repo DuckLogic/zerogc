@@ -19,7 +19,7 @@
 ///     foo(gc.value())
 /// }
 /// #[derive(Trace)]
-/// #[zerogc(collector_id(DummyCollectorId))]
+/// # #[zerogc(collector_id(DummyCollectorId))]
 /// struct Bar<'gc> {
 ///     val: Gc<'gc, i32>
 /// }
@@ -37,9 +37,11 @@
 /// This macro is completely safe.
 #[macro_export]
 macro_rules! trait_object_trace {
-    (impl $(<$($param:ident),*>)? Trace for dyn $target:path $(where $($where_clause:tt)*)?) => {
-        unsafe impl$(<$($param:ident),*>)? $crate::GcSafe for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {}
-        unsafe impl$(<$($param:ident),*>)? $crate::Trace for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
+    (impl $(<$($lt:lifetime,)* $($param:ident),*>)? Trace for dyn $target:path $(where $($where_clause:tt)*)?;
+        Branded<$branded_lt:lifetime> => $branded:ty,
+        Erased<$erased_lt:lifetime> => $erased:ty) => {
+        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::GcSafe for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {}
+        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::Trace for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
             /*
              * Insufficient compile-time information to know whether we need to be traced.
              *
@@ -54,10 +56,17 @@ macro_rules! trait_object_trace {
             }
 
             #[inline]
-            unsafe fn visit_inside_gc<'gc, V, Id>(gc: &mut $crate::Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
-                where V: $crate::GcVisitor, Id: $crate::CollectorId, Self: $crate::GcSafe + 'gc {
+            unsafe fn visit_inside_gc<'actual_gc, V, Id>(gc: &mut $crate::Gc<'actual_gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
+                where V: $crate::GcVisitor, Id: $crate::CollectorId, Self: $crate::GcSafe + 'actual_gc {
                 visitor.visit_trait_object(gc)
             }
         }
+        unsafe impl<$branded_lt, $($($lt,)* $($param:ident,)*)? ActualId: $crate::CollectorId> $crate::GcRebrand<$branded_lt, ActualId> for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
+            type Branded = $branded;
+        }
+        unsafe impl<$erased_lt, $($($lt,)* $($param:ident,)*)? ActualId: $crate::CollectorId> $crate::GcErase<$erased_lt, ActualId> for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
+            type Erased = $erased;
+        }
+
     }
 }

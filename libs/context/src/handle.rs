@@ -437,7 +437,7 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C
     }
 }
 unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
-    where T: GcSafe, T: GcRebrand<'new_gc, CollectorId<C>>,
+    where T: GcSafe, T: GcRebrand<'new_gc, CollectorId<C>>, T::Branded: Sized,
           T::Branded: GcSafe, C: RawHandleImpl {
     #[inline]
     fn bind_to(&self, context: &'new_gc CollectorContext<C>) -> Gc<'new_gc, T::Branded, CollectorId<C>> {
@@ -608,7 +608,7 @@ unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for CollectorRef<C>
     where C: RawHandleImpl,
           T: GcSafe + 'gc,
           T: GcErase<'a, CollectorId<C>>,
-          T::Erased: GcSafe {
+          T::Erased: GcSafe + Sized {
     type Handle = GcHandle<T::Erased, C>;
 
     #[inline]

@@ -269,6 +269,18 @@ impl MacroInput {
              */
             generics.make_where_clause().predicates
                 .extend(self.bounds.trace_where_clause(&self.params).predicates);
+            // Generate `Sized` bounds for all params
+            for param in &self.params {
+                if let GenericParam::Type(ref tp) = param {
+                    let param_name = &tp.ident;
+                    generics.make_where_clause().predicates
+                        .push(if rebrand {
+                            parse_quote!(<#param_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded: Sized)
+                        } else {
+                            parse_quote!(<#param_name as #zerogc_crate::GcErase<'min, Id>>::Erased: Sized)
+                        })
+                }
+            }
         }
         if rebrand {
             generics.params.push(parse_quote!('new_gc));

@@ -368,7 +368,7 @@ pub unsafe trait GcContext: Sized {
     /// It should only be used as part of the [safepoint!] macro.
     #[inline(always)]
     unsafe fn rebrand_static<'a, T>(&self, value: T) -> T::Erased
-        where T: GcErase<'a, Self::Id> {
+        where T: GcErase<'a, Self::Id>, T::Erased: Sized {
         let branded = mem::transmute_copy(&value);
         mem::forget(value);
         branded
@@ -384,7 +384,7 @@ pub unsafe trait GcContext: Sized {
     /// It should only be used as part of the [safepoint!] macro.
     #[inline(always)]
     unsafe fn rebrand_self<'gc, T>(&'gc self, value: T) -> T::Branded
-        where T: GcRebrand<'gc, Self::Id> {
+        where T: GcRebrand<'gc, Self::Id>, T::Branded: Sized {
         let branded = mem::transmute_copy(&value);
         mem::forget(value);
         branded
@@ -984,7 +984,7 @@ pub unsafe trait GcRebrand<'new_gc, Id: CollectorId>: Trace {
     ///
     /// This must have the same in-memory repr as `Self`,
     /// so that it's safe to transmute.
-    type Branded: Trace + 'new_gc;
+    type Branded: ?Sized + 'new_gc;
 
     /// Assert this type can be rebranded
     ///
@@ -1004,7 +1004,7 @@ pub unsafe trait GcErase<'a, Id: CollectorId>: Trace {
     ///
     /// This must have the same in-memory repr as `Self`,
     /// so that it's safe to transmute.
-    type Erased: 'a;
+    type Erased: ?Sized + 'a;
 
     /// Assert this type can be erased
     ///

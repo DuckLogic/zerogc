@@ -29,10 +29,6 @@ macro_rules! trace_tuple_impl {
         unsafe_gc_impl! {
             target => ( $($param,)* ),
             params => [$($param),*],
-            bounds => {
-                GcRebrand => { where $($param: GcRebrand<'new_gc, Id>),* },
-                GcErase => { where $($param: GcErase<'min, Id>),* },
-            }
             null_trace => { where $($param: NullTrace,)* i32: Sized },
             /*
              * HACK: Macros don't allow using `||` as separator,

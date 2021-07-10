@@ -49,8 +49,8 @@ unsafe_gc_impl!(
     collector_id => Id,
     bounds => {
         TraceImmutable => never,
-        GcRebrand => { where T: GcRebrand<'new_gc, Id>, <T as GcRebrand<'new_gc, Id>>::Branded: GcSafe },
-        GcErase => { where T: GcErase<'min, Id>, <T as GcErase<'min, Id>>::Erased: GcSafe }
+        GcRebrand => { where T: GcRebrand<'new_gc, Id>, <T as GcRebrand<'new_gc, Id>>::Branded: Sized + GcSafe },
+        GcErase => { where T: GcErase<'min, Id>, <T as GcErase<'min, Id>>::Erased: Sized + GcSafe }
     },
     null_trace => never,
     branded_type => GcArray<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,
@@ -334,11 +334,11 @@ unsafe_gc_impl!(
         TraceImmutable => never,
         GcRebrand => {
             where T: GcSafe + GcRebrand<'new_gc, Id>,
-                <T as GcRebrand<'new_gc, Id>>::Branded: GcSafe
+                <T as GcRebrand<'new_gc, Id>>::Branded: Sized + GcSafe
         },
         GcErase => {
             where T: GcSafe + GcErase<'min, Id>,
-                <T as GcErase<'min, Id>>::Erased: GcSafe
+                <T as GcErase<'min, Id>>::Erased: Sized + GcSafe
         },
     },
     branded_type => GcRawVec<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,
