@@ -17,6 +17,7 @@ use syn::spanned::Spanned;
 
 use quote::{quote, quote_spanned};
 use super::zerogc_crate;
+use syn::ext::IdentExt;
 
 #[derive(Debug)]
 struct GenericParamInput(Vec<GenericParam>);
@@ -136,6 +137,26 @@ impl MacroInput {
         } else {
             None
         };
+        let visit_inside_gc = if mutable {
+            let expr = match self.options.visit_inside_gc {
+                Some(ref expr) => expr.0.body.clone(),
+                None => quote!(visitor.visit_gc(gc))
+            };
+            let where_clause = if let Some(ref clause) = self.bounds.visit_inside_gc {
+                clause.clone()
+            } else {
+                parse_quote!(where Visitor: #zerogc_crate::GcVisitor, ActualId: #zerogc_crate::CollectorId, Self: #zerogc_crate::GcSafe + 'actual_gc)
+            };
+            Some(quote! {
+                #[inline]
+                unsafe fn visit_inside_gc<'actual_gc, Visitor, ActualId>(gc: &mut #zerogc_crate::Gc<'actual_gc, Self, ActualId>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
+                    #where_clause {
+                    #expr
+                }
+            })
+        } else {
+            None
+        };
         let mutability = if mutable {
             quote!(mut)
         } else {
@@ -149,6 +170,7 @@ impl MacroInput {
                 fn #visit_method_name<Visitor: #zerogc_crate::GcVisitor + ?Sized>(&#mutability self, visitor: &mut Visitor) -> Result<(), Visitor::Err> {
                     #visit_impl
                 }
+                #visit_inside_gc
             }
         }))
     }
@@ -390,6 +412,7 @@ impl Parse for MacroInput {
             "trace_mut" [VisitClosure] opt => trace_mut_closure;
             "trace_immutable" [VisitClosure] opt => trace_immutable_closure;
             "collector_id" [Type] opt => collector_id;
+            "visit_inside_gc" [VisitInsideGcClosure] opt => visit_inside_gc_closure;
         });
         let bounds = res.bounds.unwrap_or_default();
         if let Some(TraitRequirements::Never) = bounds.trace  {
@@ -401,11 +424,11 @@ impl Parse for MacroInput {
             if let Some(closure) = res.trace_immutable_closure.as_ref()
                 .or(res.trace_mut_closure.as_ref()) {
                 return Err(Error::new(
-                    closure.body.span(),
+                    closure.0.body.span(),
                     "Cannot specify specific closure (trace_mut/trace_immutable) in addition to `visit`"
                 ))
             }
-            VisitImpl::Generic { generic_impl: visit_closure.body }
+            VisitImpl::Generic { generic_impl: visit_closure.0.body }
         } else {
             let trace_closure = res.trace_mut_closure.ok_or_else(|| {
                 Error::new(
@@ -417,7 +440,7 @@ impl Parse for MacroInput {
                 Some(TraitRequirements::Never) => {
                     if let Some(closure) = res.trace_immutable_closure {
                         return Err(Error::new(
-                            closure.body.span(),
+                            closure.0.body.span(),
                             "Specified a `trace_immutable` implementation even though TraceImmutable is never implemented"
                         ))
                     } else {
@@ -436,9 +459,9 @@ impl Parse for MacroInput {
                 }
             };
             VisitImpl::Specific {
-                mutable: ::syn::parse2(trace_closure.body)?,
+                mutable: ::syn::parse2(trace_closure.0.body)?,
                 immutable: trace_immut_closure
-                    .map(|closure| ::syn::parse2::<Expr>(closure.body))
+                    .map(|closure| ::syn::parse2::<Expr>(closure.0.body))
                     .transpose()?
             }
         };
@@ -452,7 +475,8 @@ impl Parse for MacroInput {
                 erased_type: res.erased_type,
                 needs_trace: res.needs_trace,
                 needs_drop: res.needs_drop,
-                collector_id: res.collector_id
+                collector_id: res.collector_id,
+                visit_inside_gc: res.visit_inside_gc_closure
             },
             visit: visit_impl
         })
@@ -460,36 +484,59 @@ impl Parse for MacroInput {
 }
 
 #[derive(Debug)]
-pub struct VisitClosure {
+pub struct KnownArgClosure {
     body: TokenStream,
     brace: ::syn::token::Brace
 }
-impl Parse for VisitClosure {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        input.parse::<Token![|]>()?;
-        if !input.peek(Token![self]) {
-            return Err(Error::new(
-                input.span(),
-                "Expected first argument to closure to be `self`"
-            ));
+impl KnownArgClosure {
+    pub fn parse_with_fixed_args(input: ParseStream, fixed_args: &[&str]) -> syn::Result<Self> {
+        let arg_start = input.parse::<Token![|]>()?.span;
+        let mut actual_args = Vec::new();
+        while !input.peek(Token![|]) {
+            // Use 'parse_any' to accept keywords like 'self'
+            actual_args.push(Ident::parse_any(input)?);
+            if input.peek(Token![|]) {
+                break; // done
+            } else {
+                input.parse::<Token![,]>()?;
+            }
         }
-        input.parse::<Token![self]>()?;
-        input.parse::<Token![,]>()?;
-        let visitor_name = input.parse::<Ident>()?;
-        if visitor_name != "visitor" {
-            return Err(Error::new(
-                visitor_name.span(),
-                "Expected second argument to closure to be `visitor`"
-            ));
+        let arg_end = input.parse::<Token![|]>()?.span;
+        if actual_args.len() != fixed_args.len() {
+            return Err(Error::new(arg_start.join(arg_end).unwrap(), format!(
+                "Expected {} args but got {}",
+                fixed_args.len(), actual_args.len()
+            )));
         }
-        input.parse::<Token![|]>()?;
+        for (index, (actual, &expected)) in actual_args.iter().zip(fixed_args).enumerate() {
+            if *actual != expected {
+                return Err(Error::new(
+                    actual.span(),
+                    format!("Expected arg #{} to be named {:?}", index, expected)
+                ));
+            }
+        }
         if !input.peek(syn::token::Brace) {
             return Err(input.error("Expected visitor closure to be braced"));
         }
         let body;
         let brace = braced!(body in input);
         let body = body.parse::<TokenStream>()?;
-        Ok(VisitClosure { body: quote!({ #body }), brace })
+        Ok(KnownArgClosure { body: quote!({ #body }), brace })
+    }
+}
+#[derive(Debug)]
+pub struct VisitClosure(KnownArgClosure);
+impl Parse for VisitClosure {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        Ok(VisitClosure(KnownArgClosure::parse_with_fixed_args(input, &["self", "visitor"])?))
+    }
+}
+#[derive(Debug)]
+pub struct VisitInsideGcClosure(KnownArgClosure);
+impl Parse for VisitInsideGcClosure {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        Ok(VisitInsideGcClosure(KnownArgClosure::parse_with_fixed_args(input, &["gc", "visitor"])?))
     }
 }
 
@@ -512,6 +559,7 @@ pub struct CustomBounds {
     rebrand: Option<TraitRequirements>,
     /// The requirements to implement `GcErase`
     erase: Option<TraitRequirements>,
+    visit_inside_gc: Option<WhereClause>
 }
 impl CustomBounds {
     fn trace_where_clause(&self, generic_params: &[GenericParam]) -> WhereClause {
@@ -597,6 +645,7 @@ impl Parse for CustomBounds {
             "GcSafe" [TraitRequirements] opt => gcsafe;
             "GcRebrand" [TraitRequirements] opt => rebrand;
             "GcErase" [TraitRequirements] opt => erase;
+            "visit_inside_gc" [WhereClause] opt => visit_inside_gc;
         });
         Ok(CustomBounds {
             trace: res.trace,
@@ -604,6 +653,7 @@ impl Parse for CustomBounds {
             gcsafe: res.gcsafe,
             rebrand: res.rebrand,
             erase: res.erase,
+            visit_inside_gc: res.visit_inside_gc
         })
     }
 }
@@ -627,7 +677,11 @@ pub struct StandardOptions {
     /// A (constant) expression determining whether the type should be dropped
     needs_drop: Expr,
     /// The fixed id of the collector, or `None` if the type can work with any collector
-    collector_id: Option<Type>
+    collector_id: Option<Type>,
+    /// An override for the standard `visit_inside_gc` impl.
+    ///
+    /// This is necessary if the type is not `Sized`
+    visit_inside_gc: Option<VisitInsideGcClosure>
 }
 
 /// The visit implementation.

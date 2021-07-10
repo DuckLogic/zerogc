@@ -123,12 +123,17 @@ unsafe impl GcSimpleAlloc for DummyContext {
 pub struct DummyCollectorId {
     _priv: ()
 }
+unsafe impl GcSafe for DummyCollectorId {}
 unsafe impl Trace for DummyCollectorId {
     const NEEDS_TRACE: bool = false;
     const NEEDS_DROP: bool = false;
 
     fn visit<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
         Ok(())
+    }
+
+    unsafe fn visit_inside_gc<'gc, V, Id>(gc: &mut crate::Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err> where V: GcVisitor, Id: CollectorId, Self: GcSafe + 'gc {
+        visitor.visit_gc(gc)
     }
 }
 unsafe impl TraceImmutable for DummyCollectorId {

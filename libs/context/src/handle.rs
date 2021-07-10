@@ -482,6 +482,13 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> Trace for GcHandle<T, C> {
         where V: zerogc::GcVisitor {
         Ok(())
     }
+
+    #[inline]
+    unsafe fn visit_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
+        where V: GcVisitor, Id: zerogc::CollectorId, Self: GcSafe + 'gc {
+        // Fine to stuff inside a pointer. We're a `Sized` type
+        visitor.visit_gc(gc)
+    }
 }
 unsafe impl<T: GcSafe, C: RawHandleImpl> TraceImmutable for GcHandle<T, C> {
     #[inline(always)]

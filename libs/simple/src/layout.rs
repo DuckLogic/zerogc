@@ -466,7 +466,7 @@ impl<T: GcSafe> StaticVecType for T {
             let align = std::mem::align_of::<T>();
             GcArrayHeader::LAYOUT.value_offset_from_common_header(align)
         },
-        trace_func: if T::NEEDS_TRACE {
+        trace_func: if <T as Trace>::NEEDS_TRACE {
             Some({
                 unsafe fn visit<T: Trace>(val: *mut c_void, visitor: &mut MarkVisitor) {
                     let len = (*GcVecHeader::LAYOUT.from_value_ptr(val as *mut T)).len.get();

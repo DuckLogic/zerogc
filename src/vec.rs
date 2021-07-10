@@ -9,7 +9,7 @@ use core::mem::ManuallyDrop;
 
 use zerogc_derive::{unsafe_gc_impl};
 
-use crate::{GcSimpleAlloc, CollectorId, Gc, GcSafe, GcRebrand, GcErase};
+use crate::{GcSimpleAlloc, Trace, CollectorId, Gc, GcSafe, GcRebrand, GcErase};
 use crate::vec::repr::{GcVecRepr, ReallocFailedError};
 
 pub mod repr;
@@ -18,7 +18,8 @@ pub mod repr;
 ///
 /// This is simply an alias for `Gc<[T]>`
 #[repr(transparent)]
-pub struct GcArray<'gc, T: GcSafe + 'gc, Id: CollectorId>(pub Gc<'gc, [T], Id>);
+pub struct GcArray<'gc, T: 'gc, Id: CollectorId>(pub Gc<'gc, [T], Id>)
+    where [T]: GcSafe;
 impl<'gc, T: GcSafe, Id: CollectorId> GcArray<'gc, T, Id> {
     /// The value of the array as a slice
     #[inline]
@@ -59,6 +60,9 @@ unsafe_gc_impl!(
     trace_mut => |self, visitor| {
         unsafe { visitor.visit_array(self) }
     },
+    visit_inside_gc => |gc, visitor| {
+        visitor.visit_gc(gc)
+    }
 );
 
 /// A version of [Vec] for use with garbage collectors.
@@ -144,13 +148,13 @@ unsafe_gc_impl!(
     params => ['gc, T: GcSafe, Ctx: GcSimpleAlloc],
     bounds => {
         TraceImmutable => never,
-        Trace => { where T: GcSafe },
+        Trace => { where T: GcSafe + Trace },
         GcRebrand => never,
         GcErase => never,
     },
     null_trace => never,
     NEEDS_TRACE => true,
-    NEEDS_DROP => T::NEEDS_DROP /* if our inner type needs a drop */,
+    NEEDS_DROP => <T as Trace>::NEEDS_DROP /* if our inner type needs a drop */,
     trace_mut => |self, visitor| {
         unsafe { visitor.visit_vec::<T, _>(self.raw.as_repr_mut()) }
     },

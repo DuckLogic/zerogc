@@ -318,6 +318,12 @@ unsafe impl<C: RawCollectorImpl> Trace for CollectorId<C> {
     fn visit<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
         Ok(())
     }
+
+    #[inline]
+    unsafe fn visit_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err> where V: GcVisitor, Id: zerogc::CollectorId, Self: GcSafe + 'gc {
+        // Fine to stuff inside a pointer. We're a regular 'Sized' type
+        visitor.visit_gc(gc)
+    }
 }
 unsafe impl<C: RawCollectorImpl> TraceImmutable for CollectorId<C> {
     #[inline(always)]

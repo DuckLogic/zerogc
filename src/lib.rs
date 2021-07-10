@@ -1,5 +1,8 @@
 #![feature(
     const_panic, // RFC 2345 - Const asserts
+    ptr_metadata, // RFC 2580 - Pointer meta
+    coerce_unsized, // RFC 0982 - DST coercion
+    unsize,
 )]
 #![feature(maybe_uninit_slice)]
 #![deny(missing_docs)]
@@ -35,17 +38,22 @@ extern crate self as zerogc;
  */
 use core::mem::{self};
 use core::ops::{Deref, DerefMut};
-use core::ptr::NonNull;
+use core::ptr::{NonNull, Pointee, DynMetadata};
 use core::marker::PhantomData;
 use core::hash::{Hash, Hasher};
 use core::fmt::{self, Debug, Formatter};
 
 use zerogc_derive::unsafe_gc_impl;
 
-use crate::vec::{GcArray, GcVec};
+use crate::vec::{GcVec};
+pub use crate::vec::GcArray;
+use std::ops::CoerceUnsized;
+use std::marker::Unsize;
 
 #[macro_use]
 mod manually_traced;
+#[macro_use]
+mod macros;
 pub mod cell;
 pub mod prelude;
 pub mod dummy_impl;
@@ -628,7 +636,6 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
         self.value.as_ptr() as *const T as *mut T
     }
 
-
     /// Create a handle to this object, which can be used without a context
     #[inline]
     pub fn create_handle<'a>(&self) -> <Id::System as GcHandleSystem<'gc, 'a, T>>::Handle
@@ -661,7 +668,7 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
 }
 
 /// Double-indirection is completely safe
-unsafe impl<'gc, T: GcSafe + 'gc, Id: CollectorId> GcSafe for Gc<'gc, T, Id> {}
+unsafe impl<'gc, T: ?Sized + GcSafe + 'gc, Id: CollectorId> GcSafe for Gc<'gc, T, Id> {}
 /// Rebrand
 unsafe impl<'gc, 'new_gc, T, Id> GcRebrand<'new_gc, Id> for Gc<'gc, T, Id>
     where T: GcSafe + ?Sized + GcRebrand<'new_gc, Id>,
@@ -675,35 +682,25 @@ unsafe impl<'gc, 'a, T, Id> GcErase<'a, Id> for Gc<'gc, T, Id>
           Id: CollectorId, Self: Trace {
     type Erased = Gc<'a, <T as GcErase<'a, Id>>::Erased, Id>;
 }
-unsafe impl<'gc, T: GcSafe + 'gc, Id: CollectorId> Trace for Gc<'gc, T, Id> {
+unsafe impl<'gc, T: ?Sized + GcSafe + 'gc, Id: CollectorId> Trace for Gc<'gc, T, Id> {
     // We always need tracing....
     const NEEDS_TRACE: bool = true;
-    /*
-     * However, we never need to be dropped
-     * because we are `Copy`
-     */
+    // we never need to be dropped because we are `Copy`
     const NEEDS_DROP: bool = false;
 
     #[inline]
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
         unsafe {
-            // We're doing this correctly!
-            V::visit_gc(visitor, self)
+            // We're delegating with a valid pointer.
+            <T as Trace>::visit_inside_gc(self, visitor)
         }
     }
-}
-unsafe impl<'gc, T: GcSafe + 'gc, Id: CollectorId> Trace for Gc<'gc, [T], Id> {
-    const NEEDS_TRACE: bool = true;
-    const NEEDS_DROP: bool = false;
 
     #[inline]
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
-        unsafe {
-            V::visit_array(
-                visitor,
-                &mut *(self as *mut Gc<'gc, [T], Id> as *mut GcArray<'gc, T, Id>)
-            )
-        }
+    unsafe fn visit_inside_gc<'actual_gc, V, ActualId>(gc: &mut Gc<'actual_gc, Self, ActualId>, visitor: &mut V) -> Result<(), V::Err>
+        where V: GcVisitor, ActualId: CollectorId, Self: GcSafe + 'actual_gc {
+        // Double indirection is fine. It's just a `Sized` type
+        visitor.visit_gc(gc)
     }
 }
 impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Deref for Gc<'gc, T, Id> {
@@ -899,7 +896,7 @@ pub unsafe trait GcDirectBarrier<'gc, OwningRef>: Trace {
     unsafe fn write_barrier(&self, owner: &OwningRef, field_offset: usize);
 }
 
-/// Indicates that a type can be safely allocated by a garbage collector.
+/// A marker type, indicating that a type can be safely allocated by a garbage collector.
 ///
 /// ## Safety
 /// Custom destructors must never reference garbage collected pointers.
@@ -1069,33 +1066,43 @@ pub unsafe trait Trace {
     /// Some types (like `Gc`) need special actions taken when they're traced,
     /// but those are somewhat rare and are usually already provided by the garbage collector.
     ///
-    /// Unless I explicitly document actions as legal I may decide to change i.
-    /// I am only bound by the constraints of [semantic versioning](http://semver.org/) in the trace function
-    /// if I explicitly document it as safe behavior in this method's documentation.
-    /// If you try something that isn't explicitly documented here as permitted behavior,
-    /// the collector may choose to override your memory with `0xDEADBEEF`.
-    /// ## Always Permitted
+    /// Behavior is restricted during tracing:
+    /// ## Permitted Behavior
     /// - Reading your own memory (includes iteration)
     ///   - Interior mutation is undefined behavior, even if you use `GcCell`
     /// - Calling `GcVisitor::visit` with the specified collector
     ///   - `GarbageCollector::trace` already verifies that it owns the data, so you don't need to do that
-    /// - Panicking
+    /// - Panicking on unrecoverable errors
     ///   - This should be reserved for cases where you are seriously screwed up,
     ///       and can't fulfill your contract to trace your interior properly.
     ///     - One example is `Gc<T>` which panics if the garbage collectors are mismatched
-    ///   - This rule may change in future versions, depending on how we deal with multi-threading.
+    ///   - Garbage collectors may chose to [abort](std::process::abort) if they encounter a panic,
+    ///     so you should avoid doing it if possible.
     /// ## Never Permitted Behavior
     /// - Forgetting a element of a collection, or field of a structure
     ///   - If you forget an element undefined behavior will result
-    ///   - This is why we always prefer automatically derived implementations where possible.
-    ///     - You will never trigger undefined behavior with an automatic implementation,
-    ///       and it'll always be completely sufficient for safe code (aside from destructors).
+    ///   - This is why you should always prefer automatically derived implementations where possible.
     ///     - With an automatically derived implementation you will never miss a field
     /// - It is undefined behavior to mutate any of your own data.
     ///   - The mutable `&mut self` is just so copying collectors can relocate GC pointers
-    /// - Invoking this function directly, without delegating to `GcVisitor`
+    /// - Calling other operations on the garbage collector (including allocations)
     fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err>;
+    /// Visit this object, assuming its already inside a GC pointer.
+    ///
+    /// This is **required** to delegate to one of the following methods on [GcVisitor]:
+    /// 1. [GcVisitor::visit_gc] - For regular, `Sized` types
+    /// 2. [GcVisitor::visit_array] - For slices and arrays
+    /// 3. [GcVisitor::visit_trait_object] - For trait objects
+    ///
+    /// ## Safety
+    /// This must delegate to the appropriate method on [GcVisitor],
+    /// or undefined behavior will result.
+    ///
+    /// The user is required to supply an appropriate [Gc] pointer.
+    unsafe fn visit_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
+        where V: GcVisitor, Id: CollectorId, Self: GcSafe + 'gc;
 }
+
 /// A type that can be safely traced/relocated
 /// without having to use a mutable reference
 ///
@@ -1110,6 +1117,38 @@ pub unsafe trait TraceImmutable: Trace {
     /// The visitor may want to relocate garbage collected pointers,
     /// which this type must support.
     fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err>;
+}
+
+/// A type that can be traced via dynamic dispatch,
+/// specialized for a particular [CollectorId].
+///
+/// This indicates that the underlying type implements both [Trace]
+/// and [GcSafe],
+/// even though the specifics may not be known at compile time.
+/// If the type is allocated inside a [Gc] pointer,
+/// collectors can usually use their own runtime type information
+/// to dispatch to the correct tracing code.
+///
+/// This is useful for use in trait objects,
+/// because this marker type is object safe (unlike the regular [Trace] trait).
+///
+/// ## Safety
+/// This type should never be implemented directly.
+/// It is automatically implemented for all types that are `Trace + GcSafe`.
+///
+/// If an object implements this trait, then it the underlying value
+/// **must** implement [Trace] and [GcSafe] at runtime,
+/// even though that can't be proved at compile time.
+///
+/// The garbage collector will be able to use its runtime type information
+/// to find the appropriate implementation at runtime,
+/// even though its not known at compile tme.
+pub unsafe trait DynTrace {}
+unsafe impl<T: ?Sized + Trace + GcSafe> DynTrace for T {}
+
+impl<'gc, T, U, Id> CoerceUnsized<Gc<'gc, U, Id>> for Gc<'gc, T, Id>
+    where T: ?Sized + GcSafe + Unsize<U>, U: ?Sized + GcSafe, Id: CollectorId {
+
 }
 
 /// Marker types for types that don't need to be traced
@@ -1139,23 +1178,36 @@ pub unsafe trait GcVisitor: Sized {
     ///
     /// ## Safety
     /// Undefined behavior if the GC pointer isn't properly visited.
-    unsafe fn visit_gc<'gc, T: GcSafe + 'gc, Id: CollectorId>(
+    unsafe fn visit_gc<'gc, T, Id>(
         &mut self, gc: &mut Gc<'gc, T, Id>
-    ) -> Result<(), Self::Err>;
+    ) -> Result<(), Self::Err>
+        where T: GcSafe + 'gc, Id: CollectorId;
+
+    /// Visit a garbage collected trait object.
+    ///
+    /// ## Safety
+    /// The trait object must point to a garbage collected object.
+    unsafe fn visit_trait_object<'gc, T, Id>(
+        &mut self, gc: &mut Gc<'gc, T, Id>
+    ) -> Result<(), Self::Err>
+        where T: ?Sized + GcSafe + 'gc + Pointee<Metadata=DynMetadata<T>> + DynTrace,
+              Id: CollectorId;
 
     /// Visit a garbage collected vector.
     ///
     /// ## Safety
     /// Undefined behavior if the vector is invalid.
-    unsafe fn visit_vec<'gc, T: GcSafe + 'gc, Id: CollectorId>(
+    unsafe fn visit_vec<'gc, T, Id>(
         &mut self, raw: &mut Gc<'gc, Id::RawVecRepr, Id>
-    ) -> Result<(), Self::Err>;
+    ) -> Result<(), Self::Err>
+        where T: GcSafe + 'gc, Id: CollectorId;
 
     /// Visit a garbage collected array.
     ///
     /// ## Safety
     /// Undefined behavior if the array is invalid.
-    unsafe fn visit_array<'gc, T: GcSafe + 'gc, Id: CollectorId>(
+    unsafe fn visit_array<'gc, T, Id>(
         &mut self, array: &mut GcArray<'gc, T, Id>
-    ) -> Result<(), Self::Err>;
+    ) -> Result<(), Self::Err>
+        where [T]: GcSafe + 'gc, Id: CollectorId;
 }

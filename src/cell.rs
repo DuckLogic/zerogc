@@ -15,7 +15,9 @@
 //! and it'll generate a safe wrapper.
 use core::cell::Cell;
 
-use crate::{GcSafe, Trace, GcVisitor, NullTrace, TraceImmutable, GcDirectBarrier, CollectorId, GcErase, GcRebrand};
+use zerogc_derive::unsafe_gc_impl;
+
+use crate::{Trace, NullTrace, GcDirectBarrier, CollectorId, GcErase, GcRebrand, GcSafe};
 
 /// A `Cell` pointing to a garbage collected object.
 ///
@@ -33,7 +35,7 @@ impl<T: Trace + Copy> GcCell<T> {
     /// Get a mutable reference to this cell's value
     ///
     /// This is safe because the `&mut self`
-    /// guarentes exclusive access to the cell.
+    /// guarentees exclusive access to the cell.
     #[inline]
     pub fn get_mut(&mut self) -> &mut T {
         self.0.get_mut()
@@ -62,7 +64,7 @@ impl<T: NullTrace + Copy> GcCell<T> {
     }
 }
 unsafe impl<'gc, OwningRef, Value> GcDirectBarrier<'gc, OwningRef> for GcCell<Value>
-    where Value: GcDirectBarrier<'gc, OwningRef> + Copy {
+    where Value: GcSafe + GcDirectBarrier<'gc, OwningRef> + Copy {
     #[inline]
     unsafe fn write_barrier(
         &self, owner: &OwningRef,
@@ -72,44 +74,44 @@ unsafe impl<'gc, OwningRef, Value> GcDirectBarrier<'gc, OwningRef> for GcCell<Va
         self.get().write_barrier(owner, field_offset)
     }
 }
-/// GcCell can only support mutating types that are `NullTrace`,
-/// because garbage collected types need write barriers.
-///
-/// However, this is already enforced by the bounds of `GcCell::set`,
-/// so we don't need to verify here.
-/// In other words is possible to safely trace a `GcCell`
-/// with a garbage collected type, as long as it is never mutated.
-unsafe impl<T: Trace + Copy> Trace for GcCell<T> {
-    const NEEDS_TRACE: bool = T::NEEDS_TRACE;
-    /// Since T is Copy, we shouldn't need to be dropped
-    const NEEDS_DROP: bool = false;
-
-    #[inline]
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+unsafe_gc_impl!(
+    target => GcCell<T>,
+    params => [T: Trace + Copy],
+    NEEDS_TRACE => T::NEEDS_TRACE,
+    // T is Copy, so it doesn't need to be dropped
+    NEEDS_DROP => false,
+    bounds => {
+        GcSafe => { where T: GcSafe + Copy },
+        Trace => { where T: Trace + Copy },
+        // NOTE: TraceImmutable requires a 'NullTrace' for interior mutability
+        TraceImmutable => { where T: NullTrace + Copy },
+        GcErase => { where T: Trace + Copy + GcErase<'min, Id>, Id: CollectorId, T::Erased: Copy + Trace },
+        GcRebrand => { where T: Trace + Copy + GcRebrand<'new_gc, Id>, Id: CollectorId,T::Branded: Copy + Trace }
+    },
+    erased_type => GcCell<T::Erased>,
+    branded_type => GcCell<T::Branded>,
+    null_trace => { where T: GcSafe + Copy + NullTrace }
+    trace_mut => |self, visitor| {
+        /*
+         * GcCell can only support mutating types that are `NullTrace`,
+         * because garbage collected types need write barriers.
+         *
+         * However, this is already enforced by the bounds of `GcCell::set`,
+         * so we don't need to verify here.
+         * In other words is possible to safely trace a `GcCell`
+         * with a garbage collected type, as long as it is never mutated.
+         */
         visitor.visit(self.get_mut())
-    }
-}
-/// See Trace documentation on the safety of mutation
-///
-/// We require `NullTrace` in order to `set` our internals
-unsafe impl<T: GcSafe + NullTrace + Copy> TraceImmutable for GcCell<T> {
-    #[inline]
-    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
+    },
+    trace_immutable => |self, visitor| {
+        /*
+         *  See Trace documentation on the safety of mutation
+         *
+         * We require `NullTrace` in order to `set` our internals.
+         */
         let mut value = self.get();
         visitor.visit(&mut value)?;
         self.set(value);
         Ok(())
     }
-}
-unsafe impl<T: GcSafe + Copy + NullTrace> NullTrace for GcCell<T> {}
-unsafe impl<T: GcSafe + Copy> GcSafe for GcCell<T> {}
-unsafe impl<'min, T, Id> GcErase<'min, Id> for GcCell<T>
-    where T: Trace + Copy + GcErase<'min, Id>, Id: CollectorId,
-          T::Erased: Copy + Trace {
-    type Erased = GcCell<T::Erased>;
-}
-unsafe impl<'new_gc, T, Id> GcRebrand<'new_gc, Id> for GcCell<T>
-    where T: Trace + Copy + GcRebrand<'new_gc, Id>, Id: CollectorId,
-          T::Branded: Copy + Trace {
-    type Branded = GcCell<T::Branded>;
-}
+);

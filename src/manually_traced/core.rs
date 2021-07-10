@@ -273,7 +273,10 @@ unsafe_gc_impl! {
     params => [T],
     bounds => {
         GcRebrand => never,
-        GcErase => never
+        GcErase => never,
+        GcSafe => { where T: GcSafe },
+        visit_inside_gc => where Visitor: crate::GcVisitor, ActualId: crate::CollectorId,
+            [T]: GcSafe + 'actual_gc
     },
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
@@ -283,6 +286,14 @@ unsafe_gc_impl! {
             visitor.#visit_func(val)?;
         }
         Ok(())
+    },
+    visit_inside_gc => |gc, visitor| {
+        visitor.visit_array(
+            core::mem::transmute::<
+                &mut Gc<'actual_gc, [T], ActualId>,
+                &mut crate::GcArray<'actual_gc, T, ActualId>
+            >(gc)
+        )
     }
 }
 

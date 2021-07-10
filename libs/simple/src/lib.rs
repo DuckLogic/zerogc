@@ -47,7 +47,7 @@
     clippy::vtable_address_comparisons,
 )]
 use std::alloc::Layout;
-use std::ptr::{NonNull,};
+use std::ptr::{NonNull, Pointee, DynMetadata};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 #[cfg(not(feature = "multiple-collectors"))]
@@ -950,6 +950,10 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
         }
     }
 
+    unsafe fn visit_trait_object<'gc, T, Id>(&mut self, gc: &mut zerogc::Gc<'gc, T, Id>) -> Result<(), Self::Err> where T: ?Sized + GcSafe + 'gc + Pointee<Metadata=DynMetadata<T>> + zerogc::DynTrace, Id: zerogc::CollectorId {
+        todo!("{:p}", gc.as_raw_ptr())
+    }
+
     #[inline]
     unsafe fn visit_vec<'gc, T, Id>(&mut self, raw: &mut ::zerogc::Gc<'gc, Id::RawVecRepr, Id>) -> Result<(), Self::Err>
         where T: GcSafe + 'gc, Id: ::zerogc::CollectorId {
@@ -959,7 +963,7 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
 
     #[inline]
     unsafe fn visit_array<'gc, T, Id>(&mut self, array: &mut ::zerogc::vec::GcArray<'gc, T, Id>) -> Result<(), Self::Err>
-        where T: GcSafe + 'gc, Id: ::zerogc::CollectorId {
+        where [T]: GcSafe + 'gc, Id: ::zerogc::CollectorId {
         if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
             /*
              * See comment in 'visit_gc'.
@@ -985,7 +989,7 @@ impl MarkVisitor<'_> {
     /// Visit a GC type whose [::zerogc::CollectorId] matches our own
     ///
     /// The caller should only use `GcVisitor::visit_gc()`
-    unsafe fn _visit_own_gc<'gc, T: GcSafe + ?Sized + 'gc>(&mut self, gc: &mut Gc<'gc, T>) {
+    unsafe fn _visit_own_gc<'gc, T: GcSafe + Trace + ?Sized + 'gc>(&mut self, gc: &mut Gc<'gc, T>) {
         // Verify this again (should be checked by caller)
         debug_assert_eq!(*gc.collector_id(), self.expected_collector);
         let header = GcHeader::from_value_ptr(gc.as_raw_ptr());

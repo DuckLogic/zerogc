@@ -1080,6 +1080,12 @@ fn impl_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
                 #trace_impl
                 Ok(())
             }
+            #[inline]
+            unsafe fn visit_inside_gc<'actual_gc, Visitor, ActualId>(gc: &mut #zerogc_crate::Gc<'actual_gc, Self, ActualId>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
+                where Visitor: #zerogc_crate::GcVisitor, ActualId: #zerogc_crate::CollectorId, Self: #zerogc_crate::GcSafe + 'actual_gc {
+                // Assume we are Sized
+                visitor.visit_gc(gc)
+            }
         }
     })
 }
@@ -1224,6 +1230,12 @@ fn impl_nop_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream
             fn visit<Visitor: #zerogc_crate::GcVisitor + ?Sized>(&mut self, #[allow(unused)] visitor: &mut Visitor) -> Result<(), Visitor::Err> {
                 #(#trace_assertions)*
                 Ok(())
+            }
+            #[inline]
+            unsafe fn visit_inside_gc<'actual_gc, Visitor, ActualId>(gc: &mut #zerogc_crate::Gc<'actual_gc, Self, ActualId>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
+                where Visitor: #zerogc_crate::GcVisitor, ActualId: #zerogc_crate::CollectorId, Self: #zerogc_crate::GcSafe + 'actual_gc {
+                // Assume we are Sized
+                visitor.visit_gc(gc)
             }
         }
         unsafe impl #impl_generics #zerogc_crate::TraceImmutable for #name #ty_generics #where_clause {
