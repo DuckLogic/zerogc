@@ -4,7 +4,7 @@ use core::cell::Cell;
 use zerogc::{Trace, safepoint, DynTrace, trait_object_trace, GcSimpleAlloc};
 use zerogc_derive::Trace;
 
-use zerogc_simple::{SimpleCollector, GcArray, GcVec, Gc, CollectorId as SimpleCollectorId, GcConfig};
+use zerogc_simple::{SimpleCollector, Gc, CollectorId as SimpleCollectorId, GcConfig};
 use slog::Logger;
 
 fn test_collector() -> SimpleCollector {

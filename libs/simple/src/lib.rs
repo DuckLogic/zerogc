@@ -71,6 +71,7 @@ use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 use zerogc_context::{CollectionManager as AbstractCollectionManager, RawContext as AbstractRawContext, CollectorContext};
 use zerogc::vec::{GcRawVec};
 use std::cell::Cell;
+use std::ffi::c_void;
 
 #[cfg(feature = "small-object-arenas")]
 mod alloc;
@@ -950,8 +951,27 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
         }
     }
 
-    unsafe fn visit_trait_object<'gc, T, Id>(&mut self, gc: &mut zerogc::Gc<'gc, T, Id>) -> Result<(), Self::Err> where T: ?Sized + GcSafe + 'gc + Pointee<Metadata=DynMetadata<T>> + zerogc::DynTrace, Id: zerogc::CollectorId {
-        todo!("{:p}", gc.as_raw_ptr())
+    unsafe fn visit_trait_object<'gc, T, Id>(&mut self, gc: &mut zerogc::Gc<'gc, T, Id>) -> Result<(), Self::Err>
+        where T: ?Sized + GcSafe + 'gc + Pointee<Metadata=DynMetadata<T>> + zerogc::DynTrace, Id: zerogc::CollectorId {
+        if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
+            /*
+             * The TypeIds match, so this cast is safe. See `visit_gc` for details
+             */
+            let gc = std::mem::transmute::<
+                &mut ::zerogc::Gc<'gc, T, Id>,
+                &mut ::zerogc::Gc<'gc, T, crate::CollectorId>
+            >(gc);
+            let header = GcHeader::from_value_ptr(gc.as_raw_ptr());
+            self._visit_own_gc_with(gc, |ptr, visitor| {
+                if let Some(func) = (*header).type_info.trace_func {
+                    func(ptr as *mut T as *mut c_void, visitor)
+                }
+                Ok(())
+            });
+            Ok(())
+        } else {
+            Ok(())
+        }
     }
 
     #[inline]
@@ -986,10 +1006,24 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
     }
 }
 impl MarkVisitor<'_> {
-    /// Visit a GC type whose [::zerogc::CollectorId] matches our own
+
+    /// Visit a GC type whose [::zerogc::CollectorId] matches our own,
+    /// tracing it with the specified closure
     ///
     /// The caller should only use `GcVisitor::visit_gc()`
-    unsafe fn _visit_own_gc<'gc, T: GcSafe + Trace + ?Sized + 'gc>(&mut self, gc: &mut Gc<'gc, T>) {
+    unsafe fn _visit_own_gc<'gc, T: GcSafe + Trace + ?Sized>(
+        &mut self, gc: &mut Gc<'gc, T>
+    ) {
+        self._visit_own_gc_with(gc, |val, visitor| <T as Trace>::visit(val, visitor))
+    }
+    /// Visit a GC type whose [::zerogc::CollectorId] matches our own,
+    /// tracing it with the specified closure
+    ///
+    /// The caller should only use `GcVisitor::visit_gc()`
+    unsafe fn _visit_own_gc_with<'gc, T: GcSafe + ?Sized + 'gc>(
+        &mut self, gc: &mut Gc<'gc, T>,
+        trace_func: impl FnOnce(&mut T, &mut MarkVisitor) -> Result<(), !>
+    ) {
         // Verify this again (should be checked by caller)
         debug_assert_eq!(*gc.collector_id(), self.expected_collector);
         let header = GcHeader::from_value_ptr(gc.as_raw_ptr());
@@ -1010,6 +1044,7 @@ impl MarkVisitor<'_> {
                 (*obj).update_raw_mark_state(MarkState::Grey.to_raw(inverted_mark));
                 #[cfg(not(feature = "implicit-grey-stack"))] {
                     visitor.grey_stack.push(obj as *mut GcHeader);
+                    drop(trace_func);
                 }
                 #[cfg(feature = "implicit-grey-stack")] {
                     /*
@@ -1018,7 +1053,7 @@ impl MarkVisitor<'_> {
                      * boost performance (See 9a9634d68a4933d).
                      * On some workloads this is fine.
                      */
-                    let Ok(()) = <T as Trace>::visit(
+                    let Ok(()) = trace_func(
                         &mut *(gc.value() as *const T as *mut T),
                         visitor
                     );

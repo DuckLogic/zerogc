@@ -1183,6 +1183,9 @@ fn needs_drop(info: &GcTypeInfo, target_fields: &[(&Field, GcFieldAttrs)]) -> To
     if info.config.is_copy {
         // If we're proven to be a copy type we don't need to be dropped
         quote!(false)
+    } else if info.config.unsafe_skip_drop {
+        // Skipping the auto-generated Drop impl means its fine to use `mem::needs_drop`
+        quote!(core::mem::needs_drop::<Self>())
     } else {
         let drop_assertions = target_fields.iter().filter_map(|(field, attrs)| {
             if attrs.unsafe_skip_trace { return None }
