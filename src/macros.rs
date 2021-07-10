@@ -7,15 +7,15 @@
 /// # use zerogc::{Trace, DynTrace, trait_object_trace};
 /// # use zerogc_derive::Trace;
 /// # use zerogc::dummy_impl::{self, DummyCollectorId, Gc};
-/// trait Foo: DynTrace {
+/// trait Foo<'gc>: DynTrace + 'gc {
 ///     fn method(&self) -> i32;
 /// }
-/// trait_object_trace!(impl Trace for dyn Foo);
-/// fn foo<T: ?Sized + Trace + Foo>(t: &T) -> i32 {
+/// trait_object_trace!(impl<'gc,> Trace for dyn Foo<'gc>; Branded<'new_gc> => dyn Foo<'new_gc> + 'new_gc, Erased<'min> => dyn Foo<'min> + 'min);
+/// fn foo<'gc, T: ?Sized + Trace + Foo<'gc>>(t: &T) -> i32 {
 ///     assert_eq!(t.method(), 12);
 ///     t.method() * 2
 /// }
-/// fn bar(gc: Gc<'_, dyn Foo>) -> i32 {
+/// fn bar<'gc>(gc: Gc<'gc, dyn Foo<'gc> + 'gc>) -> i32 {
 ///     foo(gc.value())
 /// }
 /// #[derive(Trace)]
@@ -23,7 +23,7 @@
 /// struct Bar<'gc> {
 ///     val: Gc<'gc, i32>
 /// }
-/// impl<'gc> Foo for Bar<'gc> {
+/// impl<'gc> Foo<'gc> for Bar<'gc> {
 ///     fn method(&self) -> i32 {
 ///        **self.val
 ///     }

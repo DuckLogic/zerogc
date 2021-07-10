@@ -39,6 +39,10 @@ macro_rules! trace_tuple_impl {
              */
             NEEDS_TRACE => $($param::NEEDS_TRACE || )* false,
             NEEDS_DROP => $($param::NEEDS_DROP || )* false,
+            bounds => {
+                GcRebrand => { where $($param: GcRebrand<'new_gc, Id>,)* $($param::Branded: Sized),* },
+                GcErase => { where $($param: GcErase<'min, Id>,)* $($param::Erased: Sized),* },
+            },
             branded_type => ( $(<$param as GcRebrand<'new_gc, Id>>::Branded,)* ),
             erased_type => ( $(<$param as GcErase<'min, Id>>::Erased,)* ),
             visit => |self, visitor| {
