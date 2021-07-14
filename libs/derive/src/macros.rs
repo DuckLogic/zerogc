@@ -8,9 +8,9 @@ use std::collections::HashSet;
 
 use proc_macro2::{Ident, TokenStream, TokenTree, Span};
 use syn::{
-    GenericParam, WhereClause, Type, Expr, Error, Token, braced, bracketed,
-    Generics, TypeParamBound, WherePredicate, PredicateType, parse_quote,
-    GenericArgument
+    GenericParam, WhereClause, Type, Expr, Error, Token, braced, bracketed, Generics,
+    TypeParamBound, WherePredicate, PredicateType, parse_quote, GenericArgument, LifetimeDef,
+    Lifetime
 };
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
@@ -89,15 +89,13 @@ impl MacroInput {
         } else {
             quote!()
         };
-        let rebrand_impl = self.expand_brand_impl(true)?;
-        let erase_impl = self.expand_brand_impl(false)?;
+        let rebrand_impl = self.expand_rebrand_impl()?;
         Ok(quote! {
             #trace_impl
             #trace_immutable_impl
             #null_trace_impl
             #gcsafe_impl
             #rebrand_impl
-            #erase_impl
         })
     }
     fn expand_trace_impl(&self, mutable: bool) -> Result<Option<TokenStream>, Error> {
@@ -145,7 +143,7 @@ impl MacroInput {
             let where_clause = if let Some(ref clause) = self.bounds.visit_inside_gc {
                 clause.clone()
             } else {
-                parse_quote!(where Visitor: #zerogc_crate::GcVisitor, ActualId: #zerogc_crate::CollectorId, Self: #zerogc_crate::GcSafe + 'actual_gc)
+                parse_quote!(where Visitor: #zerogc_crate::GcVisitor, ActualId: #zerogc_crate::CollectorId, Self: #zerogc_crate::GcSafe<'actual_gc, ActualId> + 'actual_gc)
             };
             Some(quote! {
                 #[inline]
@@ -178,19 +176,41 @@ impl MacroInput {
         let zerogc_crate = zerogc_crate();
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
+        let gc_lifetime = if let Some(ref existing_lifetime_name) = self.options.gc_lifetime_name {
+            let s = format!("'{}", existing_lifetime_name);
+            ::syn::Lifetime::new(&s, existing_lifetime_name.span())
+        } else {
+            let existing = generics.lifetimes()
+                .find(|lt| lt.lifetime.ident == "gc")
+                .cloned();
+            if let Some(existing) = existing {
+                existing.lifetime
+            } else {
+                let lt: LifetimeDef = parse_quote!('gc);
+                generics.params.push(GenericParam::Lifetime(lt.clone()));
+                lt.lifetime
+            }
+        };
+        let id_type: Type = match self.options.collector_id {
+            Some(ref tp) => tp.clone(),
+            None => {
+                generics.params.push(parse_quote!(Id: #zerogc_crate::CollectorId));
+                parse_quote!(Id)
+            }
+        };
         generics.make_where_clause().predicates
-            .extend(match self.bounds.gcsafe_clause(&self.params) {
+            .extend(match self.bounds.gcsafe_clause(&self.params, &id_type, &gc_lifetime) {
                 Some(clause) => clause.predicates,
                 None => return None // They are requesting we dont implement
             });
         let (impl_generics, _, where_clause) = generics.split_for_impl();
         Some(quote! {
-            unsafe impl #impl_generics #zerogc_crate::GcSafe for #target_type #where_clause {}
+            unsafe impl #impl_generics #zerogc_crate::GcSafe<#gc_lifetime, #id_type> for #target_type #where_clause {}
         })
     }
-    fn expand_brand_impl(&self, rebrand: bool /* true => rebrand, false => erase */) -> Result<Option<TokenStream>, Error> {
+    fn expand_rebrand_impl(&self) -> Result<Option<TokenStream>, Error> {
         let zerogc_crate = zerogc_crate();
-        let requirements = if rebrand { self.bounds.rebrand.clone() } else { self.bounds.erase.clone() };
+        let requirements = self.bounds.rebrand.clone();
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
         let id_type: Type = match self.options.collector_id {
@@ -215,11 +235,7 @@ impl MacroInput {
                 return Ok(None); // They are requesting we dont implement it at all
             },
             None => {
-                (true, if rebrand {
-                    vec![parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>)]
-                } else {
-                    vec![parse_quote!(#zerogc_crate::GcErase<'min, #id_type>)]
-                })
+                (true, vec![parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>)])
             }
         };
         // generate default bounds
@@ -237,15 +253,9 @@ impl MacroInput {
                     generics.make_where_clause()
                         .predicates.push(WherePredicate::Type(PredicateType {
                         lifetimes: None,
-                        bounded_ty: if rebrand {
-                            self.options.branded_type.clone().unwrap_or_else(|| {
-                                parse_quote!(<#type_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded)
-                            })
-                        } else {
-                            self.options.erased_type.clone().unwrap_or_else(|| {
-                                parse_quote!(<#type_name as #zerogc_crate::GcErase<'min, Id>>::Erased)
-                            })
-                        },
+                        bounded_ty: self.options.branded_type.clone().unwrap_or_else(|| {
+                            parse_quote!(<#type_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded)
+                        }),
                         colon_token: Default::default(),
                         bounds: bounds.clone(),
                     }));
@@ -274,25 +284,13 @@ impl MacroInput {
                 if let GenericParam::Type(ref tp) = param {
                     let param_name = &tp.ident;
                     generics.make_where_clause().predicates
-                        .push(if rebrand {
-                            parse_quote!(<#param_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded: Sized)
-                        } else {
-                            parse_quote!(<#param_name as #zerogc_crate::GcErase<'min, Id>>::Erased: Sized)
-                        })
+                        .push(parse_quote!(<#param_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded: Sized))
                 }
             }
         }
-        if rebrand {
-            generics.params.push(parse_quote!('new_gc));
-        } else {
-            generics.params.push(parse_quote!('min));
-        }
+        generics.params.push(parse_quote!('new_gc));
         let (impl_generics, _, where_clause) = generics.split_for_impl();
-        let target_trait = if rebrand {
-            quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>)
-        } else {
-            quote!(#zerogc_crate::GcErase<'min, #id_type>)
-        };
+        let target_trait = quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>);
         fn rewrite_brand_trait(
             target: &Type, trait_name: &str, target_params: &HashSet<Ident>,
             target_trait: TokenStream, associated_type: Ident
@@ -318,7 +316,7 @@ impl MacroInput {
             GenericParam::Type(ref tp) => Some(tp.ident.clone()),
             _ => None
         }).collect::<HashSet<_>>();
-        let associated_type = if rebrand {
+        let associated_type = {
             let branded = self.options.branded_type.clone().map_or_else(|| {
                 rewrite_brand_trait(
                     &self.target_type, "GcRebrand",
@@ -328,16 +326,6 @@ impl MacroInput {
                 )
             }, Ok)?;
             quote!(type Branded = #branded;)
-        } else {
-            let erased = Ok(self.options.erased_type.clone()).transpose().unwrap_or_else(|| {
-                rewrite_brand_trait(
-                    &self.target_type, "GcErase",
-                    &target_params,
-                    parse_quote!(#zerogc_crate::GcErase<'min, #id_type>),
-                    parse_quote!(Erased)
-                )
-            })?;
-            quote!(type Erased = #erased;)
         };
         Ok(Some(quote! {
             unsafe impl #impl_generics #target_trait for #target_type #where_clause {
@@ -417,13 +405,13 @@ impl Parse for MacroInput {
             // StandardOptions
             "null_trace" [TraitRequirements] => null_trace;
             "branded_type" [Type] opt => branded_type;
-            "erased_type" [Type] opt => erased_type;
             "NEEDS_TRACE" [Expr] => needs_trace;
             "NEEDS_DROP" [Expr] => needs_drop;
             "visit" [VisitClosure] opt => visit_closure;
             "trace_mut" [VisitClosure] opt => trace_mut_closure;
             "trace_immutable" [VisitClosure] opt => trace_immutable_closure;
             "collector_id" [Type] opt => collector_id;
+            "gc_lifetime_name" [Ident] opt => gc_lifetime_name;
             "visit_inside_gc" [VisitInsideGcClosure] opt => visit_inside_gc_closure;
         });
         let bounds = res.bounds.unwrap_or_default();
@@ -484,10 +472,10 @@ impl Parse for MacroInput {
             options: StandardOptions {
                 null_trace: res.null_trace,
                 branded_type: res.branded_type,
-                erased_type: res.erased_type,
                 needs_trace: res.needs_trace,
                 needs_drop: res.needs_drop,
                 collector_id: res.collector_id,
+                gc_lifetime_name: res.gc_lifetime_name,
                 visit_inside_gc: res.visit_inside_gc_closure
             },
             visit: visit_impl
@@ -569,8 +557,6 @@ pub struct CustomBounds {
     gcsafe: Option<TraitRequirements>,
     /// The requirements to implement `GcRebrand`
     rebrand: Option<TraitRequirements>,
-    /// The requirements to implement `GcErase`
-    erase: Option<TraitRequirements>,
     visit_inside_gc: Option<WhereClause>
 }
 impl CustomBounds {
@@ -603,11 +589,11 @@ impl CustomBounds {
             }
         }
     }
-    fn gcsafe_clause(&self, generic_params: &[GenericParam]) -> Option<WhereClause> {
+    fn gcsafe_clause(&self, generic_params: &[GenericParam], id_type: &Type, gc_lifetime: &Lifetime) -> Option<WhereClause> {
         let zerogc_crate = zerogc_crate();
         let mut res = create_clause_with_default(
             &self.gcsafe, generic_params,
-            vec![parse_quote!(#zerogc_crate::GcSafe)]
+            vec![parse_quote!(#zerogc_crate::GcSafe<#gc_lifetime, #id_type>)]
         );
         if self.gcsafe.is_none() {
             // Extend with the trae bounds
@@ -656,7 +642,6 @@ impl Parse for CustomBounds {
             "TraceImmutable" [TraitRequirements] opt => trace_immutable;
             "GcSafe" [TraitRequirements] opt => gcsafe;
             "GcRebrand" [TraitRequirements] opt => rebrand;
-            "GcErase" [TraitRequirements] opt => erase;
             "visit_inside_gc" [WhereClause] opt => visit_inside_gc;
         });
         Ok(CustomBounds {
@@ -664,7 +649,6 @@ impl Parse for CustomBounds {
             trace_immutable: res.trace_immutable,
             gcsafe: res.gcsafe,
             rebrand: res.rebrand,
-            erase: res.erase,
             visit_inside_gc: res.visit_inside_gc
         })
     }
@@ -682,14 +666,14 @@ pub struct StandardOptions {
     null_trace: TraitRequirements,
     /// The associated type implemented as `GcRebrand::Branded`
     branded_type: Option<Type>,
-    /// The associated type implemented as `GcErase::Erased`
-    erased_type: Option<Type>,
     /// A (constant) expression determining whether the array needs to be traced
     needs_trace: Expr,
     /// A (constant) expression determining whether the type should be dropped
     needs_drop: Expr,
     /// The fixed id of the collector, or `None` if the type can work with any collector
     collector_id: Option<Type>,
+    /// The name of the `'gc` lifetime (if something other than `'gc`)
+    gc_lifetime_name: Option<Ident>,
     /// An override for the standard `visit_inside_gc` impl.
     ///
     /// This is necessary if the type is not `Sized`

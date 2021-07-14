@@ -19,7 +19,7 @@ pub use crate::{
 };
 // Traits for user code to implement
 pub use crate::{
-    GcSafe, GcErase, GcRebrand, Trace, TraceImmutable, NullTrace
+    GcSafe, GcRebrand, Trace, TraceImmutable, NullTrace
 };
 // Hack traits
 pub use crate::{GcBindHandle};

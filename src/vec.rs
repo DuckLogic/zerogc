@@ -9,7 +9,7 @@ use core::mem::ManuallyDrop;
 
 use zerogc_derive::{unsafe_gc_impl};
 
-use crate::{GcSimpleAlloc, Trace, CollectorId, Gc, GcSafe, GcRebrand, GcErase};
+use crate::{GcSimpleAlloc, Trace, CollectorId, Gc, GcSafe, GcRebrand};
 use crate::vec::repr::{GcVecRepr, ReallocFailedError};
 
 pub mod repr;
@@ -27,7 +27,7 @@ impl<'gc, T: GcSafe, Id: CollectorId> GcArray<'gc, T, Id> {
         self.0.value()
     }
 }
-impl<'gc, T: GcSafe, Id: CollectorId> Deref for GcArray<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Deref for GcArray<'gc, T, Id> {
     type Target = &'gc [T];
 
     #[inline]
@@ -35,8 +35,8 @@ impl<'gc, T: GcSafe, Id: CollectorId> Deref for GcArray<'gc, T, Id> {
         &*self.0
     }
 }
-impl<'gc, T: GcSafe, Id: CollectorId> Copy for GcArray<'gc, T, Id> {}
-impl<'gc, T: GcSafe, Id: CollectorId> Clone for GcArray<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Copy for GcArray<'gc, T, Id> {}
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Clone for GcArray<'gc, T, Id> {
     #[inline]
     fn clone(&self) -> Self {
         *self
@@ -50,11 +50,9 @@ unsafe_gc_impl!(
     bounds => {
         TraceImmutable => never,
         GcRebrand => { where T: GcRebrand<'new_gc, Id>, <T as GcRebrand<'new_gc, Id>>::Branded: Sized + GcSafe },
-        GcErase => { where T: GcErase<'min, Id>, <T as GcErase<'min, Id>>::Erased: Sized + GcSafe }
     },
     null_trace => never,
     branded_type => GcArray<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,
-    erased_type => GcArray<'min, <T as GcErase<'min, Id>>::Erased, Id>,
     NEEDS_TRACE => true,
     NEEDS_DROP => false,
     trace_mut => |self, visitor| {
@@ -69,14 +67,14 @@ unsafe_gc_impl!(
 ///
 /// This is simply a thin wrapper around [RawGcVec]
 /// that also contains a reference to the owning [GcContext].
-pub struct GcVec<'gc, T: GcSafe, Ctx: GcSimpleAlloc> {
+pub struct GcVec<'gc, 'root, T: GcSafe<'gc, Ctx::Id>, Ctx: GcSimpleAlloc<'root>> {
     /// A reference to the owning GcContext
     pub context: &'gc Ctx,
     /// The underlying [RawGcVec],
     /// which actually manages the memory
     pub raw: GcRawVec<'gc, T, Ctx::Id>
 }
-impl<'gc, T: GcSafe, Ctx: GcSimpleAlloc> GcVec<'gc, T, Ctx> {
+impl<'gc, T: GcSafe, Ctx: GcSimpleAlloc> GcVec<'gc, 'root, T, Ctx> {
     /// Convert this vector into its underlying [GcRawVec]
     #[inline]
     pub fn into_raw(self) -> GcRawVec<'gc, T, Ctx::Id> {
@@ -150,7 +148,6 @@ unsafe_gc_impl!(
         TraceImmutable => never,
         Trace => { where T: GcSafe + Trace },
         GcRebrand => never,
-        GcErase => never,
     },
     null_trace => never,
     NEEDS_TRACE => true,
@@ -205,7 +202,7 @@ pub struct GcRawVec<'gc, T: GcSafe + 'gc, Id: CollectorId> {
     repr: Gc<'gc, Id::RawVecRepr, Id>,
     marker: PhantomData<&'gc [T]>
 }
-impl<'gc, T: GcSafe, Id: CollectorId> GcRawVec<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcRawVec<'gc, T, Id> {
     /// Create a [RawGcVec] from the specified repr
     ///
     /// ## Safety
@@ -336,13 +333,8 @@ unsafe_gc_impl!(
             where T: GcSafe + GcRebrand<'new_gc, Id>,
                 <T as GcRebrand<'new_gc, Id>>::Branded: Sized + GcSafe
         },
-        GcErase => {
-            where T: GcSafe + GcErase<'min, Id>,
-                <T as GcErase<'min, Id>>::Erased: Sized + GcSafe
-        },
     },
     branded_type => GcRawVec<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,
-    erased_type => GcRawVec<'min, <T as GcErase<'min, Id>>::Erased, Id>,
     null_trace => never,
     NEEDS_TRACE => true,
     NEEDS_DROP => false, // GcVecRepr is responsible for Drop

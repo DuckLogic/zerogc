@@ -17,7 +17,7 @@ use core::cell::Cell;
 
 use zerogc_derive::unsafe_gc_impl;
 
-use crate::{Trace, NullTrace, GcDirectBarrier, CollectorId, GcErase, GcRebrand, GcSafe};
+use crate::{Trace, NullTrace, GcDirectBarrier, CollectorId, GcRebrand, GcSafe};
 
 /// A `Cell` pointing to a garbage collected object.
 ///
@@ -63,8 +63,8 @@ impl<T: NullTrace + Copy> GcCell<T> {
         self.0.set(value)
     }
 }
-unsafe impl<'gc, OwningRef, Value> GcDirectBarrier<'gc, OwningRef> for GcCell<Value>
-    where Value: GcSafe + GcDirectBarrier<'gc, OwningRef> + Copy {
+unsafe impl<'gc, Id: CollectorId, OwningRef, Value> GcDirectBarrier<'gc, OwningRef> for GcCell<Value>
+    where Value: GcSafe<'gc, Id> + GcDirectBarrier<'gc, OwningRef> + Copy {
     #[inline]
     unsafe fn write_barrier(
         &self, owner: &OwningRef,
@@ -85,10 +85,8 @@ unsafe_gc_impl!(
         Trace => { where T: Trace + Copy },
         // NOTE: TraceImmutable requires a 'NullTrace' for interior mutability
         TraceImmutable => { where T: NullTrace + Copy },
-        GcErase => { where T: Trace + Copy + GcErase<'min, Id>, Id: CollectorId, T::Erased: Copy + Trace },
         GcRebrand => { where T: Trace + Copy + GcRebrand<'new_gc, Id>, Id: CollectorId,T::Branded: Copy + Trace }
     },
-    erased_type => GcCell<T::Erased>,
     branded_type => GcCell<T::Branded>,
     null_trace => { where T: GcSafe + Copy + NullTrace }
     trace_mut => |self, visitor| {

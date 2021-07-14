@@ -1,6 +1,6 @@
 //! Dummy collector implementation for testing
 
-use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable};
+use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, RootedGcHeader};
 use std::ptr::NonNull;
 
 /// Fake a [Gc] that points to the specified value
@@ -39,7 +39,7 @@ pub type Gc<'gc, T> = crate::Gc<'gc, T, DummyCollectorId>;
 pub struct DummyContext {
     _priv: ()
 }
-unsafe impl GcContext for DummyContext {
+unsafe impl GcContext<'static> for DummyContext {
     type System = DummySystem;
     type Id = DummyCollectorId;
 
@@ -89,18 +89,22 @@ impl DummySystem {
         }
     }
 }
-unsafe impl GcSystem for DummySystem {
+struct DummyShadowStack {
+    tail: RootedGcHeader<DummyCollectorId>
+}
+unsafe impl GcSystem<'static> for DummySystem {
     type Id = DummyCollectorId;
+    type ShadowStack = DummyShadowStack;
     type Context = DummyContext;
 }
-unsafe impl GcSimpleAlloc for DummyContext {
+unsafe impl GcSimpleAlloc<'static> for DummyContext {
     fn alloc<'gc, T>(&'gc self, value: T) -> crate::Gc<'gc, T, Self::Id>
-        where T: GcSafe + 'gc {
+        where T: GcSafe<'gc, DummyCollectorId> + 'gc {
         gc(Box::leak(Box::new(value)))
     }
 
     unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> (Self::Id, *mut T)
-        where T: GcSafe + 'gc {
+        where T: GcSafe<'gc, DummyCollectorId> + 'gc {
         let mut res: Vec<T> = Vec::with_capacity(len);
         res.set_len(len);
         let res = Vec::leak(res);
@@ -108,12 +112,12 @@ unsafe impl GcSimpleAlloc for DummyContext {
     }
 
     fn alloc_vec<'gc, T>(&'gc self) -> crate::vec::GcVec<'gc, T, Self>
-        where T: GcSafe + 'gc {
+        where T: GcSafe<'gc, Self::Id> + 'gc {
         todo!("Vec alloc")
     }
 
     fn alloc_vec_with_capacity<'gc, T>(&'gc self, _capacity: usize) -> crate::vec::GcVec<'gc, T, Self>
-        where T: GcSafe + 'gc {
+        where T: GcSafe<'gc, DummyCollectorId> + 'gc {
         todo!("Vec alloc")
     }
 }
@@ -123,7 +127,7 @@ unsafe impl GcSimpleAlloc for DummyContext {
 pub struct DummyCollectorId {
     _priv: ()
 }
-unsafe impl GcSafe for DummyCollectorId {}
+unsafe impl<'gc, Id: > GcSafe<'gc, Id> for DummyCollectorId {}
 unsafe impl Trace for DummyCollectorId {
     const NEEDS_TRACE: bool = false;
     const NEEDS_DROP: bool = false;
@@ -146,6 +150,8 @@ unsafe impl NullTrace for DummyCollectorId {}
 unsafe impl CollectorId for DummyCollectorId {
     type System = DummySystem;
     type RawVecRepr = crate::vec::repr::Unsupported;
+    type DynVisitor = std::convert::Infallible;
+    type DynVisitErr = std::convert::Infallible;
 
     #[inline]
     fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: GcSafe + ?Sized + 'gc, 'gc: 'a {
@@ -157,7 +163,7 @@ unsafe impl CollectorId for DummyCollectorId {
         _owner: &Gc<'gc, T>,
         _value: &Gc<'gc, V>,
         _field_offset: usize
-    ) where T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {}
+    ) where T: GcSafe<'gc, DummyCollectorId> + ?Sized + 'gc, V: GcSafe<'gc, DummyCollectorId> + ?Sized + 'gc {}
 
     unsafe fn assume_valid_system(&self) -> &Self::System {
         unimplemented!()
