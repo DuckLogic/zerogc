@@ -50,6 +50,10 @@ sync = ["zerogc-context/sync", "parking_lot"]
 # Even if multiple collectors are enabled, pointers from
 # one collector can't be safely mixed with other collectors.
 multiple-collectors = []
+# HACK: Add an extra 'usize' for the first field of GcType
+#
+# TODO: This is ugly
+dummy-first-field-in-type = []
 
 [dev-dependencies]
 # Used for examples :)

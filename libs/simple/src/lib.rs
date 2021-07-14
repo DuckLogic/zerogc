@@ -64,7 +64,7 @@ use zerogc::{GcSafe, Trace, GcVisitor};
 use zerogc_context::utils::{ThreadId, MemorySize};
 
 use crate::alloc::{SmallArenaList, SmallArena};
-use crate::layout::{StaticGcType, GcType, SimpleVecRepr, DynamicObj, StaticVecType, SimpleMarkData, SimpleMarkDataSnapshot, GcHeader, BigGcObject, HeaderLayout, GcArrayHeader, GcVecHeader, GcTypeLayout};
+use crate::layout::{StaticGcType, GcType, SimpleVecRepr, DynamicObj, StaticVecType, SimpleMarkData, SimpleMarkDataSnapshot, GcHeader, BigGcObject, HeaderLayout, GcArrayHeader, GcVecHeader, GcTypeLayout, GcTypePadding};
 
 use zerogc_context::collector::{RawSimpleAlloc, RawCollectorImpl};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
@@ -299,6 +299,7 @@ impl GcHeap {
             0, EMPTY_VEC_ALIGNMENT
         ) };
         const DUMMY_TYPE: GcType = GcType {
+            possible_padding: GcTypePadding::pad(),
             layout: GcTypeLayout::Vec {
                 element_layout: DUMMY_LAYOUT,
             },

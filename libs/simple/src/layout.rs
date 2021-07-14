@@ -395,9 +395,35 @@ pub enum GcTypeLayout {
     }
 }
 
+/// Internal padding at the start of a [GcType]
+///
+/// If `cfg!(feature = "dummy-first-field-in-type")` is enabled,
+/// then this is a single pointer.
+///
+/// TODO: This is a hack for RustOO
+#[repr(C)]
+pub struct GcTypePadding {
+    #[cfg(feature = "dummy-first-field-in-type")]
+    _inner: usize,
+    _priv: ()
+}
+impl GcTypePadding {
+    /// Create the internal padding
+    pub(crate) const fn pad() -> GcTypePadding {
+        #[cfg(feature = "dummy-first-field-in-type")] {
+            GcTypePadding { _inner: 0, _priv: () }
+        }
+        #[cfg(not(feature = "dummy-first-field-in-type"))] {
+            GcTypePadding { _priv: () }
+        }
+    }
+}
+
 /// A type used by GC
 #[repr(C)]
 pub struct GcType {
+    /// Possible padding used for the type
+    pub possible_padding: GcTypePadding,
     /// Information on the type's layout
     pub layout: GcTypeLayout,
     /// The offset of the value from the start of the header
@@ -458,6 +484,7 @@ pub(crate) trait StaticVecType {
 }
 impl<T: GcSafe> StaticVecType for T {
     const STATIC_VEC_TYPE: &'static GcType = &GcType {
+        possible_padding: GcTypePadding::pad(),
         layout: GcTypeLayout::Vec {
             element_layout: Layout::new::<T>(),
         },
@@ -502,6 +529,7 @@ pub(crate) trait StaticGcType {
 }
 impl<T: GcSafe> StaticGcType for [T] {
     const STATIC_TYPE: &'static GcType = &GcType {
+        possible_padding: GcTypePadding::pad(),
         layout: GcTypeLayout::Array { element_layout: Layout::new::<T>() },
         value_offset_from_common_header: {
             GcArrayHeader::LAYOUT.value_offset_from_common_header(std::mem::align_of::<T>())
@@ -536,6 +564,7 @@ impl<T: GcSafe> StaticGcType for [T] {
 }
 impl<T: GcSafe> StaticGcType for T {
     const STATIC_TYPE: &'static GcType = &GcType {
+        possible_padding: GcTypePadding::pad(),
         layout: GcTypeLayout::Fixed(Layout::new::<T>()),
         value_offset_from_common_header: {
             GcHeader::LAYOUT.value_offset_from_common_header(std::mem::align_of::<T>())
