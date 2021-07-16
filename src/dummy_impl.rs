@@ -1,7 +1,7 @@
 //! Dummy collector implementation for testing
 
-use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable};
-use std::ptr::NonNull;
+use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, DynTrace, GcArray};
+use std::ptr::{NonNull, Pointee, DynMetadata};
 
 /// Fake a [Gc] that points to the specified value
 ///
@@ -118,6 +118,29 @@ unsafe impl GcSimpleAlloc for DummyContext {
     }
 }
 
+/// A dummy implementation of [GcVisitor]
+#[derive(Debug)]
+pub enum NeverVisit {}
+unsafe impl GcVisitor for NeverVisit {
+    type Err = NeverVisit;
+
+    unsafe fn visit_gc<'gc, T, Id>(&mut self, _gc: &mut crate::Gc<'gc, T, Id>) -> Result<(), Self::Err> where T: GcSafe + 'gc, Id: CollectorId {
+        match *self {}
+    }
+
+    unsafe fn visit_trait_object<'gc, T, Id>(&mut self, _gc: &mut crate::Gc<'gc, T, Id>) -> Result<(), Self::Err> where T: ?Sized + GcSafe + 'gc + Pointee<Metadata=DynMetadata<T>> + DynTrace, Id: CollectorId {
+        match *self {}
+    }
+
+    unsafe fn visit_vec<'gc, T, Id>(&mut self, _raw: &mut crate::Gc<'gc, Id::RawVecRepr, Id>) -> Result<(), Self::Err> where T: GcSafe + 'gc, Id: CollectorId {
+        match *self {}
+    }
+
+    unsafe fn visit_array<'gc, T, Id>(&mut self, _array: &mut GcArray<'gc, T, Id>) -> Result<(), Self::Err> where [T]: GcSafe + 'gc, Id: CollectorId {
+        match *self {}
+    }
+}
+
 /// The id for a [dummy gc pointer](Gc)
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DummyCollectorId {
@@ -146,6 +169,8 @@ unsafe impl NullTrace for DummyCollectorId {}
 unsafe impl CollectorId for DummyCollectorId {
     type System = DummySystem;
     type RawVecRepr = crate::vec::repr::Unsupported;
+    type MarkData = ();
+    type PreferredVisitor = NeverVisit;
 
     #[inline]
     fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: GcSafe + ?Sized + 'gc, 'gc: 'a {

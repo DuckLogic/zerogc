@@ -14,6 +14,7 @@ use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
 use zerogc::vec::GcVec;
 use zerogc::vec::repr::GcVecRepr;
+use zerogc::format::{MarkData, ObjectFormat};
 
 /// A specific implementation of a collector
 pub unsafe trait RawCollectorImpl: 'static + Sized {
@@ -24,6 +25,8 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     type DynTracePtr: Copy + Debug + 'static;
     /// The configuration
     type Config: Sized + Default;
+    /// The underlying [ObjectFormat] used to allocate and manage objects.
+    type Fmt: ObjectFormat<CollectorId<Self>>;
 
     /// A pointer to this collector
     ///
@@ -37,6 +40,11 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     type RawContext: RawContext<Self>;
     /// The raw representation of a vec
     type RawVecRepr: GcVecRepr;
+    /// The internal state for marking
+    type MarkData: MarkData;
+    /// The preferred implementation of [GcVisitor],
+    /// to specialize internal implementations
+    type PreferredVisitor: GcVisitor;
 
     /// True if this collector is a singleton
     ///
@@ -285,6 +293,8 @@ impl<C: RawCollectorImpl> CollectorId<C> {
 unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     type System = CollectorRef<C>;
     type RawVecRepr = C::RawVecRepr;
+    type MarkData = C::MarkData;
+    type PreferredVisitor = C::PreferredVisitor;
 
     #[inline]
     fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self where T: GcSafe + ?Sized + 'gc, 'gc: 'a {

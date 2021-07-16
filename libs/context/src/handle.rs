@@ -11,16 +11,12 @@ use alloc::vec::Vec;
 use zerogc::{Trace, GcSafe, GcErase, GcRebrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
 use crate::{Gc, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef, CollectionManager};
 use crate::collector::RawCollectorImpl;
+use zerogc::format::ObjectFormat;
 
 const INITIAL_HANDLE_CAPACITY: usize = 64;
 
 /// A [RawCollectorImpl] that supports handles
 pub unsafe trait RawHandleImpl: RawCollectorImpl {
-    /// Type information
-    type TypeInfo: Sized;
-
-    fn type_info_of<T: GcSafe>() -> &'static Self::TypeInfo;
-
     fn handle_list(&self) -> &GcHandleList<Self>;
 }
 
@@ -55,7 +51,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
     unsafe fn append_free_slot(&self, slot: *mut HandleSlot<C>) {
         // Verify it's actually free...
         debug_assert_eq!(
-            (*slot).valid.value
+            (*slot).valid.header
                 .load(Ordering::SeqCst),
             ptr::null_mut()
         );
@@ -64,7 +60,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
         loop {
             /*
              * NOTE: Must update `prev_freed_slot`
-             * BFEORE we write to the free-list.
+             * BEFORE we write to the free-list.
              * Other threads must see a consistent state
              * the moment we're present in the free-list
              */
@@ -102,7 +98,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
     /// The returned handle must be fully initialized
     /// before the next collection begins.
     #[inline]
-    pub(crate) unsafe fn alloc_raw_handle(&self, value: *mut ()) -> &GcRawHandle<C> {
+    pub(crate) unsafe fn alloc_raw_handle(&self, header: *mut <C::Fmt as ObjectFormat<CollectorId<C>>>::Header) -> &GcRawHandle<C> {
         // TODO: Should we weaken these orderings?
         let mut slot = self.last_free_slot.load(Ordering::Acquire);
         while !slot.is_null() {
@@ -129,7 +125,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
                     debug_assert_eq!(actual_slot, slot);
                     // Verify it's actually free...
                     debug_assert_eq!(
-                        (*slot).valid.value
+                        (*slot).valid.header
                             .load(Ordering::SeqCst),
                         ptr::null_mut()
                     );
@@ -138,8 +134,8 @@ impl<C: RawHandleImpl> GcHandleList<C> {
                      * the provided pointer. The user is responsible
                      * for any remaining initialization.
                      */
-                    (*slot).valid.value
-                        .store(value, Ordering::Release);
+                    (*slot).valid.header
+                        .store(header, Ordering::Release);
                     return &(*slot).valid;
                 },
                 Err(actual_slot) => {
@@ -149,13 +145,13 @@ impl<C: RawHandleImpl> GcHandleList<C> {
             }
         }
         // Empty free list
-        self.alloc_handle_fallback(value)
+        self.alloc_handle_fallback(header)
     }
     /// Fallback to creating more buckets
     /// if the free-list is empty
     #[cold]
     #[inline(never)]
-    unsafe fn alloc_handle_fallback(&self, value: *mut ()) -> &GcRawHandle<C> {
+    unsafe fn alloc_handle_fallback(&self, header: *mut <C::Fmt as ObjectFormat<CollectorId<C>>>::Header) -> &GcRawHandle<C> {
         let mut bucket = self.last_bucket.load(Ordering::Acquire);
         loop {
             // TODO: Should we be retrying the free-list?
@@ -163,7 +159,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
             if bucket.is_null() {
                 new_size = INITIAL_HANDLE_CAPACITY;
             } else {
-                if let Some(slot) = (*bucket).blindly_alloc_slot(value) {
+                if let Some(slot) = (*bucket).blindly_alloc_slot(header) {
                     /*
                      * NOTE: The caller is responsible
                      * for finishing up initializing this.
@@ -232,7 +228,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
     /// Now that's behind a layer of abstraction,
     /// the unsafety has technically been moved to the caller.
     pub unsafe fn trace<F, E>(&mut self, mut visitor: F) -> Result<(), E>
-        where F: FnMut(*mut (), &C::TypeInfo) -> Result<(), E> {
+        where F: FnMut(*mut <C::Fmt as ObjectFormat<CollectorId<C>>>::Header) -> Result<(), E> {
         /*
          * TODO: This fence seems unnecessary since we should
          * already have exclusive access.....
@@ -294,13 +290,17 @@ impl<C: RawHandleImpl> GcHandleBucket<C> {
     ///
     /// ## Safety
     /// See docs on [GcHandleList::alloc_raw_bucket]
-    unsafe fn blindly_alloc_slot(&self, value: *mut ()) -> Option<&HandleSlot<C>> {
+    unsafe fn blindly_alloc_slot(&self, header: *mut <C::Fmt as ObjectFormat<CollectorId<C>>>::Header) -> Option<&HandleSlot<C>> {
         let last_alloc = self.last_alloc.load(Ordering::Relaxed);
         for (i, slot) in self.slots.iter().enumerate()
             .skip(last_alloc) {
-            // TODO: All these fences must be horrible on ARM
-            if slot.valid.value.compare_exchange(
-                ptr::null_mut(), value,
+            /*
+             * TODO: All these fences must be horrible on ARM.
+             * I expect handle allocation to be a somewhat hot-path in DuckLogic.
+             * Can we do better?
+             */
+            if slot.valid.header.compare_exchange(
+                ptr::null_mut(), header,
                 Ordering::AcqRel,
                 Ordering::Relaxed
             ).is_ok() {
@@ -331,7 +331,7 @@ impl<C: RawHandleImpl> HandleSlot<C> {
          * The pointer is present in both variants
          * of the enum.
          */
-        unsafe { !self.valid.value.load(ord).is_null() }
+        unsafe { !self.valid.header.load(ord).is_null() }
     }
 }
 
@@ -351,18 +351,14 @@ pub struct FreedHandleSlot<C: RawHandleImpl> {
 /// These are reused
 #[repr(C)]
 pub struct GcRawHandle<C: RawHandleImpl> {
-    /// Refers to the underlying value of this handle.
+    /// Refers to the object header of the value this handle refers to.
     ///
     /// If it's null, it's invalid, and is actually
     /// a freed handle
     ///
     /// The underlying value can only be safely accessed
     /// if there isn't a collection in progress
-    value: AtomicPtr<()>,
-    /// I think this should be protected by the other atomic
-    /// accesses. Regardless, I'll put it in an AtomicPtr anyways.
-    // TODO: Encapsulate
-    pub(crate) type_info: AtomicPtr<C::TypeInfo>,
+    header: AtomicPtr<<C::Fmt as ObjectFormat<CollectorId<C>>>::Header>,
     /// The reference count to the handle
     ///
     /// If this is zero the value can be freed
@@ -379,9 +375,9 @@ impl<C: RawHandleImpl> GcRawHandle<C> {
     /// - It is assumed that the appropriate atomic fences (if any)
     ///   have already been applied (TODO: Don't we have exclusive access?)
     unsafe fn trace_inner<F, E>(&self, trace: &mut F) -> Result<(), E>
-        where F: FnMut(*mut (), &C::TypeInfo) -> Result<(), E> {
-        let value = self.value.load(Ordering::Relaxed);
-        if value.is_null() {
+        where F: FnMut(*mut <C::Fmt as ObjectFormat<CollectorId<C>>>::Header) -> Result<(), E> {
+        let header = self.header.load(Ordering::Relaxed);
+        if header.is_null() {
             debug_assert_eq!(
                 self.refcnt.load(Ordering::Relaxed),
                 0
@@ -392,8 +388,7 @@ impl<C: RawHandleImpl> GcRawHandle<C> {
             self.refcnt.load(Ordering::Relaxed),
             0
         );
-        let type_info = &*self.type_info.load(Ordering::Relaxed);
-        trace(value, type_info)
+        trace(header)
     }
 }
 pub struct GcHandle<T: GcSafe, C: RawHandleImpl> {
@@ -429,7 +424,7 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C
              * since that could starve writers (collectors).
              */
             C::Manager::prevent_collection(collector.as_ref(), || {
-                let value = self.inner.as_ref().value
+                let value = self.inner.as_ref().header
                     .load(Ordering::Acquire) as *mut T;
                 func(&*value)
             })
@@ -462,7 +457,7 @@ unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
                 "Collectors mismatch"
             );
             let inner = self.inner.as_ref();
-            let value = inner.value.load(Ordering::Acquire)
+            let value = inner.header.load(Ordering::Acquire)
                 as *mut T as *mut T::Branded;
             debug_assert!(!value.is_null());
             Gc::from_raw(
@@ -505,7 +500,7 @@ impl<T: GcSafe, C: RawHandleImpl> Clone for GcHandle<T, C> {
             .ensure_valid(|id| unsafe { id.weak_ref() });
         let inner = unsafe { self.inner.as_ref() };
         debug_assert!(
-            !inner.value
+            !inner.header
                 .load(Ordering::SeqCst)
                 .is_null(),
             "Pointer is invalid"
@@ -513,7 +508,7 @@ impl<T: GcSafe, C: RawHandleImpl> Clone for GcHandle<T, C> {
         let mut old_refcnt = inner.refcnt.load(Ordering::Relaxed);
         loop {
             assert_ne!(
-                old_refcnt, isize::max_value() as usize,
+                old_refcnt, isize::MAX as usize,
                 "Reference count overflow"
             );
             /*
@@ -555,7 +550,7 @@ impl<T: GcSafe, C: RawHandleImpl> Drop for GcHandle<T, C> {
                 Some(ref id) => unsafe { id.as_ref() },
             };
             let inner = unsafe { self.inner.as_ref() };
-            debug_assert!(!inner.value
+            debug_assert!(!inner.header
                 .load(Ordering::SeqCst)
                 .is_null(),
                 "Pointer already invalid"
@@ -577,7 +572,7 @@ impl<T: GcSafe, C: RawHandleImpl> Drop for GcHandle<T, C> {
                 _ => {}, // Other references
             }
             // Mark the value as freed
-            inner.value.store(
+            inner.header.store(
                 ptr::null_mut(),
                 Ordering::Release
             );
@@ -615,20 +610,9 @@ unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for CollectorRef<C>
     fn create_handle(gc: Gc<'gc, T, CollectorId<C>>) -> Self::Handle {
         unsafe {
             let collector = gc.collector_id();
-            let value = gc.as_raw_ptr();
+            let header = C::Fmt::resolve_header(gc.value());
             let raw = collector.as_ref().handle_list()
-                .alloc_raw_handle(value as *mut ());
-            /*
-             * WARN: Undefined Behavior
-             * if we don't finish initializing
-             * the handle!!!
-             */
-            raw.type_info.store(
-                C::type_info_of::<T>()
-                    as *const C::TypeInfo
-                    as *mut C::TypeInfo,
-                Ordering::Release
-            );
+                .alloc_raw_handle(header as *const _ as *mut _);
             raw.refcnt.store(1, Ordering::Release);
             let weak_collector = collector.weak_ref();
             GcHandle::new(NonNull::from(raw), weak_collector)

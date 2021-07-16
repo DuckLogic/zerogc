@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 use std::cell::RefCell;
 
 use zerogc_context::utils::AtomicCell;
+use crate::layout::{UnknownHeader};
 
 const DEBUG_INTERNAL_ALLOCATOR: bool = cfg!(zerogc_simple_debug_alloc);
 mod debug {
@@ -107,9 +108,7 @@ pub const MINIMUM_WORDS: usize = 2;
 /// Past this we have to fallback to the global allocator
 pub const MAXIMUM_SMALL_WORDS: usize = 32;
 /// The alignment of elements in the arena
-pub const ARENA_ELEMENT_ALIGN: usize = std::mem::align_of::<GcHeader>();
-
-use crate::layout::{GcHeader, UnknownHeader};
+pub const ARENA_ELEMENT_ALIGN: usize = std::mem::align_of::<usize>();
 
 #[inline]
 pub const fn fits_small_object(layout: Layout) -> bool {

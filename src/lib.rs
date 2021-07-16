@@ -3,6 +3,16 @@
     ptr_metadata, // RFC 2580 - Pointer meta
     coerce_unsized, // RFC 0982 - DST coercion
     unsize,
+    // Used for simple object layout
+    alloc_layout_extra,
+    const_fn_trait_bound,
+    const_ptr_offset,
+    const_raw_ptr_deref,
+    const_alloc_layout,
+    const_raw_ptr_to_usize_cast,
+    const_maybe_uninit_as_ptr,
+    const_align_of_val,
+    const_refs_to_cell,
 )]
 #![feature(maybe_uninit_slice)]
 #![deny(missing_docs)]
@@ -58,6 +68,7 @@ pub mod cell;
 pub mod prelude;
 pub mod dummy_impl;
 pub mod vec;
+pub mod format;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.
@@ -546,6 +557,12 @@ pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + 'static {
     ///
     /// May be [crate::vec::repr::VecUnsupported] if vectors are unsupported.
     type RawVecRepr: crate::vec::repr::GcVecRepr;
+    /// The type of mark data the collector needs to mark the object.
+    type MarkData: crate::format::MarkData;
+    /// The preferred type of [GcVisitor] for this id.
+    ///
+    /// This is what the trace methods are specialzied to use.
+    type PreferredVisitor: GcVisitor;
 
     /// Get the runtime id of the collector that allocated the [Gc]
     fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self

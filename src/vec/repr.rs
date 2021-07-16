@@ -64,6 +64,14 @@ pub unsafe trait GcVecRepr: GcSafe {
     ///
     /// The returned memory must not be mutated, because it may have multiple owners.
     unsafe fn ptr(&self) -> *const c_void;
+    /// Drop the values in the vector, assuming that
+    ///
+    /// The given generic parameter is the actual type of
+    ///
+    /// ## Safety
+    /// Undefined behavior if vector is in use.
+    /// Undefined behavior if the passed type is incorrect.
+    unsafe fn unchecked_drop<T: GcSafe>(&mut self);
 }
 /// Dummy implementation of [GcVecRepr] for collectors which do not support [GcVec]
 pub enum Unsupported {}
@@ -86,6 +94,10 @@ unsafe impl GcVecRepr for Unsupported {
     }
 
     unsafe fn ptr(&self) -> *const c_void {
+        unimplemented!()
+    }
+
+    unsafe fn unchecked_drop<T: GcSafe>(&mut self) {
         unimplemented!()
     }
 }
