@@ -6,6 +6,7 @@
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::mem::ManuallyDrop;
+use core::ptr::{NonNull};
 
 use zerogc_derive::{unsafe_gc_impl};
 
@@ -16,23 +17,53 @@ pub mod repr;
 
 /// A garbage collected array.
 ///
-/// This is simply an alias for `Gc<[T]>`
+/// This is a thin pointer, with length stored indirectly in the object's header.
 #[repr(transparent)]
-pub struct GcArray<'gc, T: 'gc, Id: CollectorId>(pub Gc<'gc, [T], Id>)
-    where [T]: GcSafe;
+pub struct GcArray<'gc, T: GcSafe + 'gc, Id: CollectorId> {
+    ptr: NonNull<T>,
+    marker: PhantomData<Gc<'gc, [T], Id>>
+}
 impl<'gc, T: GcSafe, Id: CollectorId> GcArray<'gc, T, Id> {
+    /// Create an array from the specified raw pointer and length
+    ///
+    /// ## Safety
+    /// Pointer and length must be valid, and point to a garbage collected
+    /// value allocated from the corresponding [CollectorId]
+    #[inline]
+    pub unsafe fn from_raw_ptr(ptr: NonNull<T>, len: usize) -> Self {
+        let res = GcArray { ptr, marker: PhantomData };
+        debug_assert_eq!(res.len(), len);
+        res
+    }
     /// The value of the array as a slice
     #[inline]
-    pub fn value(self) -> &'gc [T] {
-        self.0.value()
+    pub fn as_slice(self) -> &'gc [T] {
+        unsafe {
+            core::slice::from_raw_parts(self.as_raw_ptr() as *const T, self.len())
+        }
+    }
+    /// Load a raw pointer to the array's value
+    #[inline]
+    pub fn as_raw_ptr(self) -> *mut T {
+        self.ptr.as_ptr()
+    }
+    /// Load the length of the array
+    #[inline]
+    pub fn len(&self) -> usize {
+        Id::resolve_array_len(*self)
+    }
+    /// Resolve the [CollectorId]
+    #[inline]
+    pub fn collector_id(&self) -> &'_ Id {
+        Id::resolve_array_id(self)
     }
 }
 impl<'gc, T: GcSafe, Id: CollectorId> Deref for GcArray<'gc, T, Id> {
-    type Target = &'gc [T];
+    type Target = [T];
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &*self.0
+        self.as_slice()
     }
 }
 impl<'gc, T: GcSafe, Id: CollectorId> Copy for GcArray<'gc, T, Id> {}

@@ -650,6 +650,29 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     }
 
     #[inline]
+    fn id_for_array<'a, 'gc, T>(gc: &'a GcArray<'gc, T>) -> &'a CollectorId where 'gc: 'a, T: GcSafe + 'gc {
+        #[cfg(feature = "multiple-collectors")] {
+            unsafe {
+                let header = GcArrayHeader::LAYOUT.from_value_ptr(gc.as_raw_ptr());
+                &*(&*header).common_header.mark_data.load_snapshot().collector_id_ptr
+            }
+        }
+        #[cfg(not(feature = "multiple-collectors"))] {
+            const ID: CollectorId = unsafe { CollectorId::from_raw(PhantomData) };
+            &ID
+        }
+    }
+
+    #[inline]
+    fn resolve_array_len<'gc, T>(gc: zerogc::GcArray<'gc, T, zerogc_context::CollectorId<Self>>) -> usize where T: GcSafe + 'gc {
+        unsafe {
+            let header = GcArrayHeader::LAYOUT.from_value_ptr(gc.as_raw_ptr());
+            (*header).len
+        }
+    }
+
+
+    #[inline]
     unsafe fn as_dyn_trace_pointer<T: Trace>(value: *mut T) -> Self::DynTracePtr {
         debug_assert!(!value.is_null());
         NonNull::new_unchecked(
@@ -983,7 +1006,7 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
 
     #[inline]
     unsafe fn visit_array<'gc, T, Id>(&mut self, array: &mut ::zerogc::vec::GcArray<'gc, T, Id>) -> Result<(), Self::Err>
-        where [T]: GcSafe + 'gc, Id: ::zerogc::CollectorId {
+        where T: GcSafe + 'gc, Id: ::zerogc::CollectorId {
         if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
             /*
              * See comment in 'visit_gc'.
@@ -991,14 +1014,23 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
              */
             let array = std::mem::transmute::<
                 &mut ::zerogc::vec::GcArray<'gc, T, Id>,
-                &mut ::zerogc::Gc<'gc, [T], crate::CollectorId>
+                &mut ::zerogc::vec::GcArray<'gc, T, crate::CollectorId>
             >(array);
             /*
              * Check the collectors match. Otherwise we're mutating
              * other people's data.
              */
             assert_eq!(*array.collector_id(), self.expected_collector);
-            self._visit_own_gc(array);
+            let len = array.len();
+            let mut gc = Gc::from_raw(
+                *array.collector_id(),
+                NonNull::from(array.as_slice())
+            );
+            self._visit_own_gc(&mut gc);
+            *array = GcArray::from_raw_ptr(
+                NonNull::new_unchecked(gc.value().as_ptr() as *mut T),
+                len
+            );
             Ok(())
         } else {
             Ok(())

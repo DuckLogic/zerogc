@@ -1,6 +1,6 @@
 //! Dummy collector implementation for testing
 
-use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable};
+use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, GcArray};
 use std::ptr::NonNull;
 
 /// Fake a [Gc] that points to the specified value
@@ -152,6 +152,15 @@ unsafe impl CollectorId for DummyCollectorId {
         const ID: DummyCollectorId = DummyCollectorId { _priv: () };
         &ID
     }
+
+    fn resolve_array_len<'gc, T>(_array: GcArray<'gc, T, Self>) -> usize where T: GcSafe + 'gc {
+        todo!()
+    }
+
+    fn resolve_array_id<'a, 'gc, T>(_gc: &'a GcArray<'gc, T, Self>) -> &'a Self where T: GcSafe + 'gc, 'gc: 'a {
+        todo!()
+    }
+
 
     unsafe fn gc_write_barrier<'gc, T, V>(
         _owner: &Gc<'gc, T>,

@@ -447,14 +447,12 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     fn alloc_slice_copy<'gc, T>(&'gc self, src: &[T]) -> GcArray<'gc, T, Self::Id>
         where T: GcSafe + Copy + 'gc {
         unsafe {
-            let (id, res_ptr) = self.alloc_uninit_slice::<T>(src.len());
+            let (_id, res_ptr) = self.alloc_uninit_slice::<T>(src.len());
             res_ptr.copy_from_nonoverlapping(src.as_ptr(), src.len());
-            GcArray(Gc::from_raw(
-                id, NonNull::new_unchecked(std::ptr::slice_from_raw_parts_mut(
-                    res_ptr,
-                    src.len()
-                ))
-            ))
+            GcArray::from_raw_ptr(
+                NonNull::new_unchecked(res_ptr),
+                src.len()
+            )
         }
     }
     /// Allocate a slice by filling it with results from the specified closure.
@@ -466,33 +464,33 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     ///
     /// Otherwise, the gc may end up tracing the values even though they are uninitialized.
     #[inline]
-    fn alloc_slice_fill_with<'gc, T, F>(&'gc self, len: usize, mut func: F) -> GcArray<'gc, T, Self::Id>
+    unsafe fn alloc_slice_fill_with<'gc, T, F>(&'gc self, len: usize, mut func: F) -> GcArray<'gc, T, Self::Id>
         where T: GcSafe + 'gc, F: FnMut(usize) -> T {
-        unsafe {
-            let (id, res_ptr) = self.alloc_uninit_slice::<T>(len);
-            for i in 0..len {
-                res_ptr.add(i).write(func(i));
-            }
-            GcArray(Gc::from_raw(
-                id, NonNull::new_unchecked(std::ptr::slice_from_raw_parts_mut(
-                    res_ptr,
-                    len
-                ))
-            ))
+        let (_id, res_ptr) = self.alloc_uninit_slice::<T>(len);
+        for i in 0..len {
+            res_ptr.add(i).write(func(i));
         }
+        GcArray::from_raw_ptr(
+            NonNull::new_unchecked(res_ptr),
+            len
+        )
     }
     /// Allocate a slice of the specified length,
     /// initializing everything to `None`
     #[inline]
     fn alloc_slice_none<'gc, T>(&'gc self, len: usize) -> GcArray<'gc, Option<T>, Self::Id>
         where T: GcSafe + 'gc {
-        self.alloc_slice_fill_with(len, |_idx| None)
+        unsafe {
+            self.alloc_slice_fill_with(len, |_idx| None)
+        }
     }
     /// Allocate a slice by repeatedly copying a single value.
     #[inline]
     fn alloc_slice_fill_copy<'gc, T>(&'gc self, len: usize, val: T) -> GcArray<'gc, T, Self::Id>
         where T: GcSafe + Copy + 'gc {
-        self.alloc_slice_fill_with(len, |_idx| val)
+        unsafe {
+            self.alloc_slice_fill_with(len, |_idx| val)
+        }
     }
     /// Create a new [GcVec] with zero initial length,
     /// with an implicit reference to this [GcContext].
@@ -550,6 +548,16 @@ pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + 'static {
     /// Get the runtime id of the collector that allocated the [Gc]
     fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self
         where T: GcSafe + ?Sized + 'gc, 'gc: 'a;
+
+    /// Resolve the length of the specified [GcArray]
+    fn resolve_array_len<'gc, T>(array: GcArray<'gc, T, Self>) -> usize
+        where T: GcSafe + 'gc;
+
+    /// Resolve the CollectorId for the specified [GcArray]
+    ///
+    /// This is the [GcArray] counterpart of `from_gc_ptr`
+    fn resolve_array_id<'a, 'gc, T>(gc: &'a GcArray<'gc, T, Self>) -> &'a Self
+        where T: GcSafe + 'gc, 'gc: 'a;
 
     /// Perform a write barrier before writing to a garbage collected field
     ///
@@ -1209,5 +1217,5 @@ pub unsafe trait GcVisitor: Sized {
     unsafe fn visit_array<'gc, T, Id>(
         &mut self, array: &mut GcArray<'gc, T, Id>
     ) -> Result<(), Self::Err>
-        where [T]: GcSafe + 'gc, Id: CollectorId;
+        where T: GcSafe + 'gc, Id: CollectorId;
 }

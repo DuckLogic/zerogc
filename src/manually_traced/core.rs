@@ -288,12 +288,7 @@ unsafe_gc_impl! {
         Ok(())
     },
     visit_inside_gc => |gc, visitor| {
-        visitor.visit_array(
-            core::mem::transmute::<
-                &mut Gc<'actual_gc, [T], ActualId>,
-                &mut crate::GcArray<'actual_gc, T, ActualId>
-            >(gc)
-        )
+        todo!("Visit Gc<[T]> instead of GcArray<T>")
     }
 }
 
