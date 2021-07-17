@@ -451,6 +451,11 @@ impl GcType {
                 self.align()
             )).unwrap().0.pad_to_align()
     }
+    /// Get the [GcType] for the specified `Sized` type
+    #[inline]
+    pub const fn for_regular<T: GcSafe>() -> &'static Self {
+        <T as StaticGcType>::STATIC_TYPE
+    }
 }
 
 pub(crate) trait StaticVecType {

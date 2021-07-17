@@ -37,6 +37,7 @@
     const_ptr_offset_from,
     const_maybe_uninit_as_ptr,
     const_refs_to_cell,
+    const_fn_trait_bound
 )]
 #![feature(drain_filter)]
 #![allow(
