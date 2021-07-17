@@ -370,7 +370,7 @@ impl<C: RawCollectorImpl> WeakCollectorRef<C> {
 }
 
 pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
-    fn alloc<'gc, T: GcSafe + 'gc>(context: &'gc CollectorContext<Self>, value: T) -> Gc<'gc, T, CollectorId<Self>>;
+    unsafe fn alloc_uninit<'gc, T: GcSafe + 'gc>(context: &'gc CollectorContext<Self>) -> (CollectorId<Self>, *mut T);
     unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> (CollectorId<Self>, *mut T)
         where T: GcSafe + 'gc;
     fn alloc_vec<'gc, T>(context: &'gc CollectorContext<Self>) -> GcVec<'gc, T, CollectorContext<Self>>
@@ -381,9 +381,9 @@ pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
 unsafe impl<C> GcSimpleAlloc for CollectorContext<C>
     where C: RawSimpleAlloc {
     #[inline]
-    fn alloc<'gc, T>(&'gc self, value: T) -> Gc<'gc, T, Self::Id>
+    unsafe fn alloc_uninit<'gc, T>(&'gc self) -> (CollectorId<C>, *mut T)
         where T: GcSafe + 'gc {
-        C::alloc(self, value)
+        C::alloc_uninit(self)
     }
 
     #[inline]

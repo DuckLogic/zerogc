@@ -2,6 +2,7 @@
 
 use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, GcArray};
 use std::ptr::NonNull;
+use std::mem::MaybeUninit;
 
 /// Fake a [Gc] that points to the specified value
 ///
@@ -94,6 +95,10 @@ unsafe impl GcSystem for DummySystem {
     type Context = DummyContext;
 }
 unsafe impl GcSimpleAlloc for DummyContext {
+    unsafe fn alloc_uninit<'gc, T>(&'gc self) -> (Self::Id, *mut T) where T: GcSafe + 'gc {
+        (DummyCollectorId { _priv: () }, Box::leak(Box::<T>::new_uninit()) as *mut MaybeUninit<T> as *mut T)
+    }
+
     fn alloc<'gc, T>(&'gc self, value: T) -> crate::Gc<'gc, T, Self::Id>
         where T: GcSafe + 'gc {
         gc(Box::leak(Box::new(value)))

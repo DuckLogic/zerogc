@@ -148,17 +148,14 @@ pub type GcVec<'gc, T> = ::zerogc::vec::GcVec<'gc, T, SimpleCollectorContext>;
 static GLOBAL_COLLECTOR: AtomicPtr<RawSimpleCollector> = AtomicPtr::new(std::ptr::null_mut());
 
 unsafe impl RawSimpleAlloc for RawSimpleCollector {
-    fn alloc<'gc, T>(context: &'gc SimpleCollectorContext, value: T) -> Gc<'gc, T> where T: GcSafe + 'gc {
-        unsafe {
-            let (_header, ptr) = context.collector().heap.allocator.alloc_layout(
-                GcHeader::LAYOUT,
-                Layout::new::<T>(),
-                T::STATIC_TYPE
-            );
-            let ptr = ptr as *mut T;
-            ptr.write(value);
-            Gc::from_raw(context.collector().id(), NonNull::new_unchecked(ptr))
-        }
+    #[inline]
+    unsafe fn alloc_uninit<'gc, T>(context: &'gc SimpleCollectorContext) -> (CollectorId, *mut T) where T: GcSafe + 'gc {
+        let (_header, ptr) = context.collector().heap.allocator.alloc_layout(
+            GcHeader::LAYOUT,
+            Layout::new::<T>(),
+            T::STATIC_TYPE
+        );
+        (context.collector().id(), ptr as *mut T)
     }
 
     unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> (CollectorId, *mut T) where T: GcSafe + 'gc {

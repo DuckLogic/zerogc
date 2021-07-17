@@ -5,6 +5,7 @@
     unsize,
 )]
 #![feature(maybe_uninit_slice)]
+#![feature(new_uninit)]
 #![deny(missing_docs)]
 #![cfg_attr(not(feature = "std"), no_std)]
 //! Zero overhead tracing garbage collection for rust,
@@ -417,6 +418,13 @@ pub unsafe trait GcContext: Sized {
 /// Some garbage collectors implement more complex interfaces,
 /// so implementing this is optional
 pub unsafe trait GcSimpleAlloc: GcContext {
+    /// Allocate room for a object in, but don't finish initializing it.
+    ///
+    /// ## Safety
+    /// The object **must** be initialized by the time the next collection
+    /// rolls around, so that the collector can properly trace it
+    unsafe fn alloc_uninit<'gc, T>(&'gc self) -> (Self::Id, *mut T)
+        where T: GcSafe + 'gc;
     /// Allocate the specified object in this garbage collector,
     /// binding it to the lifetime of this collector.
     ///
@@ -429,8 +437,15 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     ///
     /// This gives a immutable reference to the resulting object.
     /// Once allocated, the object can only be correctly modified with a `GcCell`
+    #[inline]
     fn alloc<'gc, T>(&'gc self, value: T) -> Gc<'gc, T, Self::Id>
-        where T: GcSafe + 'gc;
+        where T: GcSafe + 'gc {
+        unsafe {
+            let (id, ptr) = self.alloc_uninit::<T>();
+            ptr.write(value);
+            Gc::from_raw(id, NonNull::new_unchecked(ptr))
+        }
+    }
     /// Allocate a slice with the specified length,
     /// whose memory is uninitialized
     ///
