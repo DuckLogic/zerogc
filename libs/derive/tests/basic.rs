@@ -1,7 +1,7 @@
 #![feature(
     arbitrary_self_types, // Used for `zerogc(mutable)`
 )]
-use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, dummy_impl::{self, DummyCollectorId}};
+use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, dummy_impl::{self, DummyCollectorId}, GcRebrand};
 
 use zerogc_derive::{Trace, NullTrace};
 use zerogc::cell::GcCell;
@@ -112,6 +112,13 @@ struct LifetimeTrace<'a, T: GcSafe + 'a> {
     generic: Box<T>
 }
 
+#[derive(Trace, Copy, Clone)]
+#[zerogc(copy, collector_id(DummyCollectorId))]
+struct GenericTrace<'gc, T: Copy + GcSafe + 'gc> {
+    gc: Gc<'gc, T, DummyCollectorId>,
+    i: Gc<'gc, i32, DummyCollectorId>,
+    inner: Option<Gc<'gc, GenericTrace<'gc, T>, DummyCollectorId>>
+}
 
 #[test]
 fn basic<'gc>() {
@@ -152,4 +159,8 @@ fn basic<'gc>() {
     assert!(!<NoDestructorNullTrace as Trace>::NEEDS_DROP);
     assert!(!std::mem::needs_drop::<NoDestructorNullTrace>());
 
+    assert!(<GenericTrace<i32> as Trace>::NEEDS_TRACE);
+    assert!(!<GenericTrace<i32> as Trace>::NEEDS_DROP);
+    <GenericTrace<i32> as GcRebrand<'_, DummyCollectorId>>::assert_rebrand();
+    assert_copy::<GenericTrace<i32>>();
 }
