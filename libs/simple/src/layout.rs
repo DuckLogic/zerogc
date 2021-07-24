@@ -130,11 +130,11 @@ pub(crate) struct BigGcObject<Fmt: ObjectFormat<CollectorId<Fmt>>> {
 }
 impl<Fmt: ObjectFormat<CollectorId<Fmt>>> BigGcObject<Fmt> {
     #[inline]
-    pub unsafe fn header(&self) -> &Fmt::Header {
+    pub unsafe fn header(&self) -> &Fmt::CommonHeader {
         self.header.as_ref()
     }
     #[inline]
-    pub unsafe fn from_ptr(header: *mut Fmt::Header) -> BigGcObject<Fmt> {
+    pub unsafe fn from_ptr(header: *mut Fmt::CommonHeader) -> BigGcObject<Fmt> {
         debug_assert!(!header.is_null());
         BigGcObject { header: NonNull::new_unchecked(header) }
     }

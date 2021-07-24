@@ -24,14 +24,14 @@ impl Default for SimpleObjectFormat {
     }
 }
 impl<Id: CollectorId> ObjectFormat<Id> for SimpleObjectFormat {
-    type Header = GcHeader<Id>;
+    type CommonHeader = GcHeader<Id>;
     type TypeInfoRef = &'static GcSimpleType<Id>;
-    const REGULAR_HEADER_LAYOUT: Layout = Layout::new::<Self::Header>();
+    const REGULAR_HEADER_LAYOUT: Layout = Layout::new::<Self::CommonHeader>();
     const VEC_HEADER_LAYOUT: Layout = Layout::new::<Self::VecHeader>();
     const ARRAY_HEADER_LAYOUT: Layout = Layout::new::<Self::ArrayHeader>();
 
     #[inline]
-    unsafe fn resolve_header<T: ?Sized + GcSafe>(ptr: &T) -> &Self::Header {
+    unsafe fn resolve_header<T: ?Sized + GcSafe>(ptr: &T) -> &Self::CommonHeader {
         &*GcHeader::from_value_ptr(ptr as *const T as *mut T)
     }
 
@@ -72,7 +72,7 @@ impl<Id: CollectorId> ObjectFormat<Id> for SimpleObjectFormat {
     }
 
     #[inline]
-    unsafe fn init_regular_header(header: *mut Self::Header, mark_data: Id::MarkData, type_info: Self::TypeInfoRef) {
+    unsafe fn init_regular_header(header: *mut Self::CommonHeader, mark_data: Id::MarkData, type_info: Self::TypeInfoRef) {
         (*header).mark_data = mark_data;
         (*header).type_info = type_info;
     }

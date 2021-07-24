@@ -1,63 +1,94 @@
 //! An API for [ObjectFormat]
 use core::alloc::Layout;
+use core::ffi::c_void;
+use core::fmt::Debug;
 
-use crate::{CollectorId, GcSafe, GcVisitor};
-use std::ffi::c_void;
+use crate::{CollectorId, GcSafe, GcVisitor, GcArray};
+use crate::vec::repr::GcVecRepr;
 
 pub mod simple;
+
+/// Information on the internals of a GC,
+/// which is necessary for object formatting.
+///
+/// This is used instead of [CollectorId] in order to break circular dependencies.
+/// This way,
+/// `CollectorId` depends on `ObjectFormat` which depends on `GcInfo`
+pub unsafe trait GcInfo {
+    /// The preferred implementation of [GcVisitor],
+    /// which implementations of the trace function are specialized to.
+    type PreferredVisitor: GcVisitor<Err=Self::PreferredVisitorErr>;
+    /// The type of errors caused by tracing with a [GcVisitor]
+    type PreferredVisitorErr: Debug;
+    /// The mark data used by the collector to maintain an object's internal state.
+    type MarkData: MarkData;
+}
 
 /// An API for controlling the in-memory layout of objects.
 ///
 /// This allows clients some control over the in-memory layout.
-pub trait ObjectFormat<Id: CollectorId> {
-    /// The [GcHeader] common to all regular objects
-    type Header: GcHeader<TypeInfoRef=Self::TypeInfoRef, Id=Id>;
-    /// The type information
-    type TypeInfoRef: GcTypeInfo;
-    /// The in-memory layout of regular object's header.
-    const REGULAR_HEADER_LAYOUT: Layout;
-    /// The in-memory layout of a garbage collected vector.
-    const VEC_HEADER_LAYOUT: Layout;
-    /// The in-memory layout of an array
-    const ARRAY_HEADER_LAYOUT: Layout;
+pub trait ObjectFormat<GC: GcInfo> {
+    /// The underlying representation of vectors.
+    ///
+    /// This is also a parameter of [CollectorId],
+    /// and needs to be specified regardless of whether or not the
+    /// collector implements this object format API.
+    type RawVecRepr: GcVecRepr;
+    /// The [GcHeader] common to objects.
+    ///
+    /// For "regular" `Sized` objects, this is all the header information there is.
+    type CommonHeader: GcHeader<GC, TypeInfoRef=Self::TypeInfoRef>;
+    /// A reference to the type information
+    type TypeInfoRef: GcTypeInfo<GC>;
     /// Resolve the object's header based on its pointer.
     ///
     /// ## Safety
     /// Assumes that the object has been allocated using the correct format.
-    unsafe fn resolve_header<T: ?Sized + GcSafe>(ptr: &T) -> &Self::Header;
+    unsafe fn resolve_header<T: ?Sized + GcSafe>(ptr: &T) -> &Self::CommonHeader;
     /// The object header for vectors
-    type VecHeader: GcVecHeader;
+    type VecHeader: GcVecHeader<GC>;
     /// Resolve the [GcVecHeader] for the specified vector.
-    unsafe fn resolve_vec_header<T: GcSafe>(repr: &<Id as CollectorId>::RawVecRepr) -> &Self::VecHeader;
+    unsafe fn resolve_vec_header<T: GcSafe>(repr: &GC::RawVecRepr) -> &Self::VecHeader;
     /// The object header for arrays
-    type ArrayHeader: GcArrayHeader;
+    type ArrayHeader: GcArrayHeader<GC>;
     /// Resolve an array's header, based on a pointer to its value
-    unsafe fn resolve_array_header<T: GcSafe>(ptr: &[T]) -> &Self::ArrayHeader;
+    unsafe fn resolve_array_header<T: GcSafe>(ptr: &GcArray<T>) -> &Self::ArrayHeader;
     /// Get the type information for a regular type, based on its static type info
     fn regular_type_info<T: GcSafe>() -> Self::TypeInfoRef;
     /// Get the type information for an array
     fn array_type_info<T: GcSafe>() -> Self::TypeInfoRef;
     /// Get the type information for a vector
     fn vec_type_info<T: GcSafe>() -> Self::TypeInfoRef;
-    /// Initialize the header of a vec
+    /// Initialize the header of a vector
+    ///
+    /// ## Safety
+    /// Must only be used with a vector of the corresponding type.
     unsafe fn init_vec_header(
-        header: *mut Self::VecHeader,
-        mark_data: Id::MarkData,
-        type_info: Self::TypeInfoRef,
+        common_header: Self::CommonHeader,
         capacity: usize,
         initial_len: usize
     );
-    /// Initialize an object header
-    unsafe fn init_regular_header(
-        header: *mut Self::Header,
-        mark_data: Id::MarkData,
+    /// Create the part of the header which is shared by all objects.
+    ///
+    /// The common object header is also used by "regular" objects,
+    /// that don't need more specialized headers (i.e. not GcVec or GcArray)
+    ///
+    /// ## Safety
+    /// The returned header must only be used with an object
+    /// of the corresponding type.
+    ///
+    /// For example, it would be unsafe to put the header for `ArrayList`
+    /// on a `String`.
+    unsafe fn create_common_header(
+        mark_data: GC::MarkData,
         type_info: Self::TypeInfoRef
-    );
+    ) -> Self::CommonHeader;
     /// Initialize an array header
+    ///
+    /// ## Safety
+    /// The array header must only be used with an array of the correct type.
     unsafe fn init_array_header(
-        header: *mut Self::ArrayHeader,
-        mark_data: Id::MarkData,
-        type_info: Self::TypeInfoRef,
+        common_header: Self::CommonHeader,
         len: usize
     );
 }
@@ -76,18 +107,20 @@ pub unsafe trait MarkData: Clone + Sized + 'static {
 unsafe impl MarkData for () {}
 
 /// The header information that is common to all objects
-pub unsafe trait GcHeader {
+///
+/// ## Safety
+/// The header must be relied upon to maintain correct type information,
+/// so that garbage collectors can trace pointers without knowing their types.
+pub unsafe trait GcHeader<GC: GcInfo> {
+    /// The in-memory layout of the type.
+    const LAYOUT: Layout = Layout::new::<Self>();
     /// Information on the type
-    type TypeInfoRef: GcTypeInfo;
-    /// The internal mark data (used by the GC)
-    type MarkData: MarkData;
-    /// The id of the garbage collector that owns this format
-    type Id: CollectorId;
+    type TypeInfoRef: GcTypeInfo<GC>;
     /// The mark data for this object.
     ///
     /// This may have interior mutability,
     /// and be modified by the GC.
-    fn mark_data(&self) -> &'_ Self::MarkData;
+    fn mark_data(&self) -> &'_ GC::MarkData;
     /// Get the object's type information
     fn type_info(&self) -> Self::TypeInfoRef;
     /// Determine the size of the value (excluding header)
@@ -109,11 +142,18 @@ pub unsafe trait GcHeader {
     /// Dynamically drop the value in the header
     unsafe fn dynamic_drop(&self);
     /// Dynamically trace the value in the header
-    unsafe fn dynamic_trace(&self, visitor: &mut <Self::Id as CollectorId>::PreferredVisitor)
-        -> Result<(), <<Self::Id as CollectorId>::PreferredVisitor as GcVisitor>::Err>;
+    unsafe fn dynamic_trace(&self, visitor: &mut GC::PreferredVisitor) -> Result<(), GC::PreferredVisitorErr>;
 }
 /// The header for a vector
-pub unsafe trait GcVecHeader: GcHeader {
+pub unsafe trait GcVecHeader<GC: GcInfo> {
+    const LAYOUT: Layout = Layout::new::<Self>();
+    /// The common header, that is shared between all types
+    type CommonHeader: GcHeader<GC>;
+    /// Get a reference to the 'common' header,
+    /// that is shared with all other objects.
+    ///
+    /// This contains mark data and type information.
+    fn common_header(&self) -> &Self::CommonHeader;
     /// Get the length of the vector
     fn len(&self) -> usize;
     /// Set the length of the vector
@@ -127,7 +167,13 @@ pub unsafe trait GcVecHeader: GcHeader {
 }
 
 /// The header for an array
-pub unsafe trait GcArrayHeader: GcHeader {
+pub unsafe trait GcArrayHeader<GC: GcInfo> {
+    const LAYOUT: Layout = Layout::new::<Self>();
+    /// The common header, shared between all objects
+    type CommonHeader: GcHeader<GC>;
+    /// Access the common header,
+    /// that is shared with all other types of objects.
+    fn common_header(&self) -> &Self::CommonHeader;
     /// The length of the array.
     ///
     /// This must be immutable.
@@ -137,9 +183,11 @@ pub unsafe trait GcArrayHeader: GcHeader {
 }
 
 /// Runtime type information for the garbage collector
-pub unsafe trait GcTypeInfo: Clone {
+///
+/// TODO: Scrap this in favor of [GcHeader]??
+pub unsafe trait GcTypeInfo<GC: GcInfo>: Clone {
     /// The kind of header associated with this value.
-    type Header: GcHeader;
+    type Header: GcHeader<GC>;
     /// Determine the alignment of the type.
     ///
     /// This must be statically known,
