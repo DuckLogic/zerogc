@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use std::cell::RefCell;
 
 use zerogc_context::utils::AtomicCell;
-use crate::layout::{UnknownHeader};
+use zerogc::format::UnknownHeader;
 
 const DEBUG_INTERNAL_ALLOCATOR: bool = cfg!(zerogc_simple_debug_alloc);
 mod debug {

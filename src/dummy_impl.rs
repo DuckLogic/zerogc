@@ -1,7 +1,9 @@
 //! Dummy collector implementation for testing
 
-use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, DynTrace, GcArray};
-use std::ptr::{NonNull, Pointee, DynMetadata};
+use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, GcArray, DynTrace};
+use core::ptr::NonNull;
+use core::mem::MaybeUninit;
+use std::ptr::{Pointee, DynMetadata};
 
 /// Fake a [Gc] that points to the specified value
 ///
@@ -94,6 +96,10 @@ unsafe impl GcSystem for DummySystem {
     type Context = DummyContext;
 }
 unsafe impl GcSimpleAlloc for DummyContext {
+    unsafe fn alloc_uninit<'gc, T>(&'gc self) -> (Self::Id, *mut T) where T: GcSafe + 'gc {
+        (DummyCollectorId { _priv: () }, Box::leak(Box::<T>::new_uninit()) as *mut MaybeUninit<T> as *mut T)
+    }
+
     fn alloc<'gc, T>(&'gc self, value: T) -> crate::Gc<'gc, T, Self::Id>
         where T: GcSafe + 'gc {
         gc(Box::leak(Box::new(value)))
@@ -128,7 +134,8 @@ unsafe impl GcVisitor for NeverVisit {
         match *self {}
     }
 
-    unsafe fn visit_trait_object<'gc, T, Id>(&mut self, _gc: &mut crate::Gc<'gc, T, Id>) -> Result<(), Self::Err> where T: ?Sized + GcSafe + 'gc + Pointee<Metadata=DynMetadata<T>> + DynTrace, Id: CollectorId {
+    unsafe fn visit_trait_object<'gc, T, Id>(&mut self, _gc: &mut crate::Gc<'gc, T, Id>) -> Result<(), Self::Err>
+        where T: ?Sized + GcSafe + 'gc + Pointee<Metadata=DynMetadata<T>> + DynTrace, Id: CollectorId {
         match *self {}
     }
 
@@ -136,7 +143,7 @@ unsafe impl GcVisitor for NeverVisit {
         match *self {}
     }
 
-    unsafe fn visit_array<'gc, T, Id>(&mut self, _array: &mut GcArray<'gc, T, Id>) -> Result<(), Self::Err> where [T]: GcSafe + 'gc, Id: CollectorId {
+    unsafe fn visit_array<'gc, T, Id>(&mut self, _array: &mut GcArray<'gc, T, Id>) -> Result<(), Self::Err> where T: GcSafe + 'gc, Id: CollectorId {
         match *self {}
     }
 }
@@ -169,14 +176,21 @@ unsafe impl NullTrace for DummyCollectorId {}
 unsafe impl CollectorId for DummyCollectorId {
     type System = DummySystem;
     type RawVecRepr = crate::vec::repr::Unsupported;
-    type MarkData = ();
-    type PreferredVisitor = NeverVisit;
 
     #[inline]
     fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: GcSafe + ?Sized + 'gc, 'gc: 'a {
         const ID: DummyCollectorId = DummyCollectorId { _priv: () };
         &ID
     }
+
+    fn resolve_array_len<'gc, T>(_array: GcArray<'gc, T, Self>) -> usize where T: GcSafe + 'gc {
+        todo!()
+    }
+
+    fn resolve_array_id<'a, 'gc, T>(_gc: &'a GcArray<'gc, T, Self>) -> &'a Self where T: GcSafe + 'gc, 'gc: 'a {
+        todo!()
+    }
+
 
     unsafe fn gc_write_barrier<'gc, T, V>(
         _owner: &Gc<'gc, T>,

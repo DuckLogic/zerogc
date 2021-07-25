@@ -75,11 +75,8 @@ macro_rules! trait_object_trace {
 #[macro_export]
 macro_rules! field_offset {
     ($target:path, $($field:ident).+) => {{
-        const OFFSET: usize = {
-            let uninit = core::mem::MaybeUninit::<$target>::uninit();
-            unsafe { ((core::ptr::addr_of!((*uninit.as_ptr())$(.$field)*)) as *const u8)
-                .offset_from(uninit.as_ptr() as *const u8) as usize }
-        };
-        OFFSET
+        let uninit = core::mem::MaybeUninit::<$target>::uninit();
+        unsafe { ((core::ptr::addr_of!((*uninit.as_ptr())$(.$field)*)) as *const u8)
+            .offset_from(uninit.as_ptr() as *const u8) as usize }
     }};
 }

@@ -47,27 +47,23 @@
 /// by dereferencing the specified lock, since the macro only traces the item the lock dereferences to.
 /// This usually isn't the case with most locks and would be somewhat rare,
 /// but it's still a possibility that causes the macro to be unsafe.
-///
-///
-/// This delegates to `unsafe_gc_brand` to provide the (GcRebrand)[`crate::GcRebrand`] and (GcErase)[`crate::GcErase`] implementation,
-/// so that could also trigger undefined behavior.
 #[macro_export]
 macro_rules! unsafe_trace_lock {
     ($target:ident, target = $target_type:ident; |$get_mut:ident| $get_mut_expr:expr, |$lock:ident| $acquire_guard:expr) => {
-        unsafe_impl_gc!(
+        unsafe_gc_impl!(
             target => $target<$target_type>,
-            params = [$target_type],
+            params => [$target_type],
             null_trace => { where $target_type: NullTrace },
-            NEEDS_TRACE => true,
+            NEEDS_TRACE => $target_type::NEEDS_TRACE,
             NEEDS_DROP => $target_type::NEEDS_DROP /* if our inner type needs a drop */
-                || core::mem::needs_drop::<$target<()>>; // Or we have unconditional drop (std-mutex)
+                || core::mem::needs_drop::<$target<()>>(), // Or we have unconditional drop (std-mutex)
             trace_mut => |self, visitor| {
                 let $get_mut = self;
                 let value: &mut $target_type = $get_mut_expr;
                 visitor.visit::<$target_type>(value)
             },
             trace_immutable => |self, visitor| {
-                if !Self::NEEDS_TRACE { return Ok(()) };
+                if !<Self as Trace>::NEEDS_TRACE { return Ok(()) };
                 // We can immutably visit a lock by acquiring it
                 let $lock = self;
                 #[allow(unused_mut)]
@@ -135,3 +131,5 @@ mod stdalloc;
 mod stdlib;
 #[cfg(feature = "indexmap")]
 mod indexmap;
+#[cfg(feature = "parking_lot")]
+mod parking_lot;

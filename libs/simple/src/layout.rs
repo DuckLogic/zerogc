@@ -8,21 +8,13 @@
 //!
 //! However, `zerogc-simple` is committed to a stable ABI, so this should (hopefully)
 //! be relatively well documented.
-use std::mem::{self, };
-use std::marker::PhantomData;
 use std::cell::Cell;
-use std::ffi::c_void;
-use std::alloc::Layout;
+use std::ptr::NonNull;
 
-use zerogc::{GcSafe, Trace};
-use zerogc::vec::repr::{GcVecRepr,};
-
-use zerogc::field_offset;
 use zerogc_derive::{NullTrace, unsafe_gc_impl};
 
-use crate::{RawMarkState, CollectorId, DynTrace, MarkVisitor};
-use std::ptr::NonNull;
-use zerogc::format::{ObjectFormat, GcHeader};
+use crate::{RawMarkState, CollectorId, SimpleCollectorContext, RawSimpleCollector, ObjectFormat};
+use zerogc::format::{ObjectFormat as ObjectFormatAPI, GcHeader, GcInfo, MarkData, GcCommonHeader, GcTypeInfo, HeaderLayout};
 
 /// Everything but the lower 2 bits of mark data are unused
 /// for CollectorId.
@@ -35,35 +27,37 @@ const STATE_MASK: usize = 0b11;
 /// As of right now, the simple collector has no extra room
 /// for any user-defined metadata in this type.
 #[repr(transparent)]
-#[derive(NullTrace)]
+#[derive(NullTrace, Clone)]
 pub struct SimpleMarkData {
     /// We're assuming that the collector is single threaded (which is true for now)
     data: Cell<usize>,
-    #[zerogc(unsafe_skip_trace)]
-    fmt: PhantomData<CollectorId>
 }
 
 impl SimpleMarkData {
     /// Create mark data from a specified snapshot
     #[inline]
-    pub fn from_snapshot(snapshot: SimpleMarkDataSnapshot) -> Self {
+    pub fn from_snapshot<Fmt: ObjectFormat>(snapshot: SimpleMarkDataSnapshot<Fmt>) -> Self {
         SimpleMarkData {
             data: Cell::new(snapshot.packed()),
-            fmt: PhantomData
         }
     }
+
     #[inline]
-    pub(crate) fn update_raw_state(&self, updated: RawMarkState) {
-        let mut snapshot = self.load_snapshot();
+    pub(crate) unsafe fn update_raw_state<Fmt: ObjectFormat>(&self, updated: RawMarkState) {
+        let mut snapshot = self.load_snapshot::<Fmt>();
         snapshot.state = updated;
         self.data.set(snapshot.packed());
     }
     /// Load a snapshot of the object's current marking state
+    ///
+    /// ## Safety
+    /// Unsafely assumes the format matches.
     #[inline]
-    pub fn load_snapshot(&self) -> SimpleMarkDataSnapshot {
-        unsafe { SimpleMarkDataSnapshot::from_packed(self.data.get()) }
+    pub unsafe fn load_snapshot<Fmt: ObjectFormat>(&self) -> SimpleMarkDataSnapshot<Fmt> {
+        SimpleMarkDataSnapshot::from_packed(self.data.get())
     }
 }
+unsafe impl MarkData for SimpleMarkData {}
 
 /// A single snapshot of the state of the [SimpleMarkData]
 ///
@@ -74,8 +68,8 @@ pub struct SimpleMarkDataSnapshot<Fmt: ObjectFormat> {
     #[cfg(feature = "multiple-collectors")]
     pub(crate) collector_id_ptr: *mut CollectorId<Fmt>
 }
-impl SimpleMarkDataSnapshot {
-    pub(crate) fn new(state: RawMarkState, collector_id_ptr: *mut CollectorId) -> Self {
+impl<Fmt: ObjectFormat> SimpleMarkDataSnapshot<Fmt> {
+    pub(crate) fn new(state: RawMarkState, collector_id_ptr: *mut CollectorId<Fmt>) -> Self {
         #[cfg(feature = "multiple-collectors")] {
             SimpleMarkDataSnapshot { state, collector_id_ptr }
         }
@@ -88,7 +82,7 @@ impl SimpleMarkDataSnapshot {
     fn packed(&self) -> usize {
         let base: usize;
         #[cfg(feature = "multiple-collectors")] {
-            base = self.collector_id_ptr as *const CollectorId as usize;
+            base = self.collector_id_ptr as *const CollectorId<Fmt> as usize;
         }
         #[cfg(not(feature = "multiple-collectors"))] {
             base = 0;
@@ -101,7 +95,7 @@ impl SimpleMarkDataSnapshot {
         let state = RawMarkState::from_byte((packed & STATE_MASK) as u8);
         let id_bytes: usize = packed & !STATE_MASK;
         #[cfg(feature="multiple-collectors")] {
-            let collector_id_ptr = id_bytes as *mut CollectorId;
+            let collector_id_ptr = id_bytes as *mut CollectorId<Fmt>;
             SimpleMarkDataSnapshot { state, collector_id_ptr }
         }
         #[cfg(not(feature = "multiple-collectors"))] {
@@ -125,10 +119,10 @@ unsafe_gc_impl!(
 );
 
 #[repr(C)]
-pub(crate) struct BigGcObject<Fmt: ObjectFormat<CollectorId<Fmt>>> {
-    pub(crate) header: NonNull<Fmt::VecHeader>
+pub(crate) struct BigGcObject<Fmt: ObjectFormat> {
+    pub(crate) header: NonNull<Fmt::CommonHeader>
 }
-impl<Fmt: ObjectFormat<CollectorId<Fmt>>> BigGcObject<Fmt> {
+impl<Fmt: ObjectFormat> BigGcObject<Fmt> {
     #[inline]
     pub unsafe fn header(&self) -> &Fmt::CommonHeader {
         self.header.as_ref()
@@ -139,14 +133,14 @@ impl<Fmt: ObjectFormat<CollectorId<Fmt>>> BigGcObject<Fmt> {
         BigGcObject { header: NonNull::new_unchecked(header) }
     }
 }
-impl<Fmt: ObjectFormat<CollectorId<Fmt>>> Drop for BigGcObject<Fmt> {
+impl<Fmt: ObjectFormat> Drop for BigGcObject<Fmt> {
     fn drop(&mut self) {
         unsafe {
             let type_info = self.header().type_info();
             {
                 self.header().dynamic_drop();
             }
-            let layout = type_info.determine_total_layout(self.header.as_ptr());
+            let layout = type_info.determine_total_layout(self.header.as_ref());
             let actual_header = type_info.header_layout()
                 .from_common_header(self.header.as_ptr());
             std::alloc::dealloc(actual_header.cast(), layout);
@@ -154,86 +148,13 @@ impl<Fmt: ObjectFormat<CollectorId<Fmt>>> Drop for BigGcObject<Fmt> {
     }
 }
 
-/// The raw representation of a vector in the simple collector
-///
-/// NOTE: Length and capacity are stored implicitly in the [GcVecHeader]
-#[repr(C)]
-pub struct SimpleVecRepr<T: GcSafe, Fmt: ObjectFormat<CollectorId<Fmt>>> {
-    marker: PhantomData<T>,
+/// The implementation of [GcInfo] for the simple collector
+#[derive(zerogc_derive::NullTrace)]
+pub struct SimpleCollectorInfo {
 }
-impl<T: GcSafe, Fmt: ObjectFormat<CollectorId<Fmt>>> SimpleVecRepr<T, Fmt> {
-    #[inline]
-    fn header(&self) -> *mut Fmt::VecHeader {
-        unsafe {
-            Fmt::resolve_vec_header(self) as *const Fmt::VecHeader as *mut Fmt::VecHeader
-        }
-    }
+unsafe impl GcInfo for SimpleCollectorInfo {
+    type PreferredVisitor<Fmt: ObjectFormat> = crate::MarkVisitor<'static, Fmt>;
+    type PreferredVisitorErr = !;
+    type MarkData = SimpleMarkData;
+    const IS_MOVING: bool = false;
 }
-unsafe impl<T: GcSafe, Fmt: ObjectFormat<CollectorId<Fmt>>> GcVecRepr for SimpleVecRepr<T, Fmt> {
-    /// Right now, there is no stable API for in-place re-allocation
-    const SUPPORTS_REALLOC: bool = false;
-
-    #[inline]
-    fn element_layout(&self) -> Layout {
-        Layout::new::<T>()
-    }
-
-    #[inline]
-    fn len(&self) -> usize {
-        unsafe { (*self.header()).len.get() }
-    }
-
-    #[inline]
-    unsafe fn set_len(&self, len: usize) {
-        debug_assert!(len <= self.capacity());
-        (*self.header()).len.set(len);
-    }
-
-    #[inline]
-    fn capacity(&self) -> usize {
-        unsafe { (*self.header()).capacity }
-    }
-
-    #[inline]
-    unsafe fn ptr(&self) -> *const c_void {
-        self as *const Self as *const c_void // We are actually just a GC pointer to the value ptr
-    }
-
-    unsafe fn unchecked_drop<ActualT: GcSafe>(&mut self) {
-        std::ptr::drop_in_place::<[ActualT]>(core::ptr::slice_from_raw_parts_mut(
-            self.ptr() as *mut ActualT,
-            self.len()
-        ))
-    }
-}
-unsafe_gc_impl!(
-    target => SimpleVecRepr<T, Fmt>,
-    params => [T: GcSafe, Fmt: ObjectFormat<CollectorId<Fmt>>],
-    NEEDS_TRACE => T::NEEDS_TRACE,
-    NEEDS_DROP => T::NEEDS_DROP,
-    null_trace => { where T: ::zerogc::NullTrace },
-    trace_mut => |self, visitor| {
-        // Trace our innards
-        unsafe {
-            let start: *mut T = self.ptr() as *const T as *mut T;
-            for i in 0..self.len() {
-                visitor.visit(&mut *start.add(i))?;
-            }
-        }
-        Ok(())
-    },
-    trace_immutable => |self, visitor| {
-        // Trace our innards
-        unsafe {
-            let start: *mut T = self.ptr() as *const T as *mut T;
-            for i in 0..self.len() {
-                visitor.visit_immutable(&*start.add(i))?;
-            }
-        }
-        Ok(())
-    }
-);
-
-
-/// Marker type for an unknown header
-pub(crate) struct UnknownHeader(());

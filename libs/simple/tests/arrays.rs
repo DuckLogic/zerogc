@@ -26,16 +26,16 @@ fn array() {
     let collector = test_collector();
     let mut context = collector.into_context();
     let array1 = context.alloc_slice_fill_copy(5, 12u32);
-    assert_eq!(*array1.value(), *vec![12u32; 5]);
+    assert_eq!(*array1.as_slice(), *vec![12u32; 5]);
     safepoint!(context, ());
     const TEXT: &[u8] = b"all cows eat grass";
     let array_text = context.alloc_slice_copy(TEXT);
     let array_none: GcArray<Option<usize>> = context.alloc_slice_none(12);
-    for val in array_none.value() {
+    for val in array_none.as_slice() {
         assert_eq!(*val, None);
     }
     let array_text = safepoint!(context,  array_text);
-    assert_eq!(array_text.0.value(), TEXT);
+    assert_eq!(array_text.as_slice(), TEXT);
     let mut nested_trace = Vec::new();
     let mut last = None;
     for i in 0..16 {
@@ -48,7 +48,7 @@ fn array() {
     }
     let nested_trace = context.alloc_slice_copy(nested_trace.as_slice());
     let nested_trace: GcArray<Gc<Dummy>> = safepoint!(context, nested_trace);
-    for (idx, val) in nested_trace.value().iter().enumerate() {
+    for (idx, val) in nested_trace.as_slice().iter().enumerate() {
         assert_eq!(val.val, idx, "Invalid val: {:?}", val);
         if let Some(last) = val.inner {
             assert_eq!(last.val, idx - 1);

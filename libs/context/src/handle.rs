@@ -18,6 +18,8 @@ const INITIAL_HANDLE_CAPACITY: usize = 64;
 /// A [RawCollectorImpl] that supports handles
 pub unsafe trait RawHandleImpl: RawCollectorImpl {
     fn handle_list(&self) -> &GcHandleList<Self>;
+    /// The underlying [ObjectFormat] used to allocate and manage objects.
+    type Fmt: ObjectFormat;
 }
 
 /// Concurrent list of [GcHandle]s
@@ -98,7 +100,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
     /// The returned handle must be fully initialized
     /// before the next collection begins.
     #[inline]
-    pub(crate) unsafe fn alloc_raw_handle(&self, header: *mut <C::Fmt as ObjectFormat<CollectorId<C>>>::CommonHeader) -> &GcRawHandle<C> {
+    pub(crate) unsafe fn alloc_raw_handle(&self, header: *mut <C::Fmt as ObjectFormat>::CommonHeader) -> &GcRawHandle<C> {
         // TODO: Should we weaken these orderings?
         let mut slot = self.last_free_slot.load(Ordering::Acquire);
         while !slot.is_null() {
@@ -151,7 +153,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
     /// if the free-list is empty
     #[cold]
     #[inline(never)]
-    unsafe fn alloc_handle_fallback(&self, header: *mut <C::Fmt as ObjectFormat<CollectorId<C>>>::CommonHeader) -> &GcRawHandle<C> {
+    unsafe fn alloc_handle_fallback(&self, header: *mut <C::Fmt as ObjectFormat>::CommonHeader) -> &GcRawHandle<C> {
         let mut bucket = self.last_bucket.load(Ordering::Acquire);
         loop {
             // TODO: Should we be retrying the free-list?
@@ -228,7 +230,7 @@ impl<C: RawHandleImpl> GcHandleList<C> {
     /// Now that's behind a layer of abstraction,
     /// the unsafety has technically been moved to the caller.
     pub unsafe fn trace<F, E>(&mut self, mut visitor: F) -> Result<(), E>
-        where F: FnMut(*mut <C::Fmt as ObjectFormat<CollectorId<C>>>::CommonHeader) -> Result<(), E> {
+        where F: FnMut(*mut <C::Fmt as ObjectFormat>::CommonHeader) -> Result<(), E> {
         /*
          * TODO: This fence seems unnecessary since we should
          * already have exclusive access.....
@@ -290,7 +292,7 @@ impl<C: RawHandleImpl> GcHandleBucket<C> {
     ///
     /// ## Safety
     /// See docs on [GcHandleList::alloc_raw_bucket]
-    unsafe fn blindly_alloc_slot(&self, header: *mut <C::Fmt as ObjectFormat<CollectorId<C>>>::CommonHeader) -> Option<&HandleSlot<C>> {
+    unsafe fn blindly_alloc_slot(&self, header: *mut <C::Fmt as ObjectFormat>::CommonHeader) -> Option<&HandleSlot<C>> {
         let last_alloc = self.last_alloc.load(Ordering::Relaxed);
         for (i, slot) in self.slots.iter().enumerate()
             .skip(last_alloc) {
@@ -358,7 +360,7 @@ pub struct GcRawHandle<C: RawHandleImpl> {
     ///
     /// The underlying value can only be safely accessed
     /// if there isn't a collection in progress
-    header: AtomicPtr<<C::Fmt as ObjectFormat<CollectorId<C>>>::CommonHeader>,
+    header: AtomicPtr<<C::Fmt as ObjectFormat>::CommonHeader>,
     /// The reference count to the handle
     ///
     /// If this is zero the value can be freed
@@ -375,7 +377,7 @@ impl<C: RawHandleImpl> GcRawHandle<C> {
     /// - It is assumed that the appropriate atomic fences (if any)
     ///   have already been applied (TODO: Don't we have exclusive access?)
     unsafe fn trace_inner<F, E>(&self, trace: &mut F) -> Result<(), E>
-        where F: FnMut(*mut <C::Fmt as ObjectFormat<CollectorId<C>>>::CommonHeader) -> Result<(), E> {
+        where F: FnMut(*mut <C::Fmt as ObjectFormat>::CommonHeader) -> Result<(), E> {
         let header = self.header.load(Ordering::Relaxed);
         if header.is_null() {
             debug_assert_eq!(

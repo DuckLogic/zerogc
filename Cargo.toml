@@ -12,8 +12,9 @@ readme = "README.md"
 scopeguard = "1.1"
 # Manually included tracing support for third party libraries
 # Providing support for these important libraries,
-# gives zerogc 'batteries included' support.
+# gives zerogc batteries included support.
 indexmap = { version = "1.6", optional = true }
+parking_lot = { version = "0.11", optional = true }
 # Used for macros
 zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.4" }
 
@@ -21,7 +22,7 @@ zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.4" }
 members = ["libs/simple", "libs/derive", "libs/context"]
 
 [features]
-default = ["std"]
+default = ["std", "object-format"]
 # Depend on the standard library (optional)
 #
 # This implements tracing
@@ -31,3 +32,10 @@ std = ["alloc"]
 #
 # This implements `Trace` for `Box` and collections like `Vec`
 alloc = []
+# Enables the object format API
+#
+# This may not be nessicarry (or sufficient) for all collectors.
+# For example, the Memory Pool System has its own interface to object formats
+#
+# This currently requires the `generic_associated_types` feature
+object-format = []

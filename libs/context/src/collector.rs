@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 
 use slog::{Logger, o};
 
-use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc, NullTrace, TraceImmutable, GcVisitor};
+use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc, NullTrace, TraceImmutable, GcVisitor, GcArray};
 
 use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
@@ -25,8 +25,6 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     type DynTracePtr: Copy + Debug + 'static;
     /// The configuration
     type Config: Sized + Default;
-    /// The underlying [ObjectFormat] used to allocate and manage objects.
-    type Fmt: ObjectFormat<CollectorId<Self>>;
 
     /// A pointer to this collector
     ///
@@ -40,11 +38,6 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     type RawContext: RawContext<Self>;
     /// The raw representation of a vec
     type RawVecRepr: GcVecRepr;
-    /// The internal state for marking
-    type MarkData: MarkData;
-    /// The preferred implementation of [GcVisitor],
-    /// to specialize internal implementations
-    type PreferredVisitor: GcVisitor;
 
     /// True if this collector is a singleton
     ///
@@ -57,6 +50,12 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
 
     fn id_for_gc<'a, 'gc, T>(gc: &'a Gc<'gc, T, CollectorId<Self>>) -> &'a CollectorId<Self>
         where 'gc: 'a, T: GcSafe + ?Sized + 'gc;
+
+    fn id_for_array<'a, 'gc, T>(gc: &'a GcArray<'gc, T, CollectorId<Self>>) -> &'a CollectorId<Self>
+        where 'gc: 'a, T: GcSafe + 'gc;
+
+    fn resolve_array_len<'gc, T>(gc: GcArray<'gc, T, CollectorId<Self>>) -> usize
+        where T: GcSafe + 'gc;
 
     /// Convert the specified value into a dyn pointer
     unsafe fn as_dyn_trace_pointer<T: Trace>(t: *mut T) -> Self::DynTracePtr;
@@ -293,12 +292,20 @@ impl<C: RawCollectorImpl> CollectorId<C> {
 unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     type System = CollectorRef<C>;
     type RawVecRepr = C::RawVecRepr;
-    type MarkData = C::MarkData;
-    type PreferredVisitor = C::PreferredVisitor;
 
     #[inline]
     fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self where T: GcSafe + ?Sized + 'gc, 'gc: 'a {
         C::id_for_gc(gc)
+    }
+
+    #[inline]
+    fn resolve_array_len<'gc, T>(gc: GcArray<'gc, T, Self>) -> usize where T: GcSafe + 'gc {
+        C::resolve_array_len(gc)
+    }
+
+    #[inline]
+    fn resolve_array_id<'a, 'gc, T>(gc: &'a GcArray<'gc, T, Self>) -> &'a Self where T: GcSafe + 'gc, 'gc: 'a {
+        C::id_for_array(gc)
     }
 
 
@@ -364,7 +371,7 @@ impl<C: RawCollectorImpl> WeakCollectorRef<C> {
 }
 
 pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
-    fn alloc<'gc, T: GcSafe + 'gc>(context: &'gc CollectorContext<Self>, value: T) -> Gc<'gc, T, CollectorId<Self>>;
+    unsafe fn alloc_uninit<'gc, T: GcSafe + 'gc>(context: &'gc CollectorContext<Self>) -> (CollectorId<Self>, *mut T);
     unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> (CollectorId<Self>, *mut T)
         where T: GcSafe + 'gc;
     fn alloc_vec<'gc, T>(context: &'gc CollectorContext<Self>) -> GcVec<'gc, T, CollectorContext<Self>>
@@ -375,9 +382,9 @@ pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
 unsafe impl<C> GcSimpleAlloc for CollectorContext<C>
     where C: RawSimpleAlloc {
     #[inline]
-    fn alloc<'gc, T>(&'gc self, value: T) -> Gc<'gc, T, Self::Id>
+    unsafe fn alloc_uninit<'gc, T>(&'gc self) -> (CollectorId<C>, *mut T)
         where T: GcSafe + 'gc {
-        C::alloc(self, value)
+        C::alloc_uninit(self)
     }
 
     #[inline]
