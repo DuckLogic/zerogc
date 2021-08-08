@@ -90,7 +90,7 @@ unsafe_gc_impl!(
     },
     erased_type => GcCell<T::Erased>,
     branded_type => GcCell<T::Branded>,
-    null_trace => { where T: GcSafe + Copy + NullTrace }
+    null_trace => { where T: GcSafe + Copy + NullTrace },
     trace_mut => |self, visitor| {
         /*
          * GcCell can only support mutating types that are `NullTrace`,

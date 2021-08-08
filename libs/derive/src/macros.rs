@@ -7,29 +7,19 @@
 use std::collections::HashSet;
 
 use proc_macro2::{Ident, TokenStream, TokenTree, Span};
+use proc_macro_kwargs::parse::{Syn, NestedList};
 use syn::{
-    GenericParam, WhereClause, Type, Expr, Error, Token, braced, bracketed,
-    Generics, TypeParamBound, WherePredicate, PredicateType, parse_quote,
-    GenericArgument
-};
-use syn::parse::{Parse, ParseStream};
+    Error, Expr, GenericArgument, GenericParam, Generics, PredicateType,
+    Token, Type, TypeParamBound, WhereClause, WherePredicate,
+    braced, parse_quote
+ };
+use syn::parse::{ParseStream};
 use syn::spanned::Spanned;
+use proc_macro_kwargs::{MacroArg, MacroKeywordArgs};
 
 use quote::{quote, quote_spanned};
 use super::zerogc_crate;
 use syn::ext::IdentExt;
-
-#[derive(Debug)]
-struct GenericParamInput(Vec<GenericParam>);
-impl Parse for GenericParamInput {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let inner;
-        bracketed!(inner in input);
-        let res = inner
-            .parse_terminated::<_, Token![,]>(GenericParam::parse)?;
-        Ok(GenericParamInput(res.into_iter().collect()))
-    }
-}
 
 fn empty_clause() -> WhereClause {
     WhereClause {
@@ -38,28 +28,113 @@ fn empty_clause() -> WhereClause {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, MacroKeywordArgs)]
 pub struct MacroInput {
     /// The target type we are implementing
     ///
     /// This has unconstrained use of the parameters defined in `params`
+    #[kwarg(rename = "target")]
     target_type: Type,
     /// The generic parameters (both types and lifetimes) that we want to
     /// declare for each implementation
     ///
-    /// This must not conflict with our internal names ;)
-    params: Vec<GenericParam>,
+    /// This must not conflict with our internal generic names ;)
+    params: NestedList<GenericParam>,
     /// Custom bounds provided for each
     ///
     /// All of these bounds are optional.
     /// This option can be omitted,
     /// giving the equivalent of `bounds = {}`
+    #[kwarg(optional)]
     bounds: CustomBounds,
-    /// The standard arguments to the macro
-    options: StandardOptions,
-    visit: VisitImpl
+    /// Requirements on implementing NullTrace
+    ///
+    /// This is unsafe, and completely unchecked.
+    null_trace: TraitRequirements,
+    /// The associated type implemented as `GcRebrand::Branded`
+    #[kwarg(optional)]
+    branded_type: Option<Type>,
+    /// The associated type implemented as `GcErase::Erased`
+    #[kwarg(optional)]
+    erased_type: Option<Type>,
+    /// A (constant) expression determining whether the array needs to be traced
+    #[kwarg(rename = "NEEDS_TRACE")]
+    needs_trace: Expr,
+    /// A (constant) expression determining whether the type should be dropped
+    #[kwarg(rename = "NEEDS_DROP")]
+    needs_drop: Expr,
+    /// The fixed id of the collector, or `None` if the type can work with any collector
+    #[kwarg(optional)]
+    collector_id: Option<Type>,
+    /// An override for the standard `visit_inside_gc` impl.
+    ///
+    /// This is necessary if the type is not `Sized`
+    #[kwarg(optional)]
+    visit_inside_gc: Option<VisitInsideGcClosure>,
+    /*
+     * The following three arguments are parsed
+     * into a 'VisitImpl' via the 'parse_visitor' function.
+     *
+     * TODO: Make the name for this option 'visit_template'
+     *
+     * I feel like that's a more accurate description
+     * of its function.....
+     */
+    #[kwarg(optional, rename = "visit")]
+    raw_visit_template: Option<VisitClosure>,
+    #[kwarg(optional, rename = "trace_mut")]
+    trace_mut_closure: Option<VisitClosure>,
+    #[kwarg(optional, rename = "trace_immutable")]
+    trace_immutable_closure: Option<VisitClosure>
 }
 impl MacroInput {
+    fn parse_visitor(&self) -> syn::Result<VisitImpl> {
+        if let Some(ref visit_closure) = self.raw_visit_template {
+            if let Some(ref closure) = self.trace_immutable_closure.as_ref()
+                .or(self.trace_mut_closure.as_ref()) {
+                return Err(Error::new(
+                    closure.0.body.span(),
+                    "Cannot specify specific closure (trace_mut/trace_immutable) in addition to `visit`"
+                ))
+            }
+            Ok(VisitImpl::Generic { generic_impl: visit_closure.0.body.clone() })
+        } else {
+            let trace_closure = self.trace_mut_closure.clone().ok_or_else(|| {
+                Error::new(
+                    Span::call_site(),
+                    "Either a `visit` or a `trace_mut` impl is required for Trace types"
+                )
+            })?;
+            let trace_immut_closure = match self.bounds.trace_immutable {
+                Some(TraitRequirements::Never) => {
+                    if let Some(ref closure) = self.trace_immutable_closure {
+                        return Err(Error::new(
+                            closure.0.body.span(),
+                            "Specified a `trace_immutable` implementation even though TraceImmutable is never implemented"
+                        ))
+                    } else {
+                        None
+                    }
+                },
+                _ => {
+                    let target_span = self.target_type.span();
+                    // we maybe implement `TraceImmutable` some of the time
+                    Some(self.trace_immutable_closure.clone().ok_or_else(|| {
+                        Error::new(
+                            target_span,
+                            "Requires a `trace_immutable` implementation"
+                        )
+                    })?)
+                }
+            };
+            Ok(VisitImpl::Specific {
+                mutable: ::syn::parse2(trace_closure.0.body)?,
+                immutable: trace_immut_closure
+                    .map(|closure| ::syn::parse2::<Expr>(closure.0.body))
+                    .transpose()?
+            })
+        }
+    }
     fn basic_generics(&self) -> Generics {
         let mut generics = Generics::default();
         generics.params.extend(self.params.iter().cloned());
@@ -73,7 +148,7 @@ impl MacroInput {
         let trace_immutable_impl = self.expand_trace_impl(false)?
             .unwrap_or_default();
         let gcsafe_impl = self.expand_gcsafe_impl();
-        let null_trace_clause = match self.options.null_trace {
+        let null_trace_clause = match self.null_trace {
             TraitRequirements::Always => Some(empty_clause()),
             TraitRequirements::Where(ref clause) => Some(clause.clone()),
             TraitRequirements::Never => None
@@ -104,22 +179,23 @@ impl MacroInput {
         let zerogc_crate = zerogc_crate();
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
+        let generic_params = self.params.iter().cloned().collect::<Vec<_>>();
         let clause = if mutable {
-            self.bounds.trace_where_clause(&self.params)
+            self.bounds.trace_where_clause(&generic_params)
         } else {
-            match self.bounds.trace_immutable_clause(&self.params) {
+            match self.bounds.trace_immutable_clause(&generic_params) {
                 Some(clause) => clause,
                 None => return Ok(None), // They are requesting that we dont implement
             }
         };
         generics.make_where_clause().predicates
             .extend(clause.predicates);
-        let visit_impl = self.visit.expand_impl(mutable)?;
+        let visit_impl = self.parse_visitor()?.expand_impl(mutable)?;
         let (impl_generics, _, where_clause) = generics.split_for_impl();
         let trait_name = if mutable { quote!(#zerogc_crate::Trace) } else { quote!(#zerogc_crate::TraceImmutable) };
         let visit_method_name = if mutable { quote!(visit) } else { quote!(visit_immutable) };
         let needs_drop_const = if mutable {
-            let expr = &self.options.needs_drop;
+            let expr = &self.needs_drop;
             Some(quote!(const NEEDS_DROP: bool = {
                 use #zerogc_crate::Trace;
                 #expr
@@ -128,7 +204,7 @@ impl MacroInput {
             None
         };
         let needs_trace_const = if mutable {
-            let expr = &self.options.needs_trace;
+            let expr = &self.needs_trace;
             Some(quote!(const NEEDS_TRACE: bool = {
                 // Import the trait so we can access `T::NEEDS_TRACE`
                 use #zerogc_crate::Trace;
@@ -138,7 +214,7 @@ impl MacroInput {
             None
         };
         let visit_inside_gc = if mutable {
-            let expr = match self.options.visit_inside_gc {
+            let expr = match self.visit_inside_gc {
                 Some(ref expr) => expr.0.body.clone(),
                 None => quote!(visitor.visit_gc(gc))
             };
@@ -178,8 +254,9 @@ impl MacroInput {
         let zerogc_crate = zerogc_crate();
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
+        let generic_params = self.params.iter().cloned().collect::<Vec<_>>();
         generics.make_where_clause().predicates
-            .extend(match self.bounds.gcsafe_clause(&self.params) {
+            .extend(match self.bounds.gcsafe_clause(&generic_params) {
                 Some(clause) => clause.predicates,
                 None => return None // They are requesting we dont implement
             });
@@ -189,11 +266,12 @@ impl MacroInput {
         })
     }
     fn expand_brand_impl(&self, rebrand: bool /* true => rebrand, false => erase */) -> Result<Option<TokenStream>, Error> {
+        let generic_params = self.params.iter().cloned().collect::<Vec<_>>();
         let zerogc_crate = zerogc_crate();
         let requirements = if rebrand { self.bounds.rebrand.clone() } else { self.bounds.erase.clone() };
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
-        let id_type: Type = match self.options.collector_id {
+        let id_type: Type = match self.collector_id {
             Some(ref tp) => tp.clone(),
             None => {
                 generics.params.push(parse_quote!(Id: #zerogc_crate::CollectorId));
@@ -238,11 +316,11 @@ impl MacroInput {
                         .predicates.push(WherePredicate::Type(PredicateType {
                         lifetimes: None,
                         bounded_ty: if rebrand {
-                            self.options.branded_type.clone().unwrap_or_else(|| {
+                            self.branded_type.clone().unwrap_or_else(|| {
                                 parse_quote!(<#type_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded)
                             })
                         } else {
-                            self.options.erased_type.clone().unwrap_or_else(|| {
+                            self.erased_type.clone().unwrap_or_else(|| {
                                 parse_quote!(<#type_name as #zerogc_crate::GcErase<'min, Id>>::Erased)
                             })
                         },
@@ -268,7 +346,7 @@ impl MacroInput {
              * TODO: Do we need to apply to the `Branded`/`Erased` types
              */
             generics.make_where_clause().predicates
-                .extend(self.bounds.trace_where_clause(&self.params).predicates);
+                .extend(self.bounds.trace_where_clause(&generic_params).predicates);
             // Generate `Sized` bounds for all params
             for param in &self.params {
                 if let GenericParam::Type(ref tp) = param {
@@ -319,7 +397,7 @@ impl MacroInput {
             _ => None
         }).collect::<HashSet<_>>();
         let associated_type = if rebrand {
-            let branded = self.options.branded_type.clone().map_or_else(|| {
+            let branded = self.branded_type.clone().map_or_else(|| {
                 rewrite_brand_trait(
                     &self.target_type, "GcRebrand",
                     &target_params,
@@ -329,7 +407,7 @@ impl MacroInput {
             }, Ok)?;
             quote!(type Branded = #branded;)
         } else {
-            let erased = Ok(self.options.erased_type.clone()).transpose().unwrap_or_else(|| {
+            let erased = Ok(self.erased_type.clone()).transpose().unwrap_or_else(|| {
                 rewrite_brand_trait(
                     &self.target_type, "GcErase",
                     &target_params,
@@ -347,155 +425,7 @@ impl MacroInput {
     }
 }
 
-macro_rules! __full_field_ty {
-    ($field_type:ty, opt) => (Option<$field_type>);
-    ($field_type:ty,) => ($field_type);
-}
-macro_rules! __unwrap_field_ty {
-    ($opt_name:literal, $span:expr, $val:ident, $field_ty:ty, opt) => ($val);
-    ($opt_name:literal, $span:expr, $val:ident, $field_ty:ty,) => (match $val {
-        Some(inner) => inner,
-        None => return Err(Error::new(
-            $span, concat!("Missing required option: ", $opt_name)
-        ))
-    });
-}
-
-macro_rules! parse_field_opts {
-    ($parser:ident, {
-        $($opt_name:literal [$field_type:ty] $($suffix:ident)? => $field_name:ident;)*
-    }) => (parse_field_opts!($parser, complete = true, {
-        $($opt_name [$field_type] $($suffix)? => $field_name;)*
-    }));
-    ($parser:ident, complete = $complete:literal, {
-        $($opt_name:literal [$field_type:ty] $($suffix:ident)? => $field_name:ident;)*
-    }) => {{
-        assert!($complete, "Incomplte is unsupported!"); // NOTE: How would we parse an unknown type?
-        struct ParsedFields {
-            $($field_name: __full_field_ty!($field_type, $($suffix)?)),*
-        }
-        $(let mut $field_name = Option::<$field_type>::None;)*
-        #[allow(unused)]
-        let start_span = $parser.span();
-        while !$parser.is_empty() {
-            let ident = $parser.parse::<Ident>()
-                .map_err(|e| Error::new(e.span(), "Expected an option name"))?;
-            let s = ident.to_string();
-            match &*s {
-                $($opt_name => {
-                    if $field_name.is_some() {
-                        return Err(Error::new(
-                            ident.span(),
-                            concat!("Duplicate values specified for option: ", $opt_name),
-                        ))
-                    }
-                    $parser.parse::<Token![=>]>()?;
-                    $field_name = Some($parser.parse::<$field_type>()?);
-                    if $parser.peek(Token![,]) {
-                        $parser.parse::<Token![,]>()?;
-                    }
-                },)*
-                _ => {
-                    return Err(Error::new(
-                        ident.span(),
-                        format!("Unknown option name: {}", ident)
-                    ))
-                }
-            }
-        }
-        ParsedFields {
-            $($field_name: __unwrap_field_ty!($opt_name, start_span, $field_name, $field_type, $($suffix)?)),*
-        }
-    }};
-}
-impl Parse for MacroInput {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let res = parse_field_opts!(input, {
-            "target" [Type] => target_type;
-            "params" [GenericParamInput] => params;
-            "bounds" [CustomBounds] opt => bounds;
-            // StandardOptions
-            "null_trace" [TraitRequirements] => null_trace;
-            "branded_type" [Type] opt => branded_type;
-            "erased_type" [Type] opt => erased_type;
-            "NEEDS_TRACE" [Expr] => needs_trace;
-            "NEEDS_DROP" [Expr] => needs_drop;
-            "visit" [VisitClosure] opt => visit_closure;
-            "trace_mut" [VisitClosure] opt => trace_mut_closure;
-            "trace_immutable" [VisitClosure] opt => trace_immutable_closure;
-            "collector_id" [Type] opt => collector_id;
-            "visit_inside_gc" [VisitInsideGcClosure] opt => visit_inside_gc_closure;
-        });
-        let bounds = res.bounds.unwrap_or_default();
-        if let Some(TraitRequirements::Never) = bounds.trace  {
-            return Err(Error::new(
-                res.target_type.span(), "Bounds on `Trace` can't be never"
-            ))
-        }
-        let visit_impl = if let Some(visit_closure) = res.visit_closure {
-            if let Some(closure) = res.trace_immutable_closure.as_ref()
-                .or(res.trace_mut_closure.as_ref()) {
-                return Err(Error::new(
-                    closure.0.body.span(),
-                    "Cannot specify specific closure (trace_mut/trace_immutable) in addition to `visit`"
-                ))
-            }
-            VisitImpl::Generic { generic_impl: visit_closure.0.body }
-        } else {
-            let trace_closure = res.trace_mut_closure.ok_or_else(|| {
-                Error::new(
-                    input.span(),
-                    "Either a `visit` or a `trace_mut` impl is required for Trace types"
-                )
-            })?;
-            let trace_immut_closure = match bounds.trace_immutable {
-                Some(TraitRequirements::Never) => {
-                    if let Some(closure) = res.trace_immutable_closure {
-                        return Err(Error::new(
-                            closure.0.body.span(),
-                            "Specified a `trace_immutable` implementation even though TraceImmutable is never implemented"
-                        ))
-                    } else {
-                        None
-                    }
-                },
-                _ => {
-                    let target_span = res.target_type.span();
-                    // we maybe implement `TraceImmutable` some of the time
-                    Some(res.trace_immutable_closure.ok_or_else(|| {
-                        Error::new(
-                            target_span,
-                            "Requires a `trace_immutable` implementation"
-                        )
-                    })?)
-                }
-            };
-            VisitImpl::Specific {
-                mutable: ::syn::parse2(trace_closure.0.body)?,
-                immutable: trace_immut_closure
-                    .map(|closure| ::syn::parse2::<Expr>(closure.0.body))
-                    .transpose()?
-            }
-        };
-        Ok(MacroInput {
-            target_type: res.target_type,
-            params: res.params.0,
-            bounds,
-            options: StandardOptions {
-                null_trace: res.null_trace,
-                branded_type: res.branded_type,
-                erased_type: res.erased_type,
-                needs_trace: res.needs_trace,
-                needs_drop: res.needs_drop,
-                collector_id: res.collector_id,
-                visit_inside_gc: res.visit_inside_gc_closure
-            },
-            visit: visit_impl
-        })
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct KnownArgClosure {
     body: TokenStream,
     brace: ::syn::token::Brace
@@ -537,41 +467,47 @@ impl KnownArgClosure {
         Ok(KnownArgClosure { body: quote!({ #body }), brace })
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VisitClosure(KnownArgClosure);
-impl Parse for VisitClosure {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
+impl MacroArg for VisitClosure {
+    fn parse_macro_arg(input: ParseStream) -> syn::Result<Self> {
         Ok(VisitClosure(KnownArgClosure::parse_with_fixed_args(input, &["self", "visitor"])?))
     }
 }
 #[derive(Debug)]
 pub struct VisitInsideGcClosure(KnownArgClosure);
-impl Parse for VisitInsideGcClosure {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
+impl MacroArg for VisitInsideGcClosure {
+    fn parse_macro_arg(input: ParseStream) -> syn::Result<Self> {
         Ok(VisitInsideGcClosure(KnownArgClosure::parse_with_fixed_args(input, &["gc", "visitor"])?))
     }
 }
 
 /// Extra bounds
-#[derive(Default, Debug)]
+#[derive(Default, Debug, MacroKeywordArgs)]
 pub struct CustomBounds {
     /// Additional bounds on the `Trace` implementation
+    #[kwarg(optional, rename = "Trace")]
     trace: Option<TraitRequirements>,
     /// Additional bounds on the `TraceImmutable` implementation
     ///
     /// If unspecified, this will default to the same as those
     /// specified for `Trace`
+    #[kwarg(optional, rename = "TraceImmutable")]
     trace_immutable: Option<TraitRequirements>,
     /// Additional bounds on the `GcSafe` implementation
     ///
     /// If unspecified, this will default to the same as those
     /// specified for `Trace`
+    #[kwarg(optional, rename = "GcSafe")]
     gcsafe: Option<TraitRequirements>,
     /// The requirements to implement `GcRebrand`
+    #[kwarg(optional, rename = "GcRebrand")]
     rebrand: Option<TraitRequirements>,
     /// The requirements to implement `GcErase`
+    #[kwarg(optional, rename = "GcErase")]
     erase: Option<TraitRequirements>,
-    visit_inside_gc: Option<WhereClause>
+    #[kwarg(optional)]
+    visit_inside_gc: Option<Syn<WhereClause>>
 }
 impl CustomBounds {
     fn trace_where_clause(&self, generic_params: &[GenericParam]) -> WhereClause {
@@ -646,54 +582,6 @@ fn create_clause_with_default(
             where_clause
         }
     })
-}
-impl Parse for CustomBounds {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let inner;
-        braced!(inner in input);
-        let res = parse_field_opts!(inner, {
-            "Trace" [TraitRequirements] opt => trace;
-            "TraceImmutable" [TraitRequirements] opt => trace_immutable;
-            "GcSafe" [TraitRequirements] opt => gcsafe;
-            "GcRebrand" [TraitRequirements] opt => rebrand;
-            "GcErase" [TraitRequirements] opt => erase;
-            "visit_inside_gc" [WhereClause] opt => visit_inside_gc;
-        });
-        Ok(CustomBounds {
-            trace: res.trace,
-            trace_immutable: res.trace_immutable,
-            gcsafe: res.gcsafe,
-            rebrand: res.rebrand,
-            erase: res.erase,
-            visit_inside_gc: res.visit_inside_gc
-        })
-    }
-}
-
-/// The standard options for the macro
-///
-/// Options are required unless wrapped in an `Option`
-/// (or explicitly marked optional)
-#[derive(Debug)]
-pub struct StandardOptions {
-    /// Requirements on implementing the NullTrace
-    ///
-    /// This is unsafe, and completely unchecked.
-    null_trace: TraitRequirements,
-    /// The associated type implemented as `GcRebrand::Branded`
-    branded_type: Option<Type>,
-    /// The associated type implemented as `GcErase::Erased`
-    erased_type: Option<Type>,
-    /// A (constant) expression determining whether the array needs to be traced
-    needs_trace: Expr,
-    /// A (constant) expression determining whether the type should be dropped
-    needs_drop: Expr,
-    /// The fixed id of the collector, or `None` if the type can work with any collector
-    collector_id: Option<Type>,
-    /// An override for the standard `visit_inside_gc` impl.
-    ///
-    /// This is necessary if the type is not `Sized`
-    visit_inside_gc: Option<VisitInsideGcClosure>
 }
 
 /// The visit implementation.
@@ -895,8 +783,8 @@ pub enum TraitRequirements {
     Always
 }
 
-impl Parse for TraitRequirements {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
+impl MacroArg for TraitRequirements {
+    fn parse_macro_arg(input: ParseStream) -> syn::Result<Self> {
         if input.peek(syn::Ident) {
             let ident = input.parse::<Ident>()?;
             if ident == "always" {
