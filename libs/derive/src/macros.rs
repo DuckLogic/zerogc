@@ -179,11 +179,10 @@ impl MacroInput {
         let zerogc_crate = zerogc_crate();
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
-        let generic_params = self.params.iter().cloned().collect::<Vec<_>>();
         let clause = if mutable {
-            self.bounds.trace_where_clause(&generic_params)
+            self.bounds.trace_where_clause(&self.params.elements)
         } else {
-            match self.bounds.trace_immutable_clause(&generic_params) {
+            match self.bounds.trace_immutable_clause(&self.params.elements) {
                 Some(clause) => clause,
                 None => return Ok(None), // They are requesting that we dont implement
             }
@@ -254,9 +253,8 @@ impl MacroInput {
         let zerogc_crate = zerogc_crate();
         let target_type = &self.target_type;
         let mut generics = self.basic_generics();
-        let generic_params = self.params.iter().cloned().collect::<Vec<_>>();
         generics.make_where_clause().predicates
-            .extend(match self.bounds.gcsafe_clause(&generic_params) {
+            .extend(match self.bounds.gcsafe_clause(&self.params.elements) {
                 Some(clause) => clause.predicates,
                 None => return None // They are requesting we dont implement
             });
@@ -266,7 +264,6 @@ impl MacroInput {
         })
     }
     fn expand_brand_impl(&self, rebrand: bool /* true => rebrand, false => erase */) -> Result<Option<TokenStream>, Error> {
-        let generic_params = self.params.iter().cloned().collect::<Vec<_>>();
         let zerogc_crate = zerogc_crate();
         let requirements = if rebrand { self.bounds.rebrand.clone() } else { self.bounds.erase.clone() };
         let target_type = &self.target_type;
@@ -346,7 +343,7 @@ impl MacroInput {
              * TODO: Do we need to apply to the `Branded`/`Erased` types
              */
             generics.make_where_clause().predicates
-                .extend(self.bounds.trace_where_clause(&generic_params).predicates);
+                .extend(self.bounds.trace_where_clause(&self.params.elements).predicates);
             // Generate `Sized` bounds for all params
             for param in &self.params {
                 if let GenericParam::Type(ref tp) = param {
