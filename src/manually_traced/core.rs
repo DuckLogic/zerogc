@@ -149,6 +149,10 @@ macro_rules! trace_array {
             target => [T; $size],
             params => [T],
             null_trace => { where T: NullTrace },
+            bounds => {
+                GcRebrand => { where T: GcRebrand<'new_gc, Id>, T::Branded: Sized },
+                GcErase => { where T: GcErase<'min, Id>, T::Erased: Sized },
+            },
             NEEDS_TRACE => T::NEEDS_TRACE,
             NEEDS_DROP => T::NEEDS_DROP,
             branded_type => [<T as GcRebrand<'new_gc, Id>>::Branded; $size],
