@@ -1,6 +1,6 @@
 [package]
 name = "zerogc"
-version = "0.2.0-alpha.4"
+version = "0.2.0-alpha.5"
 authors = ["Techcable <Techcable@techcable.net>"]
 description = "Zero overhead tracing garbage collection for rust"
 repository = "https://github.com/DuckLogic/zerogc"
@@ -16,7 +16,7 @@ scopeguard = "1.1"
 indexmap = { version = "1.6", optional = true }
 parking_lot = { version = "0.11", optional = true }
 # Used for macros
-zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.4" }
+zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.5" }
 
 [workspace]
 members = ["libs/simple", "libs/derive", "libs/context"]
