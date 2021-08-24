@@ -40,6 +40,7 @@ pub struct GcHandleList<C: RawHandleImpl> {
     /// If the list is empty, this is null
     last_free_slot: AtomicPtr<HandleSlot<C>>
 }
+#[allow(clippy::new_without_default)]
 impl<C: RawHandleImpl> GcHandleList<C> {
     pub fn new() -> Self {
         use core::ptr::null_mut;

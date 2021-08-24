@@ -1,4 +1,5 @@
 //! The interface to a collector
+#![allow(clippy::missing_safety_doc)]
 
 use core::fmt::{self, Debug, Formatter};
 use core::ptr::NonNull;
@@ -142,10 +143,7 @@ pub unsafe trait CollectorPtr<C: RawCollectorImpl<Ptr=Self>>: Copy + Eq
     fn upgrade_weak_raw(weak: &Self::Weak) -> Option<Self>;
     #[inline]
     fn upgrade_weak(weak: &Self::Weak) -> Option<CollectorRef<C>> {
-        match Self::upgrade_weak_raw(weak) {
-            Some(ptr) => Some(CollectorRef { ptr }),
-            None => None
-        }
+        Self::upgrade_weak_raw(weak).map(|ptr| CollectorRef { ptr })
     }
     unsafe fn assume_weak_valid(weak: &Self::Weak) -> Self;
     unsafe fn create_weak(&self) -> Self::Weak;
@@ -182,14 +180,9 @@ unsafe impl<C: RawCollectorImpl<Ptr=Self>> CollectorPtr<C> for NonNull<C> {
 
     #[inline]
     fn upgrade_weak_raw(weak: &Self::Weak) -> Option<Self> {
-        match weak.upgrade() {
-            Some(arc) => {
-                Some(unsafe {
-                    Self::from_raw(Arc::into_raw(arc) as *mut _)
-                })
-            },
-            None => None
-        }
+        weak.upgrade().map(|arc| unsafe {
+            Self::from_raw(Arc::into_raw(arc) as *mut _)
+        })
     }
 
     #[inline]
@@ -496,7 +489,7 @@ impl<C: SyncCollector> CollectorRef<C> {
     /// Warning: Only one collector should be created per thread.
     /// Doing otherwise can cause deadlocks/panics.
     pub fn create_context(&self) -> CollectorContext<C> {
-        unsafe { CollectorContext::register_root(&self) }
+        unsafe { CollectorContext::register_root(self) }
     }
 }
 impl<C: RawCollectorImpl> Drop for CollectorRef<C> {

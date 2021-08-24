@@ -200,7 +200,7 @@ impl TypeAttrs {
         });
         match (iter.next(), iter.next()) {
             (Some(_), Some((dup_attr, _))) => {
-                return Err(Error::new(dup_attr.path.span(), "Duplicate #[zerogc] attribute"))
+                Err(Error::new(dup_attr.path.span(), "Duplicate #[zerogc] attribute"))
             },
             (Some((_, parsed)), None) => {
                 parsed
@@ -495,22 +495,22 @@ pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
 fn impl_derive_trace(input: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, syn::Error> {
     let trace_impl = if info.config.nop_trace {
-        impl_nop_trace(&input, &info)?
+        impl_nop_trace(input, info)?
     } else {
-        impl_trace(&input, &info)?
+        impl_trace(input, info)?
     };
     let rebrand_impl = if info.config.nop_trace {
-        impl_rebrand_nop(&input, &info)?
+        impl_rebrand_nop(input, info)?
     } else {
-        impl_rebrand(&input, &info)?
+        impl_rebrand(input, info)?
     };
     let erase_impl = if info.config.nop_trace {
-        impl_erase_nop(&input, &info)?
+        impl_erase_nop(input, info)?
     } else {
-        impl_erase(&input, &info)?
+        impl_erase(input, info)?
     };
-    let gc_safe_impl = impl_gc_safe(&input, &info)?;
-    let extra_impls = impl_extras(&input, &info)?;
+    let gc_safe_impl = impl_gc_safe(input, info)?;
+    let extra_impls = impl_extras(input, info)?;
     Ok(quote! {
         #trace_impl
         #rebrand_impl
@@ -755,7 +755,7 @@ fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Er
                             Ok(parse_quote!('new_gc))
                         },
                         TypeParamBound::Lifetime(ref lt) => {
-                            return Err(unsupported_lifetime_param(lt))
+                            Err(unsupported_lifetime_param(lt))
                         }
                     }
                 }
@@ -922,7 +922,7 @@ fn impl_rebrand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
                             Ok(parse_quote!('new_gc))
                         },
                         TypeParamBound::Lifetime(ref lt) => {
-                            return Err(unsupported_lifetime_param(lt))
+                            Err(unsupported_lifetime_param(lt))
                         }
                     }
                 }
@@ -1126,6 +1126,7 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
     )?;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let target_fields = collect_fields(target)?;
+    #[allow(clippy::if_same_then_else)] // Only necessary because of detailed comments
     let fake_drop_impl = if info.config.is_copy {
         /*
          * If this type can be proven to implement Copy,
@@ -1134,9 +1135,9 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
          * In fact, adding one would prevent it from being Copy
          * in the first place.
          */
-        quote!()
+        None
     } else if info.config.unsafe_skip_drop {
-        quote!() // Skip generating drop at user's request
+        None // Skip generating drop at user's request
     } else if info.config.nop_trace {
         /*
          * A NullTrace type is implicitly drop safe.
@@ -1144,9 +1145,9 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
          * No tracing needed implies there are no reachable GC references.
          * Therefore there is nothing to fear about finalizers resurrecting things
          */
-        quote!()
+        None
     } else {
-        quote!(impl #impl_generics Drop for #name #ty_generics #where_clause {
+        Some(quote!(impl #impl_generics Drop for #name #ty_generics #where_clause {
             #[inline]
             fn drop(&mut self) {
                 /*
@@ -1154,7 +1155,7 @@ fn impl_gc_safe(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
                  * from implementing their own Drop functionality.
                  */
             }
-        })
+        }))
     };
     let verify_gc_safe = if info.config.is_copy {
         quote!(#zerogc_crate::assert_copy::<Self>())
@@ -1215,13 +1216,13 @@ fn impl_nop_trace(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream
                 return Ok(quote!());
             }
             let ty_span = t.span();
-            Ok(quote_spanned! { ty_span =>
+            Ok(quote_spanned! { ty_span => #[allow(clippy::assertions_on_constants)] /* Not actually a constant */ {
                 assert!(
                     !<#t as #zerogc_crate::Trace>::NEEDS_TRACE,
                     "Can't #[derive(NullTrace) with {}",
                     stringify!(#t)
                 );
-            })
+            } })
         }).collect::<Result<Vec<_>, Error>>()?;
     let needs_drop = needs_drop(info, &*target_fields);
     Ok(quote! {
@@ -1259,7 +1260,7 @@ fn add_trait_bounds_except(
 ) -> Result<Generics, Error> {
     let mut actually_ignored_args = HashSet::<Ident>::new();
     let generics = add_trait_bounds(
-        &generics, bound,
+        generics, bound,
         &mut |param: &TypeParam| {
             if let Some(ref mut extra) = extra_ignore {
                 if extra(&param.ident) {
@@ -1321,9 +1322,9 @@ fn debug_derive(key: &str, target: &dyn ToString, message: &dyn Display, value: 
         Ok(ref var) if var == "0" => { return /* disabled */ }
         Ok(var) => {
             let target_parts = std::iter::once(key)
-                .chain(target.split(":")).collect::<Vec<_>>();
-            for pattern in var.split_terminator(",") {
-                let pattern_parts = pattern.split(":").collect::<Vec<_>>();
+                .chain(target.split(':')).collect::<Vec<_>>();
+            for pattern in var.split_terminator(',') {
+                let pattern_parts = pattern.split(':').collect::<Vec<_>>();
                 if pattern_parts.len() > target_parts.len() { continue }
                 for (&pattern_part, &target_part) in pattern_parts.iter()
                     .chain(std::iter::repeat(&"*")).zip(&target_parts) {

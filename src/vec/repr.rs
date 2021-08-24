@@ -40,6 +40,11 @@ pub unsafe trait GcVecRepr: GcSafe {
     /// initialized, as opposed to `capacity`, which is the number
     /// of elements that are available in total.
     fn len(&self) -> usize;
+    /// Check if this vector is empty
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     /// Set the length of the vector.
     ///
     /// ## Safety
@@ -52,9 +57,8 @@ pub unsafe trait GcVecRepr: GcSafe {
     fn capacity(&self) -> usize;
     /// Attempt to reallocate the vector in-place,
     /// without moving the underlying pointer.
-    fn realloc_in_place(&self, new_capacity: usize) -> Result<(), ReallocFailedError> {
+    fn realloc_in_place(&self, _new_capacity: usize) -> Result<(), ReallocFailedError> {
         assert!(!Self::SUPPORTS_REALLOC);
-        drop(new_capacity);
         Err(ReallocFailedError::Unsupported)
     }
     /// A pointer to the underlying memory

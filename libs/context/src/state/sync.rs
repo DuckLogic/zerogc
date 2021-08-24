@@ -328,6 +328,7 @@ pub struct CollectorState<C: RawCollectorImpl> {
     known_contexts: Mutex<HashSet<*mut RawContext<C>>>,
     next_pending_id: u64
 }
+#[allow(clippy::new_without_default)]
 impl<C: RawCollectorImpl> CollectorState<C> {
     pub fn new() -> Self {
         CollectorState {
@@ -494,10 +495,7 @@ pub(crate) trait SyncCollectorImpl: RawCollectorImpl<Manager=CollectionManager<S
                                 pending.valid_contexts.clone()
                             } else {
                                 // Otherwise we might as well be done with it
-                                mem::replace(
-                                    &mut pending.valid_contexts,
-                                    Vec::new()
-                                )
+                                mem::take(&mut pending.valid_contexts)
                             };
                             perform_collection(&mut *lock, contexts);
                             drop(lock);

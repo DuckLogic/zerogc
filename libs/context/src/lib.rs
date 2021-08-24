@@ -3,6 +3,9 @@
     untagged_unions, // I want to avoid ManuallyDrop in unions
     const_fn_trait_bound, // So generics + const fn are unstable, huh?
 )]
+#![allow(
+    clippy::missing_safety_doc, // Entirely internal code
+)]
 #![cfg_attr(not(feature = "std"), no_std)]
 //! The implementation of (GcContext)[`::zerogc::GcContext`] that is
 //! shared among both thread-safe and thread-unsafe code.
@@ -119,14 +122,14 @@ impl<C: RawCollectorImpl> CollectorContext<C> {
     pub(crate) unsafe fn register_root(collector: &CollectorRef<C>) -> Self {
         CollectorContext {
             raw: Box::into_raw(ManuallyDrop::into_inner(
-                C::RawContext::register_new(&collector)
+                C::RawContext::register_new(collector)
             )),
             root: true, // We are responsible for unregistering
         }
     }
     #[inline]
     pub fn collector(&self) -> &C {
-        unsafe { &(*self.raw).collector() }
+        unsafe { (*self.raw).collector() }
     }
     #[inline(always)]
     unsafe fn with_shadow_stack<R, T: Trace>(

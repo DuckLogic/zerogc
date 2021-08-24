@@ -16,6 +16,7 @@ use std::cell::RefCell;
 use zerogc_context::utils::AtomicCell;
 
 const DEBUG_INTERNAL_ALLOCATOR: bool = cfg!(zerogc_simple_debug_alloc);
+#[allow(clippy::assertions_on_constants)] // See rust-lang/clippy#7597
 mod debug {
     pub const PADDING: u32 = 0xDEADBEAF;
     pub const UNINIT: u32 = 0xCAFEBABE;

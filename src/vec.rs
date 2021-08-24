@@ -52,6 +52,11 @@ impl<'gc, T: GcSafe, Id: CollectorId> GcArray<'gc, T, Id> {
     pub fn len(&self) -> usize {
         Id::resolve_array_len(*self)
     }
+    /// Check if the array is empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     /// Resolve the [CollectorId]
     #[inline]
     pub fn collector_id(&self) -> &'_ Id {
@@ -278,6 +283,11 @@ impl<'gc, T: GcSafe, Id: CollectorId> GcRawVec<'gc, T, Id> {
     #[inline]
     pub fn len(&self) -> usize {
         self.repr.len()
+    }
+    /// Check if the vector is empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.repr.is_empty()
     }
     /// The capacity of this vector.
     #[inline]

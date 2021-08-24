@@ -85,10 +85,15 @@ impl<H> HeaderLayout<H> {
         (ptr as *mut u8).add(self.common_header_offset).cast()
     }
     #[inline]
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) const unsafe fn from_common_header(self, ptr: *mut GcHeader) -> *mut H {
         (ptr as *mut u8).sub(self.common_header_offset).cast()
     }
     /// Get the header from the specified value pointer
+    ///
+    /// ## Safety
+    /// Undefined behavior if the pointer doesn't point to a an object
+    /// allocated in this collector (ie. doesn't have the appropriate header).
     #[inline]
     pub const unsafe fn from_value_ptr<T: ?Sized>(self, ptr: *mut T) -> *mut H {
         let align = std::mem::align_of_val(&*ptr);

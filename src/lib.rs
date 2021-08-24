@@ -322,6 +322,15 @@ pub unsafe trait GcContext: Sized {
     ///     assert_eq!(root.val, 4); // VALID - The lifetime has been updated
     /// }
     /// ```
+    ///
+    /// ## Safety
+    /// Any garbage collected objects not reachable from the roots
+    /// are invalidated after this method.
+    ///
+    /// The user must ensure that invalidated objects are not used
+    /// after the safepoint,
+    /// although the (logical) mutation of the context
+    /// should significantly assist with that.
     #[inline]
     unsafe fn basic_safepoint<T: Trace>(&mut self, root: &mut &mut T) {
         self.unchecked_safepoint(root)

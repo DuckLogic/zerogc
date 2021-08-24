@@ -227,7 +227,7 @@ unsafe impl RawHandleImpl for RawSimpleCollector {
 
     #[inline]
     fn type_info_of<T: GcSafe>() -> &'static Self::TypeInfo {
-        &<T as StaticGcType>::STATIC_TYPE
+        <T as StaticGcType>::STATIC_TYPE
     }
 
     #[inline]
@@ -292,7 +292,7 @@ impl GcHeap {
         }
     }
     #[cold]
-    fn create_empty_vec<'gc>(&self) -> *mut GcVecHeader {
+    fn create_empty_vec(&self) -> *mut GcVecHeader {
         const DUMMY_LAYOUT: Layout = unsafe { Layout::from_size_align_unchecked(
             0, EMPTY_VEC_ALIGNMENT
         ) };
@@ -638,7 +638,7 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
         #[cfg(feature = "multiple-collectors")] {
             unsafe {
                 let header = GcHeader::from_value_ptr(gc.as_raw_ptr());
-                &*(&*header).mark_data.load_snapshot().collector_id_ptr
+                &*(*header).mark_data.load_snapshot().collector_id_ptr
             }
         }
         #[cfg(not(feature = "multiple-collectors"))] {
@@ -652,7 +652,7 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
         #[cfg(feature = "multiple-collectors")] {
             unsafe {
                 let header = GcArrayHeader::LAYOUT.from_value_ptr(gc.as_raw_ptr());
-                &*(&*header).common_header.mark_data.load_snapshot().collector_id_ptr
+                &*(*header).common_header.mark_data.load_snapshot().collector_id_ptr
             }
         }
         #[cfg(not(feature = "multiple-collectors"))] {
@@ -1084,7 +1084,7 @@ impl MarkVisitor<'_> {
                      * On some workloads this is fine.
                      */
                     let Ok(()) = trace_func(
-                        &mut *(gc.value() as *const T as *mut T),
+                        &mut *gc.as_raw_ptr(),
                         visitor
                     );
                     /*

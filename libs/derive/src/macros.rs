@@ -90,8 +90,8 @@ pub struct MacroInput {
 impl MacroInput {
     fn parse_visitor(&self) -> syn::Result<VisitImpl> {
         if let Some(ref visit_closure) = self.raw_visit_template {
-            if let Some(ref closure) = self.trace_immutable_closure.as_ref()
-                .or(self.trace_mut_closure.as_ref()) {
+            if let Some(closure) = self.trace_immutable_closure.as_ref()
+                .or_else(|| self.trace_mut_closure.as_ref()) {
                 return Err(Error::new(
                     closure.0.body.span(),
                     "Cannot specify specific closure (trace_mut/trace_immutable) in addition to `visit`"
@@ -130,7 +130,7 @@ impl MacroInput {
             Ok(VisitImpl::Specific {
                 mutable: ::syn::parse2(trace_closure.0.body)?,
                 immutable: trace_immut_closure
-                    .map(|closure| ::syn::parse2::<Expr>(closure.0.body))
+                    .map(|closure| ::syn::parse2::<Box<Expr>>(closure.0.body))
                     .transpose()?
             })
         }
@@ -155,7 +155,7 @@ impl MacroInput {
         };
         let null_trace_impl = if let Some(null_trace_clause) = null_trace_clause {
             let mut generics = self.basic_generics();
-            generics.make_where_clause().predicates.extend(null_trace_clause.predicates.clone());
+            generics.make_where_clause().predicates.extend(null_trace_clause.predicates);
             let (impl_generics, _, where_clause) = generics.split_for_impl();
             quote! {
                 unsafe impl #impl_generics #zerogc_crate::NullTrace for #target_type
@@ -304,35 +304,32 @@ impl MacroInput {
                 break
             }
             if !generate_implicit { break } // skip generating implicit bounds
-            match param {
-                GenericParam::Type(ref tp) => {
-                    let type_name = &tp.ident;
-                    let mut bounds = tp.bounds.clone();
-                    bounds.extend(default_bounds.iter().cloned());
-                    generics.make_where_clause()
-                        .predicates.push(WherePredicate::Type(PredicateType {
-                        lifetimes: None,
-                        bounded_ty: if rebrand {
-                            self.branded_type.clone().unwrap_or_else(|| {
-                                parse_quote!(<#type_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded)
-                            })
-                        } else {
-                            self.erased_type.clone().unwrap_or_else(|| {
-                                parse_quote!(<#type_name as #zerogc_crate::GcErase<'min, Id>>::Erased)
-                            })
-                        },
-                        colon_token: Default::default(),
-                        bounds: bounds.clone(),
-                    }));
-                    generics.make_where_clause()
-                        .predicates.push(WherePredicate::Type(PredicateType {
-                        lifetimes: None,
-                        bounded_ty: parse_quote!(#type_name),
-                        colon_token: Default::default(),
-                        bounds
-                    }))
-                }
-                _ => {}
+            if let GenericParam::Type(ref tp) = param {
+                let type_name = &tp.ident;
+                let mut bounds = tp.bounds.clone();
+                bounds.extend(default_bounds.iter().cloned());
+                generics.make_where_clause()
+                    .predicates.push(WherePredicate::Type(PredicateType {
+                    lifetimes: None,
+                    bounded_ty: if rebrand {
+                        self.branded_type.clone().unwrap_or_else(|| {
+                            parse_quote!(<#type_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded)
+                        })
+                    } else {
+                        self.erased_type.clone().unwrap_or_else(|| {
+                            parse_quote!(<#type_name as #zerogc_crate::GcErase<'min, Id>>::Erased)
+                        })
+                    },
+                    colon_token: Default::default(),
+                    bounds: bounds.clone(),
+                }));
+                generics.make_where_clause()
+                    .predicates.push(WherePredicate::Type(PredicateType {
+                    lifetimes: None,
+                    bounded_ty: parse_quote!(#type_name),
+                    colon_token: Default::default(),
+                    bounds
+                }))
             }
         }
         if generate_implicit {
@@ -382,7 +379,7 @@ impl MacroInput {
                     },
                     _ => return None
                 };
-                if target_params.contains(&ident) {
+                if target_params.contains(ident) {
                     Some(parse_quote!(<#ident as #target_trait>::#associated_type))
                 } else {
                     None
@@ -618,8 +615,8 @@ pub enum VisitImpl {
     /// Specialized implementations which are different for
     /// both `Trace` and `TraceImmutable`
     Specific {
-        mutable: Expr,
-        immutable: Option<Expr>
+        mutable: Box<Expr>,
+        immutable: Option<Box<Expr>>
     }
 }
 enum MagicVarType {
@@ -646,7 +643,7 @@ impl MagicVarType {
     }
 }
 impl VisitImpl {
-    fn expand_impl(&self, mutable: bool) -> Result<Expr, Error> {
+    fn expand_impl(&self, mutable: bool) -> Result<Box<Expr>, Error> {
         match *self {
             VisitImpl::Generic { ref generic_impl } => {
                 let tokens = replace_magic_tokens(generic_impl.clone(), &mut |ident| {
@@ -690,7 +687,7 @@ impl VisitImpl {
                     let span = ident.span(); // Reuse the span of the *input*
                     Ok(quote_spanned!(span => #res))
                 })?;
-                Ok(match ::syn::parse2::<Expr>(tokens.clone()) {
+                Ok(match ::syn::parse2::<Box<Expr>>(tokens.clone()) {
                     Ok(res) => res,
                     Err(cause) => {
                         let mut err = Error::new(
@@ -789,7 +786,7 @@ impl MacroArg for TraitRequirements {
             } else if ident == "never" {
                 Ok(TraitRequirements::Never)
             } else {
-                return Err(Error::new(
+                Err(Error::new(
                     ident.span(),
                     "Invalid identifier for `TraitRequirement`"
                 ))
@@ -799,7 +796,7 @@ impl MacroArg for TraitRequirements {
             braced!(inner in input);
             Ok(TraitRequirements::Where(inner.parse::<WhereClause>()?))
         } else {
-            return Err(input.error("Invalid `TraitRequirement`"))
+            Err(input.error("Invalid `TraitRequirement`"))
         }
     }
 }

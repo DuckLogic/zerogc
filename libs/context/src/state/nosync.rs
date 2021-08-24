@@ -207,6 +207,7 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
 pub struct CollectorState {
     next_pending_id: u64
 }
+#[allow(clippy::new_without_default)]
 impl CollectorState {
     pub fn new() -> Self {
         CollectorState {

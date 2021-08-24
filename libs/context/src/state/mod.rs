@@ -21,7 +21,15 @@ pub unsafe trait CollectionManager<C>: self::sealed::Sealed
     fn new() -> Self;
     fn is_collecting(&self) -> bool;
     fn should_trigger_collection(&self) -> bool;
+    /// Freeze this context
+    ///
+    /// ## Safety
+    /// See [GcContext::free_context]
     unsafe fn freeze_context(&self, context: &Self::Context);
+    /// Unfreeze the context
+    ///
+    /// ## Safety
+    /// See [GcContext::unfreeze_context]
     unsafe fn unfreeze_context(&self, context: &Self::Context);
 
     //
@@ -54,12 +62,19 @@ pub unsafe trait RawContext<C>: Debug + self::sealed::Sealed
     /// potentially blocking until completion..
     ///
     /// Undefined behavior if mutated during collection
+    ///
+    /// ## Safety
+    /// See [GcContext::unchecked_safepoint]
     unsafe fn trigger_safepoint(&self);
     /// Borrow a reference to the shadow stack,
     /// assuming this context is valid (not active).
     ///
     /// A context is valid if it is either frozen
     /// or paused at a safepoint.
+    ///
+    /// ## Safety
+    /// The context must be "inactive",
+    /// either frozen or paused at a safepoint.
     #[inline]
     unsafe fn assume_valid_shadow_stack(&self) -> &ShadowStack<C> {
         match self.state() {
@@ -72,6 +87,10 @@ pub unsafe trait RawContext<C>: Debug + self::sealed::Sealed
     fn shadow_stack_ptr(&self) -> *mut ShadowStack<C>;
     /// Get a reference to the collector,
     /// assuming that it's valid
+    ///
+    /// ## Safety
+    /// Assumes that the underlying collector
+    /// is still valid.
     unsafe fn collector(&self) -> &C;
     fn state(&self) -> ContextState;
 }
