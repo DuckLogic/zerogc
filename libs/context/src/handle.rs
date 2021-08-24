@@ -8,7 +8,7 @@ use core::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use zerogc::{Trace, GcSafe, GcErase, GcRebrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
+use zerogc::{Trace, GcSafe, GcRebrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
 use crate::{Gc, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef, CollectionManager};
 use crate::collector::RawCollectorImpl;
 
@@ -608,9 +608,9 @@ unsafe impl<T: GcSafe + Sync, C: RawHandleImpl + Sync> Sync for GcHandle<T, C> {
 unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for CollectorRef<C>
     where C: RawHandleImpl,
           T: GcSafe + 'gc,
-          T: GcErase<'a, CollectorId<C>>,
-          T::Erased: GcSafe + Sized {
-    type Handle = GcHandle<T::Erased, C>;
+          T: GcRebrand<'a, CollectorId<C>>,
+          T::Branded: GcSafe + Sized {
+    type Handle = GcHandle<T::Branded, C>;
 
     #[inline]
     fn create_handle(gc: Gc<'gc, T, CollectorId<C>>) -> Self::Handle {

@@ -504,17 +504,11 @@ fn impl_derive_trace(input: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStre
     } else {
         impl_rebrand(input, info)?
     };
-    let erase_impl = if info.config.nop_trace {
-        impl_erase_nop(input, info)?
-    } else {
-        impl_erase(input, info)?
-    };
     let gc_safe_impl = impl_gc_safe(input, info)?;
     let extra_impls = impl_extras(input, info)?;
     Ok(quote! {
         #trace_impl
         #rebrand_impl
-        #erase_impl
         #gc_safe_impl
         #extra_impls
     })
@@ -665,172 +659,6 @@ fn impl_extras(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, E
     })
 }
 
-
-fn impl_erase_nop(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
-    let zerogc_crate = zerogc_crate();
-    let name = &target.ident;
-    let mut generics: Generics = target.generics.clone();
-    for param in &mut generics.params {
-        match param {
-            GenericParam::Type(ref mut type_param) => {
-                // Require all params are NullTrace
-                type_param.bounds.push(parse_quote!(#zerogc_crate::NullTrace));
-            },
-            GenericParam::Lifetime(ref mut l) => {
-                if l.lifetime == info.config.gc_lifetime() {
-                    assert!(!info.config.ignored_lifetimes.contains(&l.lifetime));
-                    return Err(Error::new(
-                        l.lifetime.span(),
-                        "Unexpected GC lifetime: Expected #[zerogc(nop_trace)] during #[derive(GcErase)]"
-                    ))
-                } else if info.config.ignored_lifetimes.contains(&l.lifetime) {
-                    // Explicitly ignored is okay, as long as it outlives the `'min`
-                    l.bounds.push(parse_quote!('min));
-                } else {
-                    return Err(Error::new(
-                        l.span(),
-                        "Lifetime must be explicitly ignored"
-                    ))
-                }
-            },
-            GenericParam::Const(_) => {}
-        }
-    }
-    let mut impl_generics = generics.clone();
-    impl_generics.params.push(GenericParam::Lifetime(parse_quote!('min)));
-    let collector_id = match info.config.collector_id {
-        Some(ref id) => id.clone(),
-        None => {
-            impl_generics.params.push(GenericParam::Type(parse_quote!(Id: #zerogc_crate::CollectorId)));
-            parse_quote!(Id)
-        }
-    };
-    // Require that `Self: NullTrace`
-    impl_generics.make_where_clause().predicates.push(WherePredicate::Type(PredicateType {
-        lifetimes: None,
-        bounded_ty: parse_quote!(Self),
-        bounds: parse_quote!(#zerogc_crate::NullTrace),
-        colon_token: Default::default()
-    }));
-    let (_, ty_generics, _) = generics.split_for_impl();
-    let (impl_generics, _, where_clause) = impl_generics.split_for_impl();
-    Ok(quote! {
-        unsafe impl #impl_generics #zerogc_crate::GcErase<'min, #collector_id>
-            for #name #ty_generics #where_clause {
-            // We can pass-through because we are NullTrace
-            type Erased = Self;
-        }
-    })
-}
-fn impl_erase(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
-    let zerogc_crate = zerogc_crate();
-    let name = &target.ident;
-    let mut generics: Generics = target.generics.clone();
-    let mut rewritten_params = Vec::new();
-    let mut rewritten_restrictions = Vec::new();
-    let collector_id = match info.config.collector_id {
-        Some(ref id) => id.clone(),
-        None => parse_quote!(Id)
-    };
-    for param in &mut generics.params {
-        let rewritten_param: GenericArgument;
-        fn unsupported_lifetime_param(lt: &Lifetime) -> Error {
-            Error::new(
-                lt.span(),
-                "Unless Self: NullTrace, derive(GcErase) is currently unable to handle lifetimes"
-            )
-        }
-        match param {
-            GenericParam::Type(ref mut type_param) => {
-                let param_name = &type_param.ident;
-                if info.is_ignored_param(&*type_param) {
-                    let param_name = &type_param.ident;
-                    rewritten_params.push(parse_quote!(#param_name));
-                    continue
-                }
-                fn rewrite_bound(bound: &TypeParamBound, info: &GcTypeInfo) -> Result<TypeParamBound, Error> {
-                    match bound {
-                        TypeParamBound::Trait(ref t) => Ok(TypeParamBound::Trait(t.clone())),
-                        TypeParamBound::Lifetime(ref lt) if *lt == info.config.gc_lifetime() => {
-                            Ok(parse_quote!('new_gc))
-                        },
-                        TypeParamBound::Lifetime(ref lt) => {
-                            Err(unsupported_lifetime_param(lt))
-                        }
-                    }
-                }
-                let original_bounds = type_param.bounds.iter()
-                    .map(|bound| rewrite_bound(bound, info))
-                    .collect::<Result<Vec<_>, _>>()?;
-                type_param.bounds.push(parse_quote!(#zerogc_crate::GcErase<'min, #collector_id>));
-                type_param.bounds.push(parse_quote!('min));
-                let rewritten_type: Type = parse_quote!(<#param_name as #zerogc_crate::GcErase<'min, #collector_id>>::Erased);
-                rewritten_restrictions.push(WherePredicate::Type(PredicateType {
-                    lifetimes: None,
-                    bounded_ty: rewritten_type.clone(),
-                    colon_token: Default::default(),
-                    bounds: original_bounds.into_iter().collect()
-                }));
-                rewritten_param = GenericArgument::Type(rewritten_type);
-            },
-            GenericParam::Lifetime(ref l) => {
-                if l.lifetime == info.config.gc_lifetime() {
-                    rewritten_param = parse_quote!('min);
-                    assert!(!info.config.ignored_lifetimes.contains(&l.lifetime));
-                } else {
-                    return Err(unsupported_lifetime_param(&l.lifetime))
-                }
-            },
-            GenericParam::Const(ref param) => {
-                let name = &param.ident;
-                rewritten_param = GenericArgument::Const(parse_quote!(#name));
-            }
-        }
-        rewritten_params.push(rewritten_param);
-    }
-    let mut field_types = Vec::new();
-    match target.data {
-        Data::Struct(ref s) => {
-            for f in &s.fields {
-                field_types.push(f.ty.clone());
-            }
-        },
-        Data::Enum(ref e) => {
-            for variant in &e.variants {
-                for f in &variant.fields {
-                    field_types.push(f.ty.clone());
-                }
-            }
-        },
-        Data::Union(_) => {
-            return Err(Error::new(target.ident.span(), "Unable to derive(GcErase) for unions"))
-        }
-    }
-    let mut impl_generics = generics.clone();
-    impl_generics.params.push(GenericParam::Lifetime(parse_quote!('min)));
-    if info.config.collector_id.is_none() {
-        impl_generics.params.push(GenericParam::Type(parse_quote!(Id: #zerogc_crate::CollectorId)));
-    }
-    impl_generics.make_where_clause().predicates.extend(rewritten_restrictions);
-    let (_, ty_generics, _) = generics.split_for_impl();
-    let (impl_generics, _, where_clause) = impl_generics.split_for_impl();
-    let assert_erase = field_types.iter().map(|field_type| {
-        let span = field_type.span();
-        quote_spanned!(span => <#field_type as #zerogc_crate::GcErase<'min, #collector_id>>::assert_erase();)
-    }).collect::<Vec<_>>();
-    Ok(quote! {
-        unsafe impl #impl_generics #zerogc_crate::GcErase<'min, #collector_id>
-            for #name #ty_generics #where_clause {
-            type Erased = #name::<#(#rewritten_params),*>;
-
-            fn assert_erase() {
-                #(#assert_erase)*
-            }
-        }
-    })
-}
-
-
 fn impl_rebrand_nop(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, Error> {
     let zerogc_crate = zerogc_crate();
     let name = &target.ident;
@@ -966,7 +794,7 @@ fn impl_rebrand(target: &DeriveInput, info: &GcTypeInfo) -> Result<TokenStream, 
             }
         },
         Data::Union(_) => {
-            return Err(Error::new(target.ident.span(), "Unable to derive(GcErase) for unions"))
+            return Err(Error::new(target.ident.span(), "Unable to derive(GcRebrand) for unions"))
         }
     }
     let mut impl_generics = generics.clone();

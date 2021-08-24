@@ -10,7 +10,7 @@ use core::ptr::{NonNull};
 
 use zerogc_derive::{unsafe_gc_impl};
 
-use crate::{GcSimpleAlloc, Trace, CollectorId, Gc, GcSafe, GcRebrand, GcErase};
+use crate::{GcSimpleAlloc, Trace, CollectorId, Gc, GcSafe, GcRebrand};
 use crate::vec::repr::{GcVecRepr, ReallocFailedError};
 
 pub mod repr;
@@ -86,11 +86,9 @@ unsafe_gc_impl!(
     bounds => {
         TraceImmutable => never,
         GcRebrand => { where T: GcRebrand<'new_gc, Id>, <T as GcRebrand<'new_gc, Id>>::Branded: Sized + GcSafe },
-        GcErase => { where T: GcErase<'min, Id>, <T as GcErase<'min, Id>>::Erased: Sized + GcSafe }
     },
     null_trace => never,
     branded_type => GcArray<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,
-    erased_type => GcArray<'min, <T as GcErase<'min, Id>>::Erased, Id>,
     NEEDS_TRACE => true,
     NEEDS_DROP => false,
     trace_mut => |self, visitor| {
@@ -186,7 +184,6 @@ unsafe_gc_impl!(
         TraceImmutable => never,
         Trace => { where T: GcSafe + Trace },
         GcRebrand => never,
-        GcErase => never,
     },
     null_trace => never,
     NEEDS_TRACE => true,
@@ -377,13 +374,8 @@ unsafe_gc_impl!(
             where T: GcSafe + GcRebrand<'new_gc, Id>,
                 <T as GcRebrand<'new_gc, Id>>::Branded: Sized + GcSafe
         },
-        GcErase => {
-            where T: GcSafe + GcErase<'min, Id>,
-                <T as GcErase<'min, Id>>::Erased: Sized + GcSafe
-        },
     },
     branded_type => GcRawVec<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,
-    erased_type => GcRawVec<'min, <T as GcErase<'min, Id>>::Erased, Id>,
     null_trace => never,
     NEEDS_TRACE => true,
     NEEDS_DROP => false, // GcVecRepr is responsible for Drop

@@ -41,10 +41,8 @@ macro_rules! trace_tuple_impl {
             NEEDS_DROP => $($param::NEEDS_DROP || )* false,
             bounds => {
                 GcRebrand => { where $($param: GcRebrand<'new_gc, Id>,)* $($param::Branded: Sized),* },
-                GcErase => { where $($param: GcErase<'min, Id>,)* $($param::Erased: Sized),* },
             },
             branded_type => ( $(<$param as GcRebrand<'new_gc, Id>>::Branded,)* ),
-            erased_type => ( $(<$param as GcErase<'min, Id>>::Erased,)* ),
             visit => |self, visitor| {
                 ##[allow(non_snake_case)]
                 let ($(ref #mutability $param,)*) = *self;
@@ -131,10 +129,8 @@ unsafe_gc_impl! {
         TraceImmutable => always,
         GcSafe => always,
         GcRebrand => { where T: 'new_gc },
-        GcErase => { where T: 'min }
     },
     branded_type => Self,
-    erased_type => Self,
     null_trace => always,
     NEEDS_TRACE => false,
     NEEDS_DROP => core::mem::needs_drop::<Self>(),
@@ -151,12 +147,10 @@ macro_rules! trace_array {
             null_trace => { where T: NullTrace },
             bounds => {
                 GcRebrand => { where T: GcRebrand<'new_gc, Id>, T::Branded: Sized },
-                GcErase => { where T: GcErase<'min, Id>, T::Erased: Sized },
             },
             NEEDS_TRACE => T::NEEDS_TRACE,
             NEEDS_DROP => T::NEEDS_DROP,
             branded_type => [<T as GcRebrand<'new_gc, Id>>::Branded; $size],
-            erased_type => [<T as GcErase<'min, Id>>::Erased; $size],
             visit => |self, visitor| {
                 visitor.#visit_func(#b*self as #b [T])
             },
@@ -192,10 +186,8 @@ unsafe_gc_impl! {
          * which is only safe if `T: NullTrace`
          */
         GcRebrand => { where T: NullTrace, 'a: 'new_gc },
-        GcErase => { where T: NullTrace, 'a: 'min }
     },
     branded_type => &'a T,
-    erased_type => &'a T,
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => false, // We never need to be dropped
@@ -210,10 +202,8 @@ unsafe_gc_impl!(
     params => [T: NullTrace],
     bounds => {
         GcRebrand => { where T: NullTrace, T: 'new_gc },
-        GcErase => { where T: NullTrace, T: 'min }
     },
     branded_type => Self,
-    erased_type => Self,
     null_trace => always,
     NEEDS_TRACE => false,
     NEEDS_DROP => T::NEEDS_DROP,
@@ -226,10 +216,8 @@ unsafe_gc_impl!(
     params => [T: NullTrace],
     bounds => {
         GcRebrand => { where T: NullTrace, T: 'new_gc },
-        GcErase => { where T: NullTrace, T: 'min }
     },
     branded_type => Self,
-    erased_type => Self,
     null_trace => always,
     NEEDS_TRACE => false,
     NEEDS_DROP => T::NEEDS_DROP,
@@ -255,10 +243,8 @@ unsafe_gc_impl! {
          * See their comments for details.....
          */
         GcRebrand => { where T: NullTrace, 'a: 'new_gc },
-        GcErase => { where T: NullTrace, 'a: 'min }
     },
     branded_type => &'a mut T,
-    erased_type => &'a mut T,
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => false, // Although not `Copy`, mut references don't need to be dropped
@@ -277,7 +263,6 @@ unsafe_gc_impl! {
     params => [T],
     bounds => {
         GcRebrand => never,
-        GcErase => never,
         GcSafe => { where T: GcSafe },
         visit_inside_gc => where Visitor: crate::GcVisitor, ActualId: crate::CollectorId,
             [T]: GcSafe + 'actual_gc

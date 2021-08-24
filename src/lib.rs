@@ -3,6 +3,7 @@
     ptr_metadata, // RFC 2580 - Pointer meta
     coerce_unsized, // RFC 0982 - DST coercion
     unsize,
+    trait_alias, // RFC 1733 - Trait aliases
 )]
 #![feature(maybe_uninit_slice)]
 #![feature(new_uninit)]
@@ -232,10 +233,10 @@ pub unsafe trait GcSystem {
 /// we need to place bounds on `T as GcBrand`
 // TODO: Remove when we get more powerful types
 pub unsafe trait GcHandleSystem<'gc, 'a, T: GcSafe + ?Sized + 'gc>: GcSystem
-    where T: GcErase<'a, Self::Id>,
-          <T as GcErase<'a, Self::Id>>::Erased: GcSafe {
+    where T: GcRebrand<'a, Self::Id>,
+          <T as GcRebrand<'a, Self::Id>>::Branded: GcSafe {
     /// The type of handles to this object.
-    type Handle: GcHandle<<T as GcErase<'a, Self::Id>>::Erased, System=Self>;
+    type Handle: GcHandle<<T as GcRebrand<'a, Self::Id>>::Branded, System=Self>;
 
     /// Create a handle to the specified GC pointer,
     /// which can be used without a context
@@ -377,8 +378,8 @@ pub unsafe trait GcContext: Sized {
     ///
     /// It should only be used as part of the [safepoint!] macro.
     #[inline(always)]
-    unsafe fn rebrand_static<'a, T>(&self, value: T) -> T::Erased
-        where T: GcErase<'a, Self::Id>, T::Erased: Sized {
+    unsafe fn rebrand_static<'a, T>(&self, value: T) -> T::Branded
+        where T: GcRebrand<'a, Self::Id>, T::Branded: Sized {
         let branded = mem::transmute_copy(&value);
         mem::forget(value);
         branded
@@ -672,8 +673,8 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
     #[inline]
     pub fn create_handle<'a>(&self) -> <Id::System as GcHandleSystem<'gc, 'a, T>>::Handle
         where Id::System: GcHandleSystem<'gc, 'a, T>,
-              T: GcErase<'a, Id> + 'a,
-              <T as GcErase<'a, Id>>::Erased: GcSafe + 'a {
+              T: GcRebrand<'a, Id> + 'a,
+              <T as GcRebrand<'a, Id>>::Branded: GcSafe + 'a {
         <Id::System as GcHandleSystem<'gc, 'a, T>>::create_handle(*self)
     }
 
@@ -707,12 +708,6 @@ unsafe impl<'gc, 'new_gc, T, Id> GcRebrand<'new_gc, Id> for Gc<'gc, T, Id>
           <T as GcRebrand<'new_gc, Id>>::Branded: GcSafe,
           Id: CollectorId, Self: Trace {
     type Branded = Gc<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>;
-}
-unsafe impl<'gc, 'a, T, Id> GcErase<'a, Id> for Gc<'gc, T, Id>
-    where T: GcSafe + ?Sized + GcErase<'a, Id>,
-          <T as GcErase<'a, Id>>::Erased: GcSafe,
-          Id: CollectorId, Self: Trace {
-    type Erased = Gc<'a, <T as GcErase<'a, Id>>::Erased, Id>;
 }
 unsafe impl<'gc, T: ?Sized + GcSafe + 'gc, Id: CollectorId> Trace for Gc<'gc, T, Id> {
     // We always need tracing....
@@ -994,11 +989,9 @@ unsafe_gc_impl! {
         TraceImmutable => always,
         GcSafe => always,
         GcRebrand => { where T: 'new_gc },
-        GcErase => { where T: 'min }
     },
     null_trace => always,
     branded_type => AssumeNotTraced<T>,
-    erased_type => AssumeNotTraced<T>,
     NEEDS_TRACE => false,
     NEEDS_DROP => core::mem::needs_drop::<T>(),
     visit => |self, visitor| { /* nop */ Ok(()) }
@@ -1030,20 +1023,8 @@ pub unsafe trait GcRebrand<'new_gc, Id: CollectorId>: Trace {
 /// This trait is the opposite of [GcRebrand]
 ///
 /// The lifetime '`a` is the minimum lifetime of all other non-gc references.
-pub unsafe trait GcErase<'a, Id: CollectorId>: Trace {
-    /// This type with all garbage collected lifetimes
-    /// changed to `'static` (or erased)
-    ///
-    /// This must have the same in-memory repr as `Self`,
-    /// so that it's safe to transmute.
-    type Erased: ?Sized + 'a;
-
-    /// Assert this type can be erased
-    ///
-    /// Only used by procedural derive
-    #[doc(hidden)]
-    fn assert_erase() {}
-}
+#[deprecated(note = "GcRebrand should be used instead")]
+pub trait GcErase<'a, Id: CollectorId> = GcRebrand<'a, Id>;
 
 /// Indicates that a type can be traced by a garbage collector.
 ///

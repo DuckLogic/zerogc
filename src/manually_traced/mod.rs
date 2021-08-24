@@ -94,7 +94,7 @@ macro_rules! unsafe_trace_lock {
 /// Undefined behavior only if there are garbage collected pointers in the type's interior,
 /// since the implementation assumes there's nothing to trace in the first place.
 ///
-/// This delegates to `unsafe_gc_brand!` to provide the (GcRebrand)[`crate::GcRebrand`] and (GcErase)[`crate::GcErase`] implementation,
+/// This delegates to `unsafe_gc_impl!` to provide the (GcRebrand)[`crate::GcRebrand`] implementation,
 /// but that will never cause undefined behavior unless you
 /// already have garbage collected pointers inside
 /// (which are already undefined behavior for tracing).

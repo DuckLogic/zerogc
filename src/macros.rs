@@ -64,9 +64,5 @@ macro_rules! trait_object_trace {
         unsafe impl<$branded_lt, $($($lt,)* $($param:ident,)*)? ActualId: $crate::CollectorId> $crate::GcRebrand<$branded_lt, ActualId> for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
             type Branded = $branded;
         }
-        unsafe impl<$erased_lt, $($($lt,)* $($param:ident,)*)? ActualId: $crate::CollectorId> $crate::GcErase<$erased_lt, ActualId> for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
-            type Erased = $erased;
-        }
-
     }
 }
