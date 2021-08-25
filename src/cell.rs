@@ -64,7 +64,7 @@ impl<T: NullTrace + Copy> GcCell<T> {
     }
 }
 unsafe impl<'gc, OwningRef, Value> GcDirectBarrier<'gc, OwningRef> for GcCell<Value>
-    where Value: GcSafe + GcDirectBarrier<'gc, OwningRef> + Copy {
+    where Value: GcDirectBarrier<'gc, OwningRef> + Copy {
     #[inline]
     unsafe fn write_barrier(
         &self, owner: &OwningRef,
@@ -81,14 +81,14 @@ unsafe_gc_impl!(
     // T is Copy, so it doesn't need to be dropped
     NEEDS_DROP => false,
     bounds => {
-        GcSafe => { where T: GcSafe + Copy },
+        GcSafe => { where T: GcSafe<'gc, Id> + Copy },
         Trace => { where T: Trace + Copy },
         // NOTE: TraceImmutable requires a 'NullTrace' for interior mutability
         TraceImmutable => { where T: NullTrace + Copy },
         GcRebrand => { where T: Trace + Copy + GcRebrand<'new_gc, Id>, Id: CollectorId,T::Branded: Copy + Trace }
     },
     branded_type => GcCell<T::Branded>,
-    null_trace => { where T: GcSafe + Copy + NullTrace },
+    null_trace => { where T: Copy + NullTrace },
     trace_mut => |self, visitor| {
         /*
          * GcCell can only support mutating types that are `NullTrace`,

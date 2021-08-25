@@ -3,10 +3,11 @@
 //! This is exposed only for use by collector implemetnations.
 //! User code should avoid it.
 
+use core::marker::PhantomData;
 use core::ffi::c_void;
 use core::alloc::Layout;
 
-use crate::{GcSafe,};
+use crate::{GcSafe, CollectorId};
 
 use zerogc_derive::unsafe_gc_impl;
 
@@ -29,7 +30,9 @@ pub enum ReallocFailedError {
 /// This must be implemented consistent with the API of [RawGcVec].
 ///
 /// It should only be used by [RawGcVec] and [GcVec].
-pub unsafe trait GcVecRepr: GcSafe {
+pub unsafe trait GcVecRepr<'gc>: GcSafe<'gc, Self::Id> {
+    /// The id of the collector
+    type Id: CollectorId;
     /// Whether this vector supports in-place reallocation.
     const SUPPORTS_REALLOC: bool = false;
     /// The layout of the underlying element type
@@ -70,9 +73,30 @@ pub unsafe trait GcVecRepr: GcSafe {
     unsafe fn ptr(&self) -> *const c_void;
 }
 /// Dummy implementation of [GcVecRepr] for collectors which do not support [GcVec]
-pub enum Unsupported {}
-unsafe_trace_primitive!(Unsupported);
-unsafe impl GcVecRepr for Unsupported {
+pub struct Unsupported<'gc, Id: CollectorId> {
+    /// The marker `PhantomData` needed to construct this type
+    pub marker: PhantomData<(Id, &'gc ())>,
+    /// indicates this type should never exist at runtime
+    // TODO: Replace with `!` once stabilized
+    pub never: std::convert::Infallible
+}
+unsafe_gc_impl! {
+    target => Unsupported<'gc, Id>,
+    params => ['gc, Id: CollectorId],
+    bounds => {
+        GcSafe => always,
+        GcRebrand => always,
+    },
+    null_trace => always, // TODO: Should we really `!NEEDS_TRACE`?
+    branded_type => Unsupported<'new_gc, Id>,
+    NEEDS_TRACE => false,
+    NEEDS_DROP => false,
+    collector_id => Id,
+    visit => |self, visitor| { /* nop */ Ok(()) }
+}
+unsafe impl<'gc, Id: CollectorId> GcVecRepr<'gc> for Unsupported<'gc, Id> {
+    type Id = Id;
+
     fn element_layout(&self) -> Layout {
         unimplemented!()
     }

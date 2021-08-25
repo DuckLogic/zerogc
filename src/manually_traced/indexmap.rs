@@ -10,6 +10,7 @@ unsafe_gc_impl! {
     null_trace => { where K: NullTrace, V: NullTrace },
     NEEDS_TRACE => K::NEEDS_TRACE || V::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
+    collector_id => *,
     visit => |self, visitor| {
         for (key, value) in self.#iter() {
             visitor.visit_immutable::<K>(key)?;
@@ -26,6 +27,7 @@ unsafe_gc_impl! {
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
+    collector_id => *,
     visit => |self, visitor| {
         for val in self.iter() {
             visitor.visit_immutable::<T>(val)?;

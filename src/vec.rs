@@ -19,11 +19,11 @@ pub mod repr;
 ///
 /// This is a thin pointer, with length stored indirectly in the object's header.
 #[repr(transparent)]
-pub struct GcArray<'gc, T: GcSafe + 'gc, Id: CollectorId> {
+pub struct GcArray<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
     ptr: NonNull<T>,
     marker: PhantomData<Gc<'gc, [T], Id>>
 }
-impl<'gc, T: GcSafe, Id: CollectorId> GcArray<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcArray<'gc, T, Id> {
     /// Create an array from the specified raw pointer and length
     ///
     /// ## Safety
@@ -63,7 +63,7 @@ impl<'gc, T: GcSafe, Id: CollectorId> GcArray<'gc, T, Id> {
         Id::resolve_array_id(self)
     }
 }
-impl<'gc, T: GcSafe, Id: CollectorId> Deref for GcArray<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Deref for GcArray<'gc, T, Id> {
     type Target = [T];
 
     #[inline]
@@ -71,8 +71,8 @@ impl<'gc, T: GcSafe, Id: CollectorId> Deref for GcArray<'gc, T, Id> {
         self.as_slice()
     }
 }
-impl<'gc, T: GcSafe, Id: CollectorId> Copy for GcArray<'gc, T, Id> {}
-impl<'gc, T: GcSafe, Id: CollectorId> Clone for GcArray<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Copy for GcArray<'gc, T, Id> {}
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Clone for GcArray<'gc, T, Id> {
     #[inline]
     fn clone(&self) -> Self {
         *self
@@ -81,11 +81,10 @@ impl<'gc, T: GcSafe, Id: CollectorId> Clone for GcArray<'gc, T, Id> {
 // Need to implement by hand, because [T] is not GcRebrand
 unsafe_gc_impl!(
     target => GcArray<'gc, T, Id>,
-    params => ['gc, T: GcSafe, Id: CollectorId],
-    collector_id => Id,
+    params => ['gc, T: GcSafe<'gc, Id>, Id: CollectorId],
     bounds => {
         TraceImmutable => never,
-        GcRebrand => { where T: GcRebrand<'new_gc, Id>, <T as GcRebrand<'new_gc, Id>>::Branded: Sized + GcSafe },
+        GcRebrand => { where T: GcRebrand<'new_gc, Id>, <T as GcRebrand<'new_gc, Id>>::Branded: Sized + GcSafe<'new_gc, Id> },
     },
     null_trace => never,
     branded_type => GcArray<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,
@@ -94,6 +93,7 @@ unsafe_gc_impl!(
     trace_mut => |self, visitor| {
         unsafe { visitor.visit_array(self) }
     },
+    collector_id => Id,
     visit_inside_gc => |gc, visitor| {
         visitor.visit_gc(gc)
     }
@@ -103,14 +103,14 @@ unsafe_gc_impl!(
 ///
 /// This is simply a thin wrapper around [RawGcVec]
 /// that also contains a reference to the owning [GcContext].
-pub struct GcVec<'gc, T: GcSafe, Ctx: GcSimpleAlloc> {
+pub struct GcVec<'gc, T: GcSafe<'gc, Ctx::Id>, Ctx: GcSimpleAlloc> {
     /// A reference to the owning GcContext
     pub context: &'gc Ctx,
     /// The underlying [RawGcVec],
     /// which actually manages the memory
     pub raw: GcRawVec<'gc, T, Ctx::Id>
 }
-impl<'gc, T: GcSafe, Ctx: GcSimpleAlloc> GcVec<'gc, T, Ctx> {
+impl<'gc, T: GcSafe<'gc, Ctx::Id>, Ctx: GcSimpleAlloc> GcVec<'gc, T, Ctx> {
     /// Convert this vector into its underlying [GcRawVec]
     #[inline]
     pub fn into_raw(self) -> GcRawVec<'gc, T, Ctx::Id> {
@@ -153,7 +153,7 @@ impl<'gc, T: GcSafe, Ctx: GcSimpleAlloc> GcVec<'gc, T, Ctx> {
         let requested_capacity = self.len().checked_add(amount).unwrap();
         let new_capacity = self.raw.capacity().checked_mul(2).unwrap()
             .max(requested_capacity);
-        if <Ctx::Id as CollectorId>::RawVecRepr::SUPPORTS_REALLOC {
+        if <Ctx::Id as CollectorId>::RawVecRepr::<'gc>::SUPPORTS_REALLOC {
             match self.raw.repr.value().realloc_in_place(new_capacity) {
                 Ok(()) => {
                     return; // success
@@ -179,10 +179,10 @@ impl<'gc, T: GcSafe, Ctx: GcSimpleAlloc> GcVec<'gc, T, Ctx> {
 }
 unsafe_gc_impl!(
     target => GcVec<'gc, T, Ctx>,
-    params => ['gc, T: GcSafe, Ctx: GcSimpleAlloc],
+    params => ['gc, T: GcSafe<'gc, Ctx::Id>, Ctx: GcSimpleAlloc],
     bounds => {
         TraceImmutable => never,
-        Trace => { where T: GcSafe + Trace },
+        Trace => { where T: GcSafe<'gc, Ctx::Id> + Trace },
         GcRebrand => never,
     },
     null_trace => never,
@@ -193,7 +193,7 @@ unsafe_gc_impl!(
     },
     collector_id => Ctx::Id
 );
-impl<'gc, T: GcSafe, Ctx: GcSimpleAlloc> Deref for GcVec<'gc, T, Ctx> {
+impl<'gc, T: GcSafe<'gc, Ctx::Id>, Ctx: GcSimpleAlloc> Deref for GcVec<'gc, T, Ctx> {
     type Target = GcRawVec<'gc, T, Ctx::Id>;
 
     #[inline]
@@ -202,7 +202,7 @@ impl<'gc, T: GcSafe, Ctx: GcSimpleAlloc> Deref for GcVec<'gc, T, Ctx> {
     }
 }
 
-impl<'gc, T: GcSafe, Ctx: GcSimpleAlloc> DerefMut for GcVec<'gc, T, Ctx> {
+impl<'gc, T: GcSafe<'gc, Ctx::Id>, Ctx: GcSimpleAlloc> DerefMut for GcVec<'gc, T, Ctx> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.raw
@@ -234,18 +234,18 @@ pub struct InsufficientCapacityError;
 /// To avoid undefined behavior, there can only be a single reference
 /// to a [RawGcVec], despite [Gc] implementing `Copy`.
 #[repr(transparent)]
-pub struct GcRawVec<'gc, T: GcSafe + 'gc, Id: CollectorId> {
-    repr: Gc<'gc, Id::RawVecRepr, Id>,
+pub struct GcRawVec<'gc, T: GcSafe<'gc, Id> + 'gc, Id: CollectorId> {
+    repr: Gc<'gc, Id::RawVecRepr<'gc>, Id>,
     marker: PhantomData<&'gc [T]>
 }
-impl<'gc, T: GcSafe, Id: CollectorId> GcRawVec<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcRawVec<'gc, T, Id> {
     /// Create a [RawGcVec] from the specified repr
     ///
     /// ## Safety
     /// The specified representation must be valid and actually
     /// be intended for this type `T`.
     #[inline]
-    pub unsafe fn from_repr(repr: Gc<'gc, Id::RawVecRepr, Id>) -> Self {
+    pub unsafe fn from_repr(repr: Gc<'gc, Id::RawVecRepr<'gc>, Id>) -> Self {
         GcRawVec { repr, marker: PhantomData }
     }
     /// View this [RawGcVec] as a [GcVec] for the duration of the specified closure,
@@ -325,7 +325,7 @@ impl<'gc, T: GcSafe, Id: CollectorId> GcRawVec<'gc, T, Id> {
     /// ## Safety
     /// The user must not violate the invariants of the repr.
     #[inline]
-    pub unsafe fn as_repr(&self) -> Gc<'gc, Id::RawVecRepr, Id> {
+    pub unsafe fn as_repr(&self) -> Gc<'gc, Id::RawVecRepr<'gc>, Id> {
         self.repr
     }
     /// Get a mutable reference to the raw represnetation of this vector
@@ -333,7 +333,7 @@ impl<'gc, T: GcSafe, Id: CollectorId> GcRawVec<'gc, T, Id> {
     /// ## Safety
     /// The user must preserve the validity of the underlying representation.
     #[inline]
-    pub unsafe fn as_repr_mut(&mut self) -> &mut Gc<'gc, Id::RawVecRepr, Id> {
+    pub unsafe fn as_repr_mut(&mut self) -> &mut Gc<'gc, Id::RawVecRepr<'gc>, Id> {
         &mut self.repr
     }
     /// Interpret this vector as a slice
@@ -356,7 +356,7 @@ impl<'gc, T: GcSafe, Id: CollectorId> GcRawVec<'gc, T, Id> {
         self.repr.ptr() as *const T
     }
 }
-impl<'gc, T: GcSafe, Id: CollectorId> Deref for GcRawVec<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Deref for GcRawVec<'gc, T, Id> {
     type Target = [T];
 
     #[inline]
@@ -366,13 +366,13 @@ impl<'gc, T: GcSafe, Id: CollectorId> Deref for GcRawVec<'gc, T, Id> {
 }
 unsafe_gc_impl!(
     target => GcRawVec<'gc, T, Id>,
-    params => ['gc, T: GcSafe, Id: CollectorId],
+    params => ['gc, T: GcSafe<'gc, Id>, Id: CollectorId],
     collector_id => Id,
     bounds => {
         TraceImmutable => never,
         GcRebrand => {
-            where T: GcSafe + GcRebrand<'new_gc, Id>,
-                <T as GcRebrand<'new_gc, Id>>::Branded: Sized + GcSafe
+            where T: GcRebrand<'new_gc, Id>,
+                <T as GcRebrand<'new_gc, Id>>::Branded: Sized
         },
     },
     branded_type => GcRawVec<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,

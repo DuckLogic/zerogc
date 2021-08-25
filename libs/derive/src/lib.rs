@@ -441,11 +441,20 @@ pub fn unsafe_gc_impl(input: proc_macro::TokenStream) -> proc_macro::TokenStream
     let parsed = parse_macro_input!(input as macros::MacroInput);
     let res = parsed.expand_output()
         .unwrap_or_else(|e| e.to_compile_error());
+    let tp = match parsed.target_type {
+        Type::Path(ref p) => Some(&p.path.segments.last().unwrap().ident),
+        _ => None
+    };
     let span_loc = span_file_loc(Span::call_site());
+    let f = if let Some(tp) = tp {
+        format!("unsafe_gc_impl!(target={}, ...) @ {}", tp, span_loc)
+    } else {
+        format!("unsafe_gc_impl! @ {}", span_loc)
+    };
     debug_derive(
         "unsafe_gc_impl!",
-        &span_loc,
-        &format_args!("unsafe_gc_impl! @ {}", span_loc),
+        &tp.map_or_else(|| span_loc.to_string(), |tp| tp.to_string()),
+        &f,
         &res
     );
     res.into()

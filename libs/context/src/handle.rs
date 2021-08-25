@@ -19,7 +19,7 @@ pub unsafe trait RawHandleImpl: RawCollectorImpl {
     /// Type information
     type TypeInfo: Sized;
 
-    fn type_info_of<T: GcSafe>() -> &'static Self::TypeInfo;
+    fn type_info_of<'gc, T: GcSafe<'gc, CollectorId<Self>>>() -> &'static Self::TypeInfo;
 
     fn handle_list(&self) -> &GcHandleList<Self>;
 }
@@ -397,12 +397,12 @@ impl<C: RawHandleImpl> GcRawHandle<C> {
         trace(value, type_info)
     }
 }
-pub struct GcHandle<T: GcSafe, C: RawHandleImpl> {
+pub struct GcHandle<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> {
     inner: NonNull<GcRawHandle<C>>,
     collector: WeakCollectorRef<C>,
     marker: PhantomData<*mut T>
 }
-impl<T: GcSafe, C: RawHandleImpl> GcHandle<T, C> {
+impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> GcHandle<T, C> {
     #[inline]
     pub(crate) unsafe fn new(
         inner: NonNull<GcRawHandle<C>>,
@@ -414,7 +414,7 @@ impl<T: GcSafe, C: RawHandleImpl> GcHandle<T, C> {
         }
     }
 }
-unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C> {
+unsafe impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C> {
     type System = CollectorRef<C>;
     type Id = CollectorId<C>;
 
@@ -438,8 +438,9 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C
     }
 }
 unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
-    where T: GcSafe, T: GcRebrand<'new_gc, CollectorId<C>>, T::Branded: Sized,
-          T::Branded: GcSafe, C: RawHandleImpl {
+    where T: GcSafe<'static, CollectorId<C>>, T: GcRebrand<'new_gc, CollectorId<C>>, T::Branded: Sized,
+          T::Branded: GcSafe<'new_gc, CollectorId<C>>,
+          C: RawHandleImpl {
     #[inline]
     fn bind_to(&self, context: &'new_gc CollectorContext<C>) -> Gc<'new_gc, T::Branded, CollectorId<C>> {
         /*
@@ -474,7 +475,7 @@ unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
     }
 
 }
-unsafe impl<T: GcSafe, C: RawHandleImpl> Trace for GcHandle<T, C> {
+unsafe impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Trace for GcHandle<T, C> {
     /// See docs on reachability
     const NEEDS_TRACE: bool = false;
     const NEEDS_DROP: bool = true;
@@ -486,20 +487,20 @@ unsafe impl<T: GcSafe, C: RawHandleImpl> Trace for GcHandle<T, C> {
 
     #[inline]
     unsafe fn visit_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
-        where V: GcVisitor, Id: zerogc::CollectorId, Self: GcSafe + 'gc {
+        where V: GcVisitor, Id: zerogc::CollectorId, Self: GcSafe<'gc, Id> {
         // Fine to stuff inside a pointer. We're a `Sized` type
         visitor.visit_gc(gc)
     }
 }
-unsafe impl<T: GcSafe, C: RawHandleImpl> TraceImmutable for GcHandle<T, C> {
+unsafe impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> TraceImmutable for GcHandle<T, C> {
     #[inline(always)]
     fn visit_immutable<V>(&self, _visitor: &mut V) -> Result<(), V::Err>
         where V: GcVisitor {
         Ok(())
     }
 }
-unsafe impl<T: GcSafe, C: RawHandleImpl> NullTrace for GcHandle<T, C> {}
-impl<T: GcSafe, C: RawHandleImpl> Clone for GcHandle<T, C> {
+unsafe impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> NullTrace for GcHandle<T, C> {}
+impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Clone for GcHandle<T, C> {
     fn clone(&self) -> Self {
         // NOTE: Dead collector -> invalid handle
         let collector = self.collector
@@ -542,7 +543,7 @@ impl<T: GcSafe, C: RawHandleImpl> Clone for GcHandle<T, C> {
         }
     }
 }
-impl<T: GcSafe, C: RawHandleImpl> Drop for GcHandle<T, C> {
+impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Drop for GcHandle<T, C> {
     fn drop(&mut self) {
         self.collector.try_ensure_valid(|id| {
             let collector = match id {
@@ -596,20 +597,20 @@ impl<T: GcSafe, C: RawHandleImpl> Drop for GcHandle<T, C> {
 /// This is the same reason that `Arc<T>: Send` requires `T: Sync`
 ///
 /// Requires that the collector is thread-safe.
-unsafe impl<T: GcSafe + Sync, C: RawHandleImpl + Sync> Send for GcHandle<T, C> {}
+unsafe impl<T: GcSafe<'static, CollectorId<C>> + Sync, C: RawHandleImpl + Sync> Send for GcHandle<T, C> {}
 
 /// If the underlying type is Sync,
 /// it's safe to share garbage collected references between threads.
 ///
 /// Requires that the collector is thread-safe.
-unsafe impl<T: GcSafe + Sync, C: RawHandleImpl + Sync> Sync for GcHandle<T, C> {}
+unsafe impl<T: GcSafe<'static, CollectorId<C>> + Sync, C: RawHandleImpl + Sync> Sync for GcHandle<T, C> {}
 
 /// We support handles
-unsafe impl<'gc, 'a, T, C> GcHandleSystem<'gc, 'a, T> for CollectorRef<C>
+unsafe impl<'gc, T, C> GcHandleSystem<'gc, T> for CollectorRef<C>
     where C: RawHandleImpl,
-          T: GcSafe + 'gc,
-          T: GcRebrand<'a, CollectorId<C>>,
-          T::Branded: GcSafe + Sized {
+          T: GcSafe<'gc, CollectorId<C>>,
+          T: GcRebrand<'static, CollectorId<C>>,
+          T::Branded: GcSafe<'static, CollectorId<C>> + Sized {
     type Handle = GcHandle<T::Branded, C>;
 
     #[inline]

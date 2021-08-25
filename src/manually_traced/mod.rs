@@ -107,6 +107,7 @@ macro_rules! unsafe_trace_primitive {
             null_trace => always,
             NEEDS_TRACE => false,
             NEEDS_DROP => core::mem::needs_drop::<$target>(),
+            collector_id => *,
             visit => |self, visitor| { /* nop */ Ok(()) }
         }
         unsafe impl<'gc, OwningRef> $crate::GcDirectBarrier<'gc, OwningRef> for $target {

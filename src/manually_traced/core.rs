@@ -48,7 +48,8 @@ macro_rules! trace_tuple_impl {
                 let ($(ref #mutability $param,)*) = *self;
                 $(visitor.#visit_func($param)?;)*
                 Ok(())
-            }
+            },
+            collector_id => *
         }
         unsafe impl<'gc, OwningRef, $($param),*> $crate::GcDirectBarrier<'gc, OwningRef> for ($($param,)*)
             where $($param: $crate::GcDirectBarrier<'gc, OwningRef>),* {
@@ -103,7 +104,6 @@ macro_rules! trace_tuple_impl {
     };
 }
 
-
 unsafe_trace_primitive!(i8);
 unsafe_trace_primitive!(i16);
 unsafe_trace_primitive!(i32);
@@ -127,12 +127,14 @@ unsafe_gc_impl! {
     bounds => {
         Trace => always,
         TraceImmutable => always,
-        GcSafe => always,
+        TrustedDrop => always,
+        GcSafe => { where T: 'gc },
         GcRebrand => { where T: 'new_gc },
     },
     branded_type => Self,
     null_trace => always,
     NEEDS_TRACE => false,
+    collector_id => *,
     NEEDS_DROP => core::mem::needs_drop::<Self>(),
     visit => |self, visitor| { /* nop */ Ok(()) }
 }
@@ -151,6 +153,7 @@ macro_rules! trace_array {
             NEEDS_TRACE => T::NEEDS_TRACE,
             NEEDS_DROP => T::NEEDS_DROP,
             branded_type => [<T as GcRebrand<'new_gc, Id>>::Branded; $size],
+            collector_id => *,
             visit => |self, visitor| {
                 visitor.#visit_func(#b*self as #b [T])
             },
@@ -175,6 +178,8 @@ unsafe_gc_impl! {
     bounds => {
         Trace => { where T: TraceImmutable },
         TraceImmutable => { where T: TraceImmutable },
+        TrustedDrop => { where T: TraceImmutable /* NOTE: We are Copy, so dont' have any drop to trust */ },
+        GcSafe => { where 'a: 'gc, T: TraceImmutable + GcSafe<'gc, Id> },
         /*
          * TODO: Right now we require `NullTrace`
          *
@@ -185,12 +190,13 @@ unsafe_gc_impl! {
          * Therefore the only solution is to preserve `&'a T` as-is,
          * which is only safe if `T: NullTrace`
          */
-        GcRebrand => { where T: NullTrace, 'a: 'new_gc },
+        GcRebrand => { where T: NullTrace + GcSafe<'new_gc, Id>, 'a: 'new_gc },
     },
     branded_type => &'a T,
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => false, // We never need to be dropped
+    collector_id => *,
     visit => |self, visitor| {
         visitor.visit_immutable::<T>(&**self)
     }
@@ -201,12 +207,13 @@ unsafe_gc_impl!(
     target => Cell<T>,
     params => [T: NullTrace],
     bounds => {
-        GcRebrand => { where T: NullTrace, T: 'new_gc },
+        GcRebrand => { where T: NullTrace + GcSafe<'new_gc, Id>, T: 'new_gc },
     },
     branded_type => Self,
     null_trace => always,
     NEEDS_TRACE => false,
     NEEDS_DROP => T::NEEDS_DROP,
+    collector_id => *,
     visit => |self, visitor| {
         Ok(()) /* nop */
     }
@@ -215,12 +222,13 @@ unsafe_gc_impl!(
     target => RefCell<T>,
     params => [T: NullTrace],
     bounds => {
-        GcRebrand => { where T: NullTrace, T: 'new_gc },
+        GcRebrand => { where T: GcSafe<'new_gc, Id> + NullTrace, T: 'new_gc },
     },
     branded_type => Self,
     null_trace => always,
     NEEDS_TRACE => false,
     NEEDS_DROP => T::NEEDS_DROP,
+    collector_id => *,
     visit => |self, visitor| {
         Ok(()) /* nop */
     }
@@ -236,18 +244,20 @@ unsafe_gc_impl! {
     target => &'a mut T,
     params => ['a, T: 'a],
     bounds => {
+        GcSafe => { where 'a: 'gc, T: GcSafe<'gc, Id> },
         /*
          * TODO: Right now we require `NullTrace`
          *
          * This is the same reasoning as the requirements for `&'a T`.
          * See their comments for details.....
          */
-        GcRebrand => { where T: NullTrace, 'a: 'new_gc },
+        GcRebrand => { where T: NullTrace + GcSafe<'new_gc, Id>, 'a: 'new_gc },
     },
     branded_type => &'a mut T,
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => false, // Although not `Copy`, mut references don't need to be dropped
+    collector_id => *,
     visit => |self, visitor| {
         visitor.#visit_func::<T>(#b **self)
     }
@@ -263,9 +273,8 @@ unsafe_gc_impl! {
     params => [T],
     bounds => {
         GcRebrand => never,
-        GcSafe => { where T: GcSafe },
         visit_inside_gc => where Visitor: crate::GcVisitor, ActualId: crate::CollectorId,
-            [T]: GcSafe + 'actual_gc
+            [T]: GcSafe<'actual_gc, ActualId> + 'actual_gc
     },
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
@@ -276,6 +285,7 @@ unsafe_gc_impl! {
         }
         Ok(())
     },
+    collector_id => *,
     visit_inside_gc => |gc, visitor| {
         todo!("Visit Gc<[T]> instead of GcArray<T>")
     }
@@ -287,6 +297,7 @@ unsafe_gc_impl! {
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => T::NEEDS_DROP,
+    collector_id => *,
     visit => |self, visitor| {
         match *self {
             None => Ok(()),
@@ -327,7 +338,8 @@ unsafe_gc_impl! {
     visit => |self, visitor| {
         // We can trace `Wrapping` by simply tracing its interior
         visitor.#visit_func(#b self.0)
-    }
+    },
+    collector_id => *
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@ unsafe_gc_impl! {
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
+    collector_id => *,
     visit => |self, visitor| {
         // Delegate to slice
         visitor.#visit_func::<[T]>(#b**self as #b [T])
@@ -29,6 +30,7 @@ unsafe_gc_impl! {
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
+    collector_id => *,
     visit => |self, visitor| {
         visitor.#visit_func::<T>(#b **self)
     }
@@ -40,6 +42,7 @@ unsafe_gc_impl! {
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
+    collector_id => *,
     visit => |self, visitor| {
         // We must always visit immutable, since we have shared references
         visitor.visit_immutable::<T>(&**self)
@@ -51,6 +54,7 @@ unsafe_gc_impl! {
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
+    collector_id => *,
     visit => |self, visitor| {
         // We must always visit immutable, since we have shared references
         visitor.visit_immutable::<T>(&**self)

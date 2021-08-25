@@ -4,6 +4,7 @@
     coerce_unsized, // RFC 0982 - DST coercion
     unsize,
     trait_alias, // RFC 1733 - Trait aliases
+    generic_associated_types, // RFC 1598 - Generic associated types
 )]
 #![feature(maybe_uninit_slice)]
 #![feature(new_uninit)]
@@ -232,11 +233,10 @@ pub unsafe trait GcSystem {
 /// This type-system hackery is needed because
 /// we need to place bounds on `T as GcBrand`
 // TODO: Remove when we get more powerful types
-pub unsafe trait GcHandleSystem<'gc, 'a, T: GcSafe + ?Sized + 'gc>: GcSystem
-    where T: GcRebrand<'a, Self::Id>,
-          <T as GcRebrand<'a, Self::Id>>::Branded: GcSafe {
+pub unsafe trait GcHandleSystem<'gc, T: GcSafe<'gc, Self::Id> + ?Sized + 'gc>: GcSystem
+    where T: GcRebrand<'static, Self::Id> {
     /// The type of handles to this object.
-    type Handle: GcHandle<<T as GcRebrand<'a, Self::Id>>::Branded, System=Self>;
+    type Handle: GcHandle<<T as GcRebrand<'static, Self::Id>>::Branded, System=Self, Id=Self::Id>;
 
     /// Create a handle to the specified GC pointer,
     /// which can be used without a context
@@ -434,7 +434,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// The object **must** be initialized by the time the next collection
     /// rolls around, so that the collector can properly trace it
     unsafe fn alloc_uninit<'gc, T>(&'gc self) -> (Self::Id, *mut T)
-        where T: GcSafe + 'gc;
+        where T: GcSafe<'gc, Self::Id> + 'gc;
     /// Allocate the specified object in this garbage collector,
     /// binding it to the lifetime of this collector.
     ///
@@ -449,7 +449,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// Once allocated, the object can only be correctly modified with a `GcCell`
     #[inline]
     fn alloc<'gc, T>(&'gc self, value: T) -> Gc<'gc, T, Self::Id>
-        where T: GcSafe + 'gc {
+        where T: GcSafe<'gc, Self::Id> + 'gc {
         unsafe {
             let (id, ptr) = self.alloc_uninit::<T>();
             ptr.write(value);
@@ -467,10 +467,10 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// In particular, the traditional way to implement a [Vec] is wrong.
     /// It is unsafe to leave the range of memory `[len, capacity)` uninitialized.
     unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> (Self::Id, *mut T)
-        where T: GcSafe + 'gc;
+        where T: GcSafe<'gc, Self::Id> + 'gc;
     /// Allocate a slice, copied from the specified input
     fn alloc_slice_copy<'gc, T>(&'gc self, src: &[T]) -> GcArray<'gc, T, Self::Id>
-        where T: GcSafe + Copy + 'gc {
+        where T: GcSafe<'gc, Self::Id> + Copy + 'gc {
         unsafe {
             let (_id, res_ptr) = self.alloc_uninit_slice::<T>(src.len());
             res_ptr.copy_from_nonoverlapping(src.as_ptr(), src.len());
@@ -490,7 +490,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// Otherwise, the gc may end up tracing the values even though they are uninitialized.
     #[inline]
     unsafe fn alloc_slice_fill_with<'gc, T, F>(&'gc self, len: usize, mut func: F) -> GcArray<'gc, T, Self::Id>
-        where T: GcSafe + 'gc, F: FnMut(usize) -> T {
+        where T: GcSafe<'gc, Self::Id> + 'gc, F: FnMut(usize) -> T {
         let (_id, res_ptr) = self.alloc_uninit_slice::<T>(len);
         for i in 0..len {
             res_ptr.add(i).write(func(i));
@@ -504,7 +504,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// initializing everything to `None`
     #[inline]
     fn alloc_slice_none<'gc, T>(&'gc self, len: usize) -> GcArray<'gc, Option<T>, Self::Id>
-        where T: GcSafe + 'gc {
+        where T: GcSafe<'gc, Self::Id> + 'gc {
         unsafe {
             self.alloc_slice_fill_with(len, |_idx| None)
         }
@@ -512,7 +512,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// Allocate a slice by repeatedly copying a single value.
     #[inline]
     fn alloc_slice_fill_copy<'gc, T>(&'gc self, len: usize, val: T) -> GcArray<'gc, T, Self::Id>
-        where T: GcSafe + Copy + 'gc {
+        where T: GcSafe<'gc, Self::Id> + Copy + 'gc {
         unsafe {
             self.alloc_slice_fill_with(len, |_idx| val)
         }
@@ -520,11 +520,11 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// Create a new [GcVec] with zero initial length,
     /// with an implicit reference to this [GcContext].
     fn alloc_vec<'gc, T>(&'gc self) -> GcVec<'gc, T, Self>
-        where T: GcSafe + 'gc;
+        where T: GcSafe<'gc, Self::Id> + 'gc;
     /// Allocate a new [GcVec] with the specified capacity
-    /// and an implcit reference to this [GcContext]
+    /// and an implicit reference to this [GcContext]
     fn alloc_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> GcVec<'gc, T, Self>
-        where T: GcSafe + 'gc;
+        where T: GcSafe<'gc, Self::Id> + 'gc;
 }
 /// The internal representation of a frozen context
 ///
@@ -562,34 +562,34 @@ impl<C: GcContext> FrozenContext<C> {
 ///
 /// It should be safe to assume that a collector exists
 /// if any of its pointers still do!
-pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + 'static {
+pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + TrustedDrop + 'static +for<'gc> GcSafe<'gc, Self> {
     /// The type of the garbage collector system
     type System: GcSystem<Id=Self>;
     /// The raw representation of vectors in this collector.
     ///
     /// May be [crate::vec::repr::VecUnsupported] if vectors are unsupported.
-    type RawVecRepr: crate::vec::repr::GcVecRepr;
+    type RawVecRepr<'gc>: crate::vec::repr::GcVecRepr<'gc, Id=Self>;
 
     /// Get the runtime id of the collector that allocated the [Gc]
     fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self
-        where T: GcSafe + ?Sized + 'gc, 'gc: 'a;
+        where T: GcSafe<'gc, Self> + ?Sized + 'gc, 'gc: 'a;
 
     /// Resolve the length of the specified [GcArray]
     fn resolve_array_len<'gc, T>(array: GcArray<'gc, T, Self>) -> usize
-        where T: GcSafe + 'gc;
+        where T: GcSafe<'gc, Self> + 'gc;
 
     /// Resolve the CollectorId for the specified [GcArray]
     ///
     /// This is the [GcArray] counterpart of `from_gc_ptr`
     fn resolve_array_id<'a, 'gc, T>(gc: &'a GcArray<'gc, T, Self>) -> &'a Self
-        where T: GcSafe + 'gc, 'gc: 'a;
+        where T: GcSafe<'gc, Self> + 'gc, 'gc: 'a;
 
     /// Perform a write barrier before writing to a garbage collected field
     ///
     /// ## Safety
     /// Similar to the [GcDirectBarrier] trait, it can be assumed that
     /// the field offset is correct and the types match.
-    unsafe fn gc_write_barrier<'gc, O: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc>(
+    unsafe fn gc_write_barrier<'gc, O: GcSafe<'gc, Self> + ?Sized, V: GcSafe<'gc, Self> + ?Sized>(
         owner: &Gc<'gc, O, Self>,
         value: &Gc<'gc, V, Self>,
         field_offset: usize
@@ -625,7 +625,7 @@ pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + 'static {
 /// Unsafe code can rely on a pointer always dereferencing to the same value in between
 /// safepoints. This is true even for copying/moving collectors.
 #[repr(transparent)]
-pub struct Gc<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> {
+pub struct Gc<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> {
     value: NonNull<T>,
     /// Marker struct used to statically identify the collector's type
     ///
@@ -637,7 +637,7 @@ pub struct Gc<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> {
      */
     marker: PhantomData<&'gc T>,
 }
-impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
     /// Create a GC pointer from a raw ID/pointer pair
     ///
     /// ## Safety
@@ -671,11 +671,10 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
 
     /// Create a handle to this object, which can be used without a context
     #[inline]
-    pub fn create_handle<'a>(&self) -> <Id::System as GcHandleSystem<'gc, 'a, T>>::Handle
-        where Id::System: GcHandleSystem<'gc, 'a, T>,
-              T: GcRebrand<'a, Id> + 'a,
-              <T as GcRebrand<'a, Id>>::Branded: GcSafe + 'a {
-        <Id::System as GcHandleSystem<'gc, 'a, T>>::create_handle(*self)
+    pub fn create_handle<'a>(&self) -> <Id::System as GcHandleSystem<'gc, T>>::Handle
+        where Id::System: GcHandleSystem<'gc, T>,
+              T: GcRebrand<'static, Id> + 'a {
+        <Id::System as GcHandleSystem<'gc, T>>::create_handle(*self)
     }
 
     /// Get a reference to the system
@@ -701,15 +700,15 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
 }
 
 /// Double-indirection is completely safe
-unsafe impl<'gc, T: ?Sized + GcSafe + 'gc, Id: CollectorId> GcSafe for Gc<'gc, T, Id> {}
+unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> TrustedDrop for Gc<'gc, T, Id> {}
+unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> GcSafe<'gc, Id> for Gc<'gc, T, Id> {}
 /// Rebrand
 unsafe impl<'gc, 'new_gc, T, Id> GcRebrand<'new_gc, Id> for Gc<'gc, T, Id>
-    where T: GcSafe + ?Sized + GcRebrand<'new_gc, Id>,
-          <T as GcRebrand<'new_gc, Id>>::Branded: GcSafe,
+    where T: GcSafe<'gc, Id> + ?Sized + GcRebrand<'new_gc, Id>,
           Id: CollectorId, Self: Trace {
     type Branded = Gc<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>;
 }
-unsafe impl<'gc, T: ?Sized + GcSafe + 'gc, Id: CollectorId> Trace for Gc<'gc, T, Id> {
+unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> Trace for Gc<'gc, T, Id> {
     // We always need tracing....
     const NEEDS_TRACE: bool = true;
     // we never need to be dropped because we are `Copy`
@@ -725,12 +724,12 @@ unsafe impl<'gc, T: ?Sized + GcSafe + 'gc, Id: CollectorId> Trace for Gc<'gc, T,
 
     #[inline]
     unsafe fn visit_inside_gc<'actual_gc, V, ActualId>(gc: &mut Gc<'actual_gc, Self, ActualId>, visitor: &mut V) -> Result<(), V::Err>
-        where V: GcVisitor, ActualId: CollectorId, Self: GcSafe + 'actual_gc {
+        where V: GcVisitor, ActualId: CollectorId, Self: GcSafe<'actual_gc, ActualId> {
         // Double indirection is fine. It's just a `Sized` type
         visitor.visit_gc(gc)
     }
 }
-impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Deref for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + ?Sized + 'gc, Id: CollectorId> Deref for Gc<'gc, T, Id> {
     type Target = &'gc T;
 
     #[inline(always)]
@@ -739,42 +738,42 @@ impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Deref for Gc<'gc, T, Id> {
     }
 }
 unsafe impl<'gc, O, V, Id> GcDirectBarrier<'gc, Gc<'gc, O, Id>> for Gc<'gc, V,Id>
-    where O: GcSafe + 'gc, V: GcSafe + 'gc, Id: CollectorId {
+    where O: GcSafe<'gc, Id> + 'gc, V: GcSafe<'gc, Id> + 'gc, Id: CollectorId {
     #[inline(always)]
     unsafe fn write_barrier(&self, owner: &Gc<'gc, O, Id>, field_offset: usize) {
         Id::gc_write_barrier(owner, self, field_offset)
     }
 }
 // We can be copied freely :)
-impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Copy for Gc<'gc, T, Id> {}
-impl<'gc, T: GcSafe + ?Sized + 'gc, Id: CollectorId> Clone for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Copy for Gc<'gc, T, Id> {}
+impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Clone for Gc<'gc, T, Id> {
     #[inline(always)]
     fn clone(&self) -> Self {
         *self
     }
 }
 // Delegating impls
-impl<'gc, T: GcSafe + Hash + 'gc, Id: CollectorId> Hash for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + Hash + 'gc, Id: CollectorId> Hash for Gc<'gc, T, Id> {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.value().hash(state)
     }
 }
-impl<'gc, T: GcSafe + PartialEq + 'gc, Id: CollectorId> PartialEq for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + PartialEq + 'gc, Id: CollectorId> PartialEq for Gc<'gc, T, Id> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         // NOTE: We compare by value, not identity
         self.value() == other.value()
     }
 }
-impl<'gc, T: GcSafe + Eq + 'gc, Id: CollectorId> Eq for Gc<'gc, T, Id> {}
-impl<'gc, T: GcSafe + PartialEq + 'gc, Id: CollectorId> PartialEq<T> for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + Eq + 'gc, Id: CollectorId> Eq for Gc<'gc, T, Id> {}
+impl<'gc, T: GcSafe<'gc, Id> + PartialEq + 'gc, Id: CollectorId> PartialEq<T> for Gc<'gc, T, Id> {
     #[inline]
     fn eq(&self, other: &T) -> bool {
         self.value() == other
     }
 }
-impl<'gc, T: GcSafe + Debug + 'gc, Id: CollectorId> Debug for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + Debug + 'gc, Id: CollectorId> Debug for Gc<'gc, T, Id> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         if !f.alternate() {
             // Pretend we're a newtype by default
@@ -794,15 +793,15 @@ impl<'gc, T: GcSafe + Debug + 'gc, Id: CollectorId> Debug for Gc<'gc, T, Id> {
 ///
 /// This is the same reason that `Arc<T>: Send` requires `T: Sync`
 unsafe impl<'gc, T, Id> Send for Gc<'gc, T, Id>
-    where T: GcSafe + ?Sized + Sync, Id: CollectorId + Sync {}
+    where T: GcSafe<'gc, Id> + ?Sized + Sync, Id: CollectorId + Sync {}
 
 /// If the underlying type is `Sync`, it's safe
 /// to share garbage collected references between threads.
 ///
 /// The safety of the collector itself depends on whether [CollectorId] is Sync.
-/// If it is, the whole garbage collection implenentation should be as well.
+/// If it is, the whole garbage collection implementation should be as well.
 unsafe impl<'gc, T, Id> Sync for Gc<'gc, T, Id>
-    where T: GcSafe + ?Sized + Sync, Id: CollectorId + Sync {}
+    where T: GcSafe<'gc, Id> + ?Sized + Sync, Id: CollectorId + Sync {}
 
 /// A owned handle which points to a garbage collected object.
 ///
@@ -826,7 +825,7 @@ unsafe impl<'gc, T, Id> Sync for Gc<'gc, T, Id>
 /*
  * TODO: Should we drop the Clone requirement?
  */
-pub unsafe trait GcHandle<T: GcSafe + ?Sized>: Clone + NullTrace {
+pub unsafe trait GcHandle<T: GcSafe<'static, Self::Id> + ?Sized>: Clone + NullTrace {
     /// The type of the system used with this handle
     type System: GcSystem<Id=Self::Id>;
     /// The type of [CollectorId] used with this sytem
@@ -857,9 +856,8 @@ pub unsafe trait GcHandle<T: GcSafe + ?Sized>: Clone + NullTrace {
 /// because Rust doesn't have Generic Associated Types
 ///
 /// TODO: Remove when we get more powerful types
-pub unsafe trait GcBindHandle<'new_gc, T: GcSafe + ?Sized>: GcHandle<T>
-    where T: GcRebrand<'new_gc, Self::Id>,
-          <T as GcRebrand<'new_gc, Self::Id>>::Branded: GcSafe {
+pub unsafe trait GcBindHandle<'new_gc, T: GcSafe<'static, Self::Id> + ?Sized>: GcHandle<T>
+    where T: GcRebrand<'new_gc, Self::Id>, {
     /// Associate this handle with the specified context,
     /// allowing its underlying object to be accessed
     /// as long as the context is valid.
@@ -923,23 +921,83 @@ pub unsafe trait GcDirectBarrier<'gc, OwningRef>: Trace {
     unsafe fn write_barrier(&self, owner: &OwningRef, field_offset: usize);
 }
 
-/// A marker type, indicating that a type can be safely allocated by a garbage collector.
+/// Indicates that a type's [Drop](core::ops::Drop) implementation is trusted
+/// not to resurrect any garbage collected object.
+///
+/// This is a requirement for a type to be allocated in [GcSimpleAlloc],
+/// and also for a type to be `GcSafe`.
+///
+/// Unlike java finalizers, these trusted destructors
+/// avoids a second pass to check for resurrected objects.
+/// This is important giving the frequency of destructors
+/// when interoperating with native code.
+///
+/// The collector is of course free to implement support java-style finalizers in addition
+/// to supporting these "trusted" destructors.
 ///
 /// ## Safety
-/// Custom destructors must never reference garbage collected pointers.
+/// To implement this trait, the type's destructor
+/// must never reference garbage collected pointers that may already be dead
+/// and must never resurrect dead objects.
 /// The garbage collector may have already freed the other objects
 /// before calling this type's drop function.
 ///
-/// Unlike java finalizers, this allows us to deallocate objects normally
-/// and avoids a second pass over the objects
-/// to check for resurrected objects.
-pub unsafe trait GcSafe: Trace {
+pub unsafe trait TrustedDrop: Trace {}
+
+/// A marker trait correlating all garbage collected pointers
+/// corresponding to the specified `Id` are valid for the `'gc` lifetime.
+///
+/// If this type is implemented for a specific [CollectorId] `Id`,
+/// it indicates the possibility of containing pointers belonging to that collector.
+///
+/// If a type is `NullTrace, it should implement `GcSafe` for all possible collectors.
+/// However, if a type `NEEDS_TRACE`, it will usually only implement GcSafe for the specific
+/// [CollectorId]s it hppappens to contain (although this is not guarenteed).
+///
+/// The `Id` parameter allows mixing and matching pointers from different collectors,
+/// each with their own `gc lifetime.
+/// For example,
+/// ```
+/// # use zerogc::{Gc, CollectorId, GcSafe};
+/// # use zerogc_derive::Trace;
+/// # type JsGcId = zerogc::dummy_impl::DummyCollectorId;
+/// # type OtherGcId = zerogc::dummy_impl::DummyCollectorId;
+/// #[derive(Trace)]
+/// struct MixedGc<'gc, 'js> {
+///     internal_ptr: Gc<'gc, i32, OtherGcId>,
+///     js_ptr: Gc<'gc, i32, JsGcId>
+/// }
+/// impl<'gc, 'js> MixedGc<'gc, 'js> {
+///     fn verify(&self) {
+///         assert!(<Self as GcSafe<'gc, OtherGcId>>::assert_gc_safe());
+///         assert!(<Self as GcSafe<'js, JsGcId>>::assert_gc_safe());
+///         // NOT implemented: <Self as GcSafe<'gc, ThirdId>>
+///     }
+/// }
+/// ```
+///
+/// ## Safety
+/// In addition to the guarantees of [Trace] and [TrustedDrop],
+/// implementing this type requires that all [Gc] pointers of the specified `Id` live for `'gc'
+/// (if there are any at all).
+pub unsafe trait GcSafe<'gc, Id: CollectorId>: Trace + TrustedDrop + 'gc {
     /// Assert this type is GC safe
     ///
     /// Only used by procedural derive
     #[doc(hidden)]
-    fn assert_gc_safe() where Self: Sized {}
+    fn assert_gc_safe() -> bool where Self: Sized { true }
 }
+
+/// A [GcSafe] type with all garbage-collected pointers
+/// erased to the `'static`  type.
+///
+/// This should generally only be used by internal code.
+///
+/// ## Safety
+/// This type is incredibly unsafe. It eliminates all the safety invariants
+/// of lifetimes.
+pub trait GcSafeErased<Id: CollectorId> = GcSafe<'static, Id>;
+
 /// Assert that a type implements Copy
 ///
 /// Used by the derive code
@@ -987,7 +1045,8 @@ unsafe_gc_impl! {
         // Unconditionally implement all traits
         Trace => always,
         TraceImmutable => always,
-        GcSafe => always,
+        TrustedDrop => always,
+        GcSafe => { where T: 'gc },
         GcRebrand => { where T: 'new_gc },
     },
     null_trace => always,
@@ -1009,7 +1068,7 @@ pub unsafe trait GcRebrand<'new_gc, Id: CollectorId>: Trace {
     ///
     /// This must have the same in-memory repr as `Self`,
     /// so that it's safe to transmute.
-    type Branded: ?Sized + 'new_gc;
+    type Branded: GcSafe<'new_gc, Id> + ?Sized;
 
     /// Assert this type can be rebranded
     ///
@@ -1017,14 +1076,6 @@ pub unsafe trait GcRebrand<'new_gc, Id: CollectorId>: Trace {
     #[doc(hidden)]
     fn assert_rebrand() {}
 }
-/// Indicates that it's safe to erase all GC lifetimes
-/// and change them to 'static (logically an 'unsafe)
-///
-/// This trait is the opposite of [GcRebrand]
-///
-/// The lifetime '`a` is the minimum lifetime of all other non-gc references.
-#[deprecated(note = "GcRebrand should be used instead")]
-pub trait GcErase<'a, Id: CollectorId> = GcRebrand<'a, Id>;
 
 /// Indicates that a type can be traced by a garbage collector.
 ///
@@ -1058,6 +1109,11 @@ pub unsafe trait Trace {
     /// Therefore, when in doubt you always assume this is true.
     ///
     /// If this is true `NullTrace` should (but doesn't have to) be implemented.
+    /*
+     * TODO: Should we move this to `GcSafe`?
+     * Needing tracing for `Id1` doesn't nessicitate
+     * needing tracing for `Id2`
+     */
     const NEEDS_TRACE: bool;
     /// If this type needs a destructor run.
     ///
@@ -1113,7 +1169,7 @@ pub unsafe trait Trace {
     ///
     /// The user is required to supply an appropriate [Gc] pointer.
     unsafe fn visit_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
-        where V: GcVisitor, Id: CollectorId, Self: GcSafe + 'gc;
+        where V: GcVisitor, Id: CollectorId, Self: GcSafe<'gc, Id> + 'gc;
 }
 
 /// A type that can be safely traced/relocated
@@ -1156,11 +1212,11 @@ pub unsafe trait TraceImmutable: Trace {
 /// The garbage collector will be able to use its runtime type information
 /// to find the appropriate implementation at runtime,
 /// even though its not known at compile tme.
-pub unsafe trait DynTrace {}
-unsafe impl<T: ?Sized + Trace + GcSafe> DynTrace for T {}
+pub unsafe trait DynTrace<'gc, Id: CollectorId> {}
+unsafe impl<'gc, Id: CollectorId, T: ?Sized + Trace + GcSafe<'gc, Id>> DynTrace<'gc, Id> for T {}
 
 impl<'gc, T, U, Id> CoerceUnsized<Gc<'gc, U, Id>> for Gc<'gc, T, Id>
-    where T: ?Sized + GcSafe + Unsize<U>, U: ?Sized + GcSafe, Id: CollectorId {
+    where T: ?Sized + GcSafe<'gc, Id> + Unsize<U>, U: ?Sized + GcSafe<'gc, Id>, Id: CollectorId {
 
 }
 
@@ -1194,7 +1250,7 @@ pub unsafe trait GcVisitor: Sized {
     unsafe fn visit_gc<'gc, T, Id>(
         &mut self, gc: &mut Gc<'gc, T, Id>
     ) -> Result<(), Self::Err>
-        where T: GcSafe + 'gc, Id: CollectorId;
+        where T: GcSafe<'gc, Id> + 'gc, Id: CollectorId;
 
     /// Visit a garbage collected trait object.
     ///
@@ -1203,7 +1259,7 @@ pub unsafe trait GcVisitor: Sized {
     unsafe fn visit_trait_object<'gc, T, Id>(
         &mut self, gc: &mut Gc<'gc, T, Id>
     ) -> Result<(), Self::Err>
-        where T: ?Sized + GcSafe + 'gc + Pointee<Metadata=DynMetadata<T>> + DynTrace,
+        where T: ?Sized + GcSafe<'gc, Id> + 'gc + Pointee<Metadata=DynMetadata<T>> + DynTrace<'gc, Id>,
               Id: CollectorId;
 
     /// Visit a garbage collected vector.
@@ -1211,9 +1267,9 @@ pub unsafe trait GcVisitor: Sized {
     /// ## Safety
     /// Undefined behavior if the vector is invalid.
     unsafe fn visit_vec<'gc, T, Id>(
-        &mut self, raw: &mut Gc<'gc, Id::RawVecRepr, Id>
+        &mut self, raw: &mut Gc<'gc, Id::RawVecRepr<'gc>, Id>
     ) -> Result<(), Self::Err>
-        where T: GcSafe + 'gc, Id: CollectorId;
+        where T: GcSafe<'gc, Id> + 'gc, Id: CollectorId;
 
     /// Visit a garbage collected array.
     ///
@@ -1222,5 +1278,5 @@ pub unsafe trait GcVisitor: Sized {
     unsafe fn visit_array<'gc, T, Id>(
         &mut self, array: &mut GcArray<'gc, T, Id>
     ) -> Result<(), Self::Err>
-        where T: GcSafe + 'gc, Id: CollectorId;
+        where T: GcSafe<'gc, Id> + 'gc, Id: CollectorId;
 }
