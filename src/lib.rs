@@ -1223,7 +1223,13 @@ impl<'gc, T, U, Id> CoerceUnsized<Gc<'gc, U, Id>> for Gc<'gc, T, Id>
 /// Marker types for types that don't need to be traced
 ///
 /// If this trait is implemented `Trace::NEEDS_TRACE` must be false
-pub unsafe trait NullTrace: Trace + TraceImmutable {}
+pub unsafe trait NullTrace: Trace + TraceImmutable {
+    /// Dummy method for macros to verify that a type actually implements `NullTrace`
+    #[doc(hidden)]
+    #[inline]
+    fn verify_null_trace() where Self: Sized {
+    }
+}
 
 /// Visits garbage collected objects
 ///

@@ -18,6 +18,7 @@ zerogc = { version = "0.2.0-alpha.5", path = "../.." }
 # Proc macros
 syn = { version = "1.0.55", features = ["full", "extra-traits"] }
 quote = "1.0.8"
+darling = "0.13"
 proc-macro2 = "1"
 # Utilities for argument parsing
 proc-macro-kwargs = "0.1.1"

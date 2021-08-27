@@ -52,7 +52,7 @@ macro_rules! trait_object_trace {
             const NEEDS_DROP: bool = true;
 
             fn visit<V: $crate::GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
-               unimplemented!("Unable to use DynTrace outside of a Gc")
+                unimplemented!("Unable to use DynTrace outside of a Gc")
             }
 
             #[inline]
@@ -63,6 +63,38 @@ macro_rules! trait_object_trace {
         }
         unsafe impl<$branded_lt, $($($lt,)* $($param:ident,)*)? ActualId: $crate::CollectorId> $crate::GcRebrand<$branded_lt, ActualId> for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
             type Branded = $branded;
+        }
+    }
+}
+
+/// Implement [Trace] and [TraceImmutable] as a no-op,
+/// based on the fact that a type implements [::zerogc::NullTrace]
+///
+/// This expands the type'op,
+/// based on the bound `Self: NullTrace`
+///
+/// ## Safety
+/// Because this verifies that `Self: NullTrace`, it is safe to generate
+/// a no-op implementations of `Trace`
+#[macro_export]
+macro_rules! impl_trace_for_nulltrace {
+    (impl $(<$($lt:lifetime,)* $($param:ident),*>)? Trace for $target:path $(where $($where_clause:tt)*)?) => {
+        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::Trace for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
+            const NEEDS_TRACE: bool = false;
+            // Since we don't need a dummy-drop, we can just delegate to std
+            const NEEDS_DROP: bool = core::mem::needs_drop::<Self>();
+
+            #[inline]
+            fn visit<V: $crate::GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
+                <Self as $crate::NullTrace>::verify_null_trace();
+                Ok(())
+            }
+        }
+        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::TraceImmutable for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
+            #[inline]
+            fn visit_immutable<V: $crate::GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
+                Ok(())
+            }
         }
     }
 }

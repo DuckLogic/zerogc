@@ -5,9 +5,9 @@ use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, dummy_impl::{self, Dummy
 
 use zerogc_derive::{Trace, NullTrace};
 use zerogc::cell::GcCell;
+use std::marker::PhantomData;
 
 #[derive(Trace)]
-#[zerogc(collector_id(DummyCollectorId))]
 pub struct SpecificCollector<'gc> {
     gc: Gc<'gc, i32, DummyCollectorId>,
     rec: Gc<'gc, SpecificCollector<'gc>, DummyCollectorId>,
@@ -16,8 +16,7 @@ pub struct SpecificCollector<'gc> {
 }
 
 #[derive(Trace)]
-#[zerogc(collector_id(Id))]
-pub struct Basic<'gc, Id: CollectorId> {
+pub struct Basic<'gc, #[zerogc(collector_id)] Id: CollectorId> {
     parent: Option<Gc<'gc, Basic<'gc, Id>, Id>>,
     children: Vec<Gc<'gc, Basic<'gc, Id>, Id>>,
     value: String,
@@ -26,8 +25,8 @@ pub struct Basic<'gc, Id: CollectorId> {
 }
 
 #[derive(Copy, Clone, Trace)]
-#[zerogc(copy, collector_id(Id))]
-pub struct BasicCopy<'gc, Id: CollectorId> {
+#[zerogc(copy)]
+pub struct BasicCopy<'gc, #[zerogc(collector_id)] Id: CollectorId> {
     test: i32,
     value: i32,
     basic: Option<Gc<'gc, Basic<'gc, Id>, Id>>
@@ -35,8 +34,8 @@ pub struct BasicCopy<'gc, Id: CollectorId> {
 
 
 #[derive(Copy, Clone, Trace)]
-#[zerogc(copy, collector_id(Id))]
-pub enum BasicEnum<'gc, Id: CollectorId> {
+#[zerogc(copy)]
+pub enum BasicEnum<'gc, #[zerogc(collector_id)] Id: CollectorId> {
     Unit,
     Tuple(i32),
     First {
@@ -92,7 +91,7 @@ struct NopTrace {
 }
 
 #[derive(Trace)]
-#[zerogc(unsafe_skip_drop, collector_id(DummyCollectorId))]
+#[zerogc(unsafe_skip_drop)]
 #[allow(unused)]
 struct UnsafeSkipped<'gc> {
     s: &'static str,
@@ -102,14 +101,15 @@ struct UnsafeSkipped<'gc> {
 }
 
 #[derive(Trace)]
-#[zerogc(nop_trace, ignore_lifetimes("'a"), ignore_params(T))]
+#[zerogc(nop_trace)]
 #[allow(unused)]
-struct LifetimeTrace<'a, T: GcSafe + 'a> {
+struct LifetimeTrace<#[zerogc(ignore)] 'a, 'gc, #[zerogc(ignore)] T: GcSafe<'gc, DummyCollectorId> + 'a> {
     s: String,
     i: i32,
     wow: Box<NopTrace>,
-    other: &'a LifetimeTrace<'a, T>,
-    generic: Box<T>
+    other: &'a LifetimeTrace<'a, 'gc, T>,
+    generic: Box<T>,
+    marker: PhantomData<&'gc ()>
 }
 
 
