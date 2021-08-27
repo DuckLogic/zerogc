@@ -625,7 +625,7 @@ pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + TrustedDrop + 'sta
 /// Unsafe code can rely on a pointer always dereferencing to the same value in between
 /// safepoints. This is true even for copying/moving collectors.
 #[repr(transparent)]
-pub struct Gc<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> {
+pub struct Gc<'gc, T: ?Sized + 'gc, Id: CollectorId> {
     value: NonNull<T>,
     /// Marker struct used to statically identify the collector's type
     ///
@@ -745,8 +745,8 @@ unsafe impl<'gc, O, V, Id> GcDirectBarrier<'gc, Gc<'gc, O, Id>> for Gc<'gc, V,Id
     }
 }
 // We can be copied freely :)
-impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Copy for Gc<'gc, T, Id> {}
-impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Clone for Gc<'gc, T, Id> {
+impl<'gc, T: ?Sized, Id: CollectorId> Copy for Gc<'gc, T, Id> {}
+impl<'gc, T: ?Sized, Id: CollectorId> Clone for Gc<'gc, T, Id> {
     #[inline(always)]
     fn clone(&self) -> Self {
         *self
