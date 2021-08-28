@@ -451,9 +451,9 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     fn alloc<'gc, T>(&'gc self, value: T) -> Gc<'gc, T, Self::Id>
         where T: GcSafe<'gc, Self::Id> + 'gc {
         unsafe {
-            let (id, ptr) = self.alloc_uninit::<T>();
+            let (_id, ptr) = self.alloc_uninit::<T>();
             ptr.write(value);
-            Gc::from_raw(id, NonNull::new_unchecked(ptr))
+            Gc::from_raw(NonNull::new_unchecked(ptr))
         }
     }
     /// Allocate a slice with the specified length,
@@ -571,18 +571,21 @@ pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + TrustedDrop + 'sta
     type RawVecRepr<'gc>: crate::vec::repr::GcVecRepr<'gc, Id=Self>;
 
     /// Get the runtime id of the collector that allocated the [Gc]
+    ///
+    /// Assumes that `T: GcSafe<'gc, Self>`, although that can't be
+    /// proven at compile time.
     fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self
-        where T: GcSafe<'gc, Self> + ?Sized + 'gc, 'gc: 'a;
+        where T: ?Sized + 'gc, 'gc: 'a;
 
     /// Resolve the length of the specified [GcArray]
     fn resolve_array_len<'gc, T>(array: GcArray<'gc, T, Self>) -> usize
-        where T: GcSafe<'gc, Self> + 'gc;
+        where T: 'gc;
 
     /// Resolve the CollectorId for the specified [GcArray]
     ///
     /// This is the [GcArray] counterpart of `from_gc_ptr`
     fn resolve_array_id<'a, 'gc, T>(gc: &'a GcArray<'gc, T, Self>) -> &'a Self
-        where T: GcSafe<'gc, Self> + 'gc, 'gc: 'a;
+        where T: 'gc, 'gc: 'a;
 
     /// Perform a write barrier before writing to a garbage collected field
     ///
@@ -638,36 +641,16 @@ pub struct Gc<'gc, T: ?Sized + 'gc, Id: CollectorId> {
     marker: PhantomData<&'gc T>,
 }
 impl<'gc, T: GcSafe<'gc, Id> + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
-    /// Create a GC pointer from a raw ID/pointer pair
+    /// Create a GC pointer from a raw pointer
     ///
     /// ## Safety
     /// Undefined behavior if the underlying pointer is not valid
-    /// and associated with the collector corresponding to the id.
+    /// and doesn't correspond to the appropriate id.
     #[inline]
-    pub unsafe fn from_raw(id: Id, value: NonNull<T>) -> Self {
-        let res = Gc { collector_id: PhantomData, value, marker: PhantomData };
-        #[cfg(debug_assertions)] {
-            debug_assert_eq!(id, *Id::from_gc_ptr(&res));
-        }
-        res
+    pub unsafe fn from_raw(value: NonNull<T>) -> Self {
+        Gc { collector_id: PhantomData, value, marker: PhantomData }
     }
 
-    /// The value of the underlying pointer
-    #[inline(always)]
-    pub fn value(&self) -> &'gc T {
-        unsafe { *(&self.value as *const NonNull<T> as *const &'gc T) }
-    }
-    /// Cast this reference to a raw pointer
-    ///
-    /// ## Safety
-    /// It's undefined behavior to mutate the
-    /// value.
-    /// The pointer is only valid as long as
-    /// the reference is.
-    #[inline]
-    pub unsafe fn as_raw_ptr(&self) -> *mut T {
-        self.value.as_ptr() as *const T as *mut T
-    }
 
     /// Create a handle to this object, which can be used without a context
     #[inline]
@@ -688,6 +671,26 @@ impl<'gc, T: GcSafe<'gc, Id> + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
     pub fn system(&self) -> &'_ Id::System {
         // This assumption is safe - see the docs
         unsafe { self.collector_id().assume_valid_system() }
+    }
+}
+// NOTE: Relax `T: GcSafe` bound
+impl<'gc, T: ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
+
+    /// The value of the underlying pointer
+    #[inline(always)]
+    pub fn value(&self) -> &'gc T {
+        unsafe { *(&self.value as *const NonNull<T> as *const &'gc T) }
+    }
+    /// Cast this reference to a raw pointer
+    ///
+    /// ## Safety
+    /// It's undefined behavior to mutate the
+    /// value.
+    /// The pointer is only valid as long as
+    /// the reference is.
+    #[inline]
+    pub unsafe fn as_raw_ptr(&self) -> *mut T {
+        self.value.as_ptr() as *const T as *mut T
     }
 
     /// Get a reference to the collector's id

@@ -1,11 +1,12 @@
 #![feature(
     arbitrary_self_types, // Used for `zerogc(mutable)`
 )]
-use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, dummy_impl::{self, DummyCollectorId}};
+use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, dummy_impl::{self, DummyCollectorId}, GcRebrand};
 
 use zerogc_derive::{Trace, NullTrace};
 use zerogc::cell::GcCell;
 use std::marker::PhantomData;
+use syn::DataUnion;
 
 #[derive(Trace)]
 #[zerogc(collector_ids(DummyCollectorId))]
@@ -101,8 +102,8 @@ struct UnsafeSkipped<'gc> {
     wow: Gc<'gc, i32, DummyCollectorId>
 }
 
-#[derive(NullTrace)]
-#[zerogc(ignore_lifetimes("'a"))]
+#[derive(Trace)]
+#[zerogc(ignore_lifetimes("'a"), immutable, collector_ids(DummyCollectorId))]
 #[allow(unused)]
 struct LifetimeTrace<'a: 'gc, 'gc, T: GcSafe<'gc, DummyCollectorId> + 'a> {
     s: String,
@@ -112,7 +113,6 @@ struct LifetimeTrace<'a: 'gc, 'gc, T: GcSafe<'gc, DummyCollectorId> + 'a> {
     generic: Box<T>,
     marker: PhantomData<&'gc ()>
 }
-
 
 #[test]
 fn basic<'gc>() {

@@ -467,10 +467,7 @@ unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
             let value = inner.value.load(Ordering::Acquire)
                 as *mut T as *mut T::Branded;
             debug_assert!(!value.is_null());
-            Gc::from_raw(
-                collector,
-                NonNull::new_unchecked(value)
-            )
+            Gc::from_raw(NonNull::new_unchecked(value))
         }
     }
 

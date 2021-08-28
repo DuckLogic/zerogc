@@ -10,10 +10,7 @@ use std::mem::MaybeUninit;
 /// and will always be valid
 pub fn gc<'gc, T: GcSafe<'gc, DummyCollectorId> + 'gc>(ptr: &'gc T) -> Gc<'gc, T> {
     unsafe {
-        Gc::from_raw(
-            DummyCollectorId { _priv: () },
-            NonNull::from(ptr)
-        )
+        Gc::from_raw(NonNull::from(ptr))
     }
 }
 
@@ -154,16 +151,16 @@ unsafe impl CollectorId for DummyCollectorId {
     type RawVecRepr<'gc> = crate::vec::repr::Unsupported<'gc, Self>;
 
     #[inline]
-    fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: GcSafe<'gc, Self> + ?Sized + 'gc, 'gc: 'a {
+    fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: ?Sized + 'gc, 'gc: 'a {
         const ID: DummyCollectorId = DummyCollectorId { _priv: () };
         &ID
     }
 
-    fn resolve_array_len<'gc, T>(_array: GcArray<'gc, T, Self>) -> usize where T: GcSafe<'gc, Self> + 'gc {
+    fn resolve_array_len<'gc, T>(_array: GcArray<'gc, T, Self>) -> usize where T: 'gc {
         todo!()
     }
 
-    fn resolve_array_id<'a, 'gc, T>(_gc: &'a GcArray<'gc, T, Self>) -> &'a Self where T: GcSafe<'gc, Self> + 'gc, 'gc: 'a {
+    fn resolve_array_id<'a, 'gc, T>(_gc: &'a GcArray<'gc, T, Self>) -> &'a Self where T: 'gc, 'gc: 'a {
         todo!()
     }
 

@@ -16,7 +16,7 @@ zerogc = { version = "0.2.0-alpha.5", path = "../.." }
 
 [dependencies]
 # Proc macros
-syn = { version = "1.0.55", features = ["full", "extra-traits"] }
+syn = { version = "1.0.55", features = ["full", "extra-traits", "fold"] }
 quote = "1.0.8"
 darling = "0.13"
 proc-macro2 = "1"

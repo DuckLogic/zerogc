@@ -37,7 +37,8 @@
     const_ptr_offset_from,
     const_maybe_uninit_as_ptr,
     const_refs_to_cell,
-    const_fn_trait_bound
+    const_fn_trait_bound,
+    generic_associated_types
 )]
 #![feature(drain_filter)]
 #![allow(
@@ -150,7 +151,7 @@ static GLOBAL_COLLECTOR: AtomicPtr<RawSimpleCollector> = AtomicPtr::new(std::ptr
 
 unsafe impl RawSimpleAlloc for RawSimpleCollector {
     #[inline]
-    unsafe fn alloc_uninit<'gc, T>(context: &'gc SimpleCollectorContext) -> (CollectorId, *mut T) where T: GcSafe + 'gc {
+    unsafe fn alloc_uninit<'gc, T>(context: &'gc SimpleCollectorContext) -> (CollectorId, *mut T) where T: GcSafe<'gc, crate::CollectorId> {
         let (_header, ptr) = context.collector().heap.allocator.alloc_layout(
             GcHeader::LAYOUT,
             Layout::new::<T>(),
@@ -159,7 +160,7 @@ unsafe impl RawSimpleAlloc for RawSimpleCollector {
         (context.collector().id(), ptr as *mut T)
     }
 
-    unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> (CollectorId, *mut T) where T: GcSafe + 'gc {
+    unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> (CollectorId, *mut T) where T: GcSafe<'gc, crate::CollectorId> {
         let (header, ptr) = context.collector().heap.allocator.alloc_layout(
             GcArrayHeader::LAYOUT,
             Layout::array::<T>(len).unwrap(),
@@ -170,7 +171,7 @@ unsafe impl RawSimpleAlloc for RawSimpleCollector {
     }
 
     #[inline]
-    fn alloc_vec<'gc, T>(context: &'gc CollectorContext<Self>) -> GcVec<'gc, T> where T: GcSafe + 'gc {
+    fn alloc_vec<'gc, T>(context: &'gc CollectorContext<Self>) -> GcVec<'gc, T> where T: GcSafe<'gc, crate::CollectorId> {
         if std::mem::align_of::<T>() > EMPTY_VEC_ALIGNMENT {
             // We have to do an actual allocation because we want higher alignment :(
             return Self::alloc_vec_with_capacity(context, 0)
@@ -181,16 +182,15 @@ unsafe impl RawSimpleAlloc for RawSimpleCollector {
             debug_assert_eq!((*header).len.get(), 0);
             debug_assert_eq!((*header).capacity, 0);
         }
-        let id = context.collector().id();
         let ptr = unsafe { NonNull::new_unchecked((header as *mut u8)
             .add(GcVecHeader::LAYOUT.value_offset(EMPTY_VEC_ALIGNMENT))) };
         GcVec {
-            raw: unsafe { GcRawVec::from_repr(Gc::from_raw(id, ptr.cast())) },
+            raw: unsafe { GcRawVec::from_repr(Gc::from_raw(ptr.cast())) },
             context
         }
     }
 
-    fn alloc_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> GcVec<'gc, T> where T: GcSafe + 'gc {
+    fn alloc_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> GcVec<'gc, T> where T: GcSafe<'gc, crate::CollectorId> {
         if capacity == 0 && std::mem::align_of::<T>() <= EMPTY_VEC_ALIGNMENT {
             return Self::alloc_vec(context)
         }
@@ -204,9 +204,8 @@ unsafe impl RawSimpleAlloc for RawSimpleCollector {
             (*header).len.set(0);
             NonNull::new_unchecked(value_ptr as *mut SimpleVecRepr<T>)
         };
-        let id = context.collector().id();
         GcVec {
-            raw: unsafe { GcRawVec::from_repr(Gc::from_raw(id, ptr.cast())) },
+            raw: unsafe { GcRawVec::from_repr(Gc::from_raw(ptr.cast())) },
             context
         }
     }
@@ -226,7 +225,7 @@ unsafe impl RawHandleImpl for RawSimpleCollector {
     type TypeInfo = GcType;
 
     #[inline]
-    fn type_info_of<T: GcSafe>() -> &'static Self::TypeInfo {
+    fn type_info_of<'gc, T: GcSafe<'gc, CollectorId>>() -> &'static Self::TypeInfo {
         <T as StaticGcType>::STATIC_TYPE
     }
 
@@ -627,14 +626,14 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
 
     type RawContext = RawContext<Self>;
 
-    type RawVecRepr = SimpleVecRepr<DynamicObj>;
+    type RawVecRepr<'gc> = SimpleVecRepr<'gc, DynamicObj>;
 
     const SINGLETON: bool = cfg!(not(feature = "multiple-collectors"));
 
     const SYNC: bool = cfg!(feature = "sync");
 
     #[inline]
-    fn id_for_gc<'a, 'gc, T>(gc: &'a Gc<'gc, T>) -> &'a CollectorId where 'gc: 'a, T: GcSafe + ?Sized + 'gc {
+    fn id_for_gc<'a, 'gc, T>(gc: &'a Gc<'gc, T>) -> &'a CollectorId where 'gc: 'a, T: ?Sized + 'gc {
         #[cfg(feature = "multiple-collectors")] {
             unsafe {
                 let header = GcHeader::from_value_ptr(gc.as_raw_ptr());
@@ -648,7 +647,7 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     }
 
     #[inline]
-    fn id_for_array<'a, 'gc, T>(gc: &'a GcArray<'gc, T>) -> &'a CollectorId where 'gc: 'a, T: GcSafe + 'gc {
+    fn id_for_array<'a, 'gc, T>(gc: &'a GcArray<'gc, T>) -> &'a CollectorId where 'gc: 'a, T: 'gc {
         #[cfg(feature = "multiple-collectors")] {
             unsafe {
                 let header = GcArrayHeader::LAYOUT.from_value_ptr(gc.as_raw_ptr());
@@ -662,7 +661,7 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     }
 
     #[inline]
-    fn resolve_array_len<'gc, T>(gc: zerogc::GcArray<'gc, T, zerogc_context::CollectorId<Self>>) -> usize where T: GcSafe + 'gc {
+    fn resolve_array_len<'gc, T>(gc: zerogc::GcArray<'gc, T, CollectorId>) -> usize where T: 'gc {
         unsafe {
             let header = GcArrayHeader::LAYOUT.from_value_ptr(gc.as_raw_ptr());
             (*header).len
@@ -705,7 +704,7 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
         _owner: &Gc<'gc, T>,
         _value: &Gc<'gc, V>,
         _field_offset: usize
-    ) where T: GcSafe + ?Sized + 'gc, V: GcSafe + ?Sized + 'gc {
+    ) where T: GcSafe<'gc, CollectorId> + ?Sized, V: GcSafe<'gc, CollectorId> + ?Sized {
         // Simple GC doesn't need write barriers
     }
     #[inline]
@@ -947,7 +946,7 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
     unsafe fn visit_gc<'gc, T, Id>(
         &mut self, gc: &mut ::zerogc::Gc<'gc, T, Id>
     ) -> Result<(), Self::Err>
-        where T: GcSafe + 'gc, Id: ::zerogc::CollectorId {
+        where T: GcSafe<'gc, Id>, Id: ::zerogc::CollectorId {
         if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
             /*
              * Since the `TypeId`s match, we know the generic `Id`
@@ -973,7 +972,7 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
     }
 
     unsafe fn visit_trait_object<'gc, T, Id>(&mut self, gc: &mut zerogc::Gc<'gc, T, Id>) -> Result<(), Self::Err>
-        where T: ?Sized + GcSafe + 'gc + Pointee<Metadata=DynMetadata<T>> + zerogc::DynTrace, Id: zerogc::CollectorId {
+        where T: ?Sized + GcSafe<'gc, Id> + Pointee<Metadata=DynMetadata<T>> + zerogc::DynTrace<'gc, Id>, Id: zerogc::CollectorId {
         if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
             /*
              * The TypeIds match, so this cast is safe. See `visit_gc` for details
@@ -996,15 +995,15 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
     }
 
     #[inline]
-    unsafe fn visit_vec<'gc, T, Id>(&mut self, raw: &mut ::zerogc::Gc<'gc, Id::RawVecRepr, Id>) -> Result<(), Self::Err>
-        where T: GcSafe + 'gc, Id: ::zerogc::CollectorId {
+    unsafe fn visit_vec<'gc, T, Id>(&mut self, raw: &mut ::zerogc::Gc<'gc, Id::RawVecRepr<'gc>, Id>) -> Result<(), Self::Err>
+        where T: GcSafe<'gc, Id>, Id: ::zerogc::CollectorId {
         // Just visit our innards as if they were a regular `Gc` reference
         self.visit_gc(raw)
     }
 
     #[inline]
     unsafe fn visit_array<'gc, T, Id>(&mut self, array: &mut ::zerogc::vec::GcArray<'gc, T, Id>) -> Result<(), Self::Err>
-        where T: GcSafe + 'gc, Id: ::zerogc::CollectorId {
+        where T: GcSafe<'gc, Id>, Id: ::zerogc::CollectorId {
         if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
             /*
              * See comment in 'visit_gc'.
@@ -1019,15 +1018,20 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
              * other people's data.
              */
             assert_eq!(*array.collector_id(), self.expected_collector);
-            let len = array.len();
-            let mut gc = Gc::from_raw(
-                *array.collector_id(),
+            /*
+             * NOTE: Must transmute instead of using Gc::from_raw
+             * because we don't satisfy the 'GcSafe' bound.
+             */
+            let mut gc = std::mem::transmute::<NonNull<[T]>, ::zerogc::Gc<'gc, [T], CollectorId>>(
                 NonNull::from(array.as_slice())
             );
             self._visit_own_gc(&mut gc);
-            *array = GcArray::from_raw_ptr(
+            /*
+             * NOTE: Must transmute instead of using GcArray::from_raw
+             * because we don't satisfy the 'GcSafe' bound.
+             */
+            *array = std::mem::transmute::<NonNull<T>, GcArray<'gc, T>>(
                 NonNull::new_unchecked(gc.value().as_ptr() as *mut T),
-                len
             );
             Ok(())
         } else {
@@ -1040,8 +1044,11 @@ impl MarkVisitor<'_> {
     /// Visit a GC type whose [::zerogc::CollectorId] matches our own,
     /// tracing it with the specified closure
     ///
+    /// The type should implement `GcSafe<'gc, crate::CollectorId>`,
+    /// although that can't be proven at compile time.
+    ///
     /// The caller should only use `GcVisitor::visit_gc()`
-    unsafe fn _visit_own_gc<'gc, T: GcSafe + Trace + ?Sized>(
+    unsafe fn _visit_own_gc<'gc, T: Trace + ?Sized>(
         &mut self, gc: &mut Gc<'gc, T>
     ) {
         self._visit_own_gc_with(gc, |val, visitor| <T as Trace>::visit(val, visitor))
@@ -1050,7 +1057,7 @@ impl MarkVisitor<'_> {
     /// tracing it with the specified closure
     ///
     /// The caller should only use `GcVisitor::visit_gc()`
-    unsafe fn _visit_own_gc_with<'gc, T: GcSafe + ?Sized + 'gc>(
+    unsafe fn _visit_own_gc_with<'gc, T: Trace + ?Sized>(
         &mut self, gc: &mut Gc<'gc, T>,
         trace_func: impl FnOnce(&mut T, &mut MarkVisitor) -> Result<(), !>
     ) {

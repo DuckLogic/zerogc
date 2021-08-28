@@ -1,6 +1,6 @@
 use darling::{Error, FromMeta, FromGenerics, FromTypeParam, FromDeriveInput, FromVariant, FromField};
 use proc_macro2::{Ident, TokenStream, Span};
-use syn::{Generics, Type, GenericParam, TypeParam, Lifetime, Path, parse_quote, PathArguments, GenericArgument, TypePath, Meta};
+use syn::{Generics, Type, GenericParam, TypeParam, Lifetime, Path, parse_quote, PathArguments, GenericArgument, TypePath, Meta, LifetimeDef};
 use darling::util::{SpannedValue};
 use quote::{quote_spanned, quote, format_ident, ToTokens};
 use darling::ast::{Style, Data};
@@ -15,6 +15,37 @@ pub enum TraceDeriveKind {
     Regular
 }
 
+trait PossiblyIgnoredParam {
+    fn check_ignored(&self, generics: &TraceGenerics) -> bool;
+}
+impl PossiblyIgnoredParam for syn::Lifetime {
+    fn check_ignored(&self, generics: &TraceGenerics) -> bool {
+        generics.ignored_lifetimes.contains(self)
+    }
+}
+impl PossiblyIgnoredParam for Ident {
+    fn check_ignored(&self, generics: &TraceGenerics) -> bool {
+        generics.type_params.iter().any(|param| (param.ignore || param.collector_id) && param.ident == *self)
+    }
+}
+impl PossiblyIgnoredParam for Path {
+    fn check_ignored(&self, generics: &TraceGenerics) -> bool {
+        self.get_ident().map_or(false, |ident| ident.check_ignored(generics))
+    }
+}
+impl PossiblyIgnoredParam for syn::Type {
+    fn check_ignored(&self, generics: &TraceGenerics) -> bool {
+        match *self {
+            Type::Group(ref e) => e.elem.check_ignored(generics),
+            Type::Paren(ref p) => p.elem.check_ignored(generics),
+            Type::Path(ref p) if p.qself.is_none() => {
+                p.path.check_ignored(generics)
+            },
+            _ => false
+        }
+    }
+}
+
 #[derive(Debug)]
 struct TraceGenerics {
     original: Generics,
@@ -23,6 +54,9 @@ struct TraceGenerics {
     type_params: Vec<TraceTypeParam>
 }
 impl TraceGenerics {
+    fn is_ignored<P: PossiblyIgnoredParam>(&self, item: &P) -> bool {
+        item.check_ignored(self)
+    }
     /// Return all the "regular" type parameters,
     /// excluding `Id` parameters and  those marked `#[zerogc(ignore)]`
     fn regular_type_params(&self) -> impl Iterator<Item=&'_ TraceTypeParam> + '_ {
@@ -370,32 +404,176 @@ impl TraceDeriveInput {
                 )
             }
             TraceDeriveKind::Regular => {
-                let mut has_explicit_collector_ids = false;
-                let mut impls = Vec::new();
-                if let Some(ref ids) = self.collector_ids {
-                    for id in ids.0.iter() {
-                        has_explicit_collector_ids = true;
-                        let mut initial_generics = generics.clone();
-                        initial_generics.make_where_clause().predicates
-                            .push(parse_quote!(#id: zerogc::CollectorId));
-                        impls.push(self.expand_gcsafe_sepcific(
-                            kind, Some(initial_generics),
-                            id, &gc_lifetime
-                        )?)
+                self.expand_for_each_regular_id(
+                    generics.clone(), kind, gc_lifetime,
+                    &mut |kind, initial, id, gc_lt| {
+                        self.expand_gcsafe_sepcific(kind, initial, id, gc_lt)
                     }
-                }
-                if !has_explicit_collector_ids {
-                    let mut initial_generics = generics.clone();
-                    initial_generics.params.push(parse_quote!(Id: zerogc::CollectorId));
-                    impls.push(self.expand_gcsafe_sepcific(
-                        kind, Some(initial_generics.clone()),
-                        &parse_quote!(Id),&gc_lifetime
-                    )?)
-                }
-                assert!(!impls.is_empty());
-                Ok(quote!(#(#impls)*))
+                )
             }
         }
+    }
+    fn expand_for_each_regular_id(
+        &self, generics: Generics,
+        kind: TraceDeriveKind,
+        gc_lifetime: Lifetime,
+        func: &mut dyn FnMut(TraceDeriveKind, Option<Generics>, &Path, &Lifetime) -> Result<TokenStream, Error>
+    ) -> Result<TokenStream, Error> {
+        let mut has_explicit_collector_ids = false;
+        let mut impls = Vec::new();
+        if let Some(ref ids) = self.collector_ids {
+            for id in ids.0.iter() {
+                has_explicit_collector_ids = true;
+                let mut initial_generics = generics.clone();
+                initial_generics.make_where_clause().predicates
+                    .push(parse_quote!(#id: zerogc::CollectorId));
+                impls.push(func(
+                    kind, Some(initial_generics),
+                    id, &gc_lifetime
+                )?)
+            }
+        }
+        if !has_explicit_collector_ids {
+            let mut initial_generics = generics;
+            initial_generics.params.push(parse_quote!(Id: zerogc::CollectorId));
+            impls.push(func(
+                kind, Some(initial_generics.clone()),
+                &parse_quote!(Id),&gc_lifetime
+            )?)
+        }
+        assert!(!impls.is_empty());
+        Ok(quote!(#(#impls)*))
+    }
+    fn expand_rebrand(&self, kind: TraceDeriveKind) -> Result<TokenStream, Error> {
+        let target_type = &self.ident;
+        if matches!(kind, TraceDeriveKind::NullTrace) {
+            let mut generics = self.generics.original.clone();
+            generics.params.push(parse_quote!(Id: zerogc::CollectorId));
+            generics.params.push(parse_quote!('new_gc));
+            for regular in self.generics.regular_type_params() {
+                let regular = &regular.ident;
+                generics.make_where_clause().predicates.push(parse_quote!(#regular: zerogc::NullTrace));
+            }
+            for ignored in &self.generics.ignored_lifetimes {
+                generics.make_where_clause().predicates.push(parse_quote!(#ignored: 'new_gc))
+            }
+            generics.make_where_clause().predicates.push(parse_quote!(Self: GcSafe<'new_gc, Id>));
+            if let Some(ref gc_lt) = self.gc_lifetime() {
+                return Err(Error::custom("A NullTrace type may not have a 'gc lifetime").with_span(gc_lt))
+            }
+            let (_, ty_generics, _) = self.generics.original.split_for_impl();
+            let (impl_generics, _, where_clause) = generics.split_for_impl();
+            return Ok(quote! {
+                unsafe impl #impl_generics zerogc::GcRebrand<'new_gc, Id> for #target_type #ty_generics #where_clause {
+                    type Branded = Self;
+                }
+            });
+        }
+        let mut generics = self.generics.original.clone();
+        let (old_gc_lt, new_gc_lt): (syn::Lifetime, syn::Lifetime) = match self.gc_lifetime() {
+            Some(lt) => {
+                generics.params.push(parse_quote!('new_gc));
+                (lt.clone(), parse_quote!('new_gc))
+            },
+            None => {
+                generics.params.push(parse_quote!('gc));
+                generics.params.push(parse_quote!('new_gc));
+                (parse_quote!('gc), parse_quote!('new_gc))
+            }
+        };
+        self.expand_for_each_regular_id(
+            generics, kind, old_gc_lt,
+            &mut |kind, initial_generics, id, orig_lt| {
+                self.expand_rebrand_specific(
+                    kind, initial_generics,
+                    id, orig_lt, new_gc_lt.clone()
+                )
+            }
+        )
+    }
+    fn expand_rebrand_specific(
+        &self, kind: TraceDeriveKind,
+        initial_generics: Option<Generics>,
+        id: &Path, orig_lt: &Lifetime, new_lt: Lifetime
+    ) -> Result<TokenStream, Error> {
+        assert!(!matches!(kind, TraceDeriveKind::NullTrace));
+        let mut fold = RebrandFold {
+            generics: &self.generics,
+            collector_ids: self.collector_ids.as_ref().map_or_else(
+                || HashSet::from([parse_quote!(Id)]),
+                |ids| {
+                ids.0.iter().map(|p| Type::Path(TypePath {
+                    qself: None,
+                    path: p.clone()
+                })).collect()
+            }),
+            new_lt: &new_lt,
+            orig_lt, id
+        };
+        let mut generics = syn::fold::fold_generics(
+            &mut fold,
+            initial_generics.unwrap_or_else(|| self.generics.original.clone()),
+        );
+        for param in self.generics.regular_type_params() {
+            let name = &param.ident;
+            generics.make_where_clause().predicates.push(parse_quote!(#name: zerogc::GcRebrand<#new_lt, #id>));
+            let rewritten_bounds = param.bounds.iter().cloned().map(|bound| {
+                syn::fold::fold_type_param_bound(&mut ReplaceLt {
+                    orig_lt, new_lt: &new_lt
+                }, bound)
+            }).collect::<Vec<_>>();
+            generics.make_where_clause().predicates.push(parse_quote!(#name::Branded: #(#rewritten_bounds)+*));
+        }
+        for ignored in &self.generics.ignored_lifetimes {
+            generics.make_where_clause().predicates.push(parse_quote!(#ignored: 'new_gc));
+        }
+        let target_type = &self.ident;
+
+        let rewritten_path: Path = {
+            let mut params = self.generics.original.params.iter().map(|decl| {
+                // decl -> use
+                match decl {
+                    GenericParam::Type(ref tp) => {
+                        let name = &tp.ident;
+                        parse_quote!(#name)
+                    }
+                    GenericParam::Lifetime(ref lt) => {
+                        let name = fold.rewrite_lifetime(lt.lifetime.clone());
+                        parse_quote!(#name)
+                    },
+                    GenericParam::Const(ref c) => {
+                        let name = &c.ident;
+                        parse_quote!(#name)
+                    }
+                }
+            }).collect::<Vec<GenericArgument>>();
+            params = params.into_iter().map(|arg| {
+                syn::fold::fold_generic_argument(&mut fold, arg)
+            }).collect();
+
+            parse_quote!(#target_type::<#(#params),*>)
+        };
+        let explicitly_unsized = self.generics.original.params.iter()
+            .filter_map(|param| match param {
+                GenericParam::Type(ref t) => Some(t),
+                _ => None
+            })
+            .filter(|&param| crate::is_explicitly_unsized(param))
+            .map(|param| param.ident.clone())
+            .collect::<HashSet<Ident>>();
+        // Add the appropriate T::Branded: Sized bounds
+        for param in self.generics.regular_type_params() {
+            let name = &param.ident;
+            if explicitly_unsized.contains(name) { continue }
+            generics.make_where_clause().predicates.push(parse_quote!(#name::Branded: Sized));
+        }
+        let ty_generics = self.generics.original.split_for_impl().1;
+        let (impl_generics, _, where_clause) = generics.split_for_impl();
+        Ok(quote! {
+            unsafe impl #impl_generics zerogc::GcRebrand<#new_lt, #id> for #target_type #ty_generics #where_clause {
+                type Branded = #rewritten_path;
+            }
+        })
     }
     fn expand_trace(&self, kind: TraceDeriveKind, immutable: bool) -> Result<TokenStream, Error> {
         let target_type = &self.ident;
@@ -472,7 +650,7 @@ impl TraceDeriveInput {
                 ActualId: zerogc::CollectorId, Self: zerogc::GcSafe<'actual_gc, ActualId> + 'actual_gc);
             Some(quote! {
                 #[inline]
-                unsafe fn visit_inside_gc<'actual_gc, Visitor, ActualId>(gc: &mut crate::Gc<'actual_gc, Self, ActualId>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
+                unsafe fn visit_inside_gc<'actual_gc, Visitor, ActualId>(gc: &mut zerogc::Gc<'actual_gc, Self, ActualId>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
                 #where_clause {
                     visitor.visit_gc(gc)
                 }
@@ -660,10 +838,12 @@ impl TraceDeriveInput {
         } else {
             None
         };
+        let rebrand = self.expand_rebrand(kind)?;
         let trace = self.expand_trace(kind, false)?;
         let protective_drop = self.expand_trusted_drop(kind);
         let extra_methods = self.expand_extra_methods(kind)?;
         Ok(quote! {
+            #rebrand
             #gcsafe
             #trace_immutable
             #trace
@@ -712,6 +892,56 @@ impl FieldAccess {
                 format_ident!("{}{}", span = span, prefix, idx).into_token_stream()
             },
             Self::Variable { prefix: None } => unreachable!("Can't access index fields without a prefix")
+        }
+    }
+}
+
+struct ReplaceLt<'a> {
+    orig_lt: &'a syn::Lifetime,
+    new_lt: &'a syn::Lifetime
+}
+impl syn::fold::Fold for ReplaceLt<'_> {
+    fn fold_lifetime(&mut self, orig: Lifetime) -> Lifetime {
+        if orig == *self.orig_lt {
+            self.new_lt.clone()
+        } else {
+            orig
+        }
+    }
+}
+struct RebrandFold<'a> {
+    generics: &'a TraceGenerics,
+    collector_ids: HashSet<Type>,
+    new_lt: &'a syn::Lifetime,
+    orig_lt: &'a syn::Lifetime,
+    id: &'a syn::Path
+}
+impl RebrandFold<'_> {
+    fn rewrite_lifetime(&self, orig: Lifetime) -> Lifetime {
+        if orig == *self.orig_lt {
+            self.new_lt.clone()
+        } else {
+            orig
+        }
+    }
+}
+impl<'a> syn::fold::Fold for RebrandFold<'a> {
+    fn fold_lifetime_def(&mut self, orig: LifetimeDef) -> LifetimeDef {
+        LifetimeDef {
+            bounds: orig.bounds.into_iter().map(|lt| self.rewrite_lifetime(lt)).collect(),
+            colon_token: orig.colon_token,
+            lifetime: orig.lifetime,
+            attrs: orig.attrs
+        }
+    }
+
+    fn fold_type(&mut self, orig: Type) -> Type {
+        if self.generics.is_ignored(&orig) || self.collector_ids.contains(&orig) {
+            orig
+        } else {
+            let new_lt = self.new_lt;
+            let id = self.id;
+            parse_quote!(<#orig as zerogc::GcRebrand<#new_lt, #id>>::Branded)
         }
     }
 }

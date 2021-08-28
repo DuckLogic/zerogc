@@ -259,10 +259,10 @@ impl GcVecHeader {
 ///
 /// NOTE: Length and capacity are stored implicitly in the [GcVecHeader]
 #[repr(C)]
-pub struct SimpleVecRepr<T: GcSafe<'gc, SimpleCollectorId>> {
-    marker: PhantomData<T>,
+pub struct SimpleVecRepr<'gc, T: GcSafe<'gc, crate::CollectorId>> {
+    marker: PhantomData<&'gc T>,
 }
-impl<T: GcSafe> SimpleVecRepr<T> {
+impl<'gc, T: GcSafe<'gc, crate::CollectorId>> SimpleVecRepr<'gc, T> {
     #[inline]
     fn header(&self) -> *mut GcVecHeader {
         unsafe {
@@ -272,9 +272,10 @@ impl<T: GcSafe> SimpleVecRepr<T> {
         }
     }
 }
-unsafe impl<T: GcSafe> GcVecRepr for SimpleVecRepr<T> {
+unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> GcVecRepr<'gc> for SimpleVecRepr<'gc, T> {
     /// Right now, there is no stable API for in-place re-allocation
     const SUPPORTS_REALLOC: bool = false;
+    type Id = crate::CollectorId;
 
     #[inline]
     fn element_layout(&self) -> Layout {
@@ -303,8 +304,12 @@ unsafe impl<T: GcSafe> GcVecRepr for SimpleVecRepr<T> {
     }
 }
 unsafe_gc_impl!(
-    target => SimpleVecRepr<T>,
-    params => [T: GcSafe],
+    target => SimpleVecRepr<'gc, T>,
+    params => ['gc, T: GcSafe<'gc, crate::CollectorId>],
+    bounds => {
+        GcRebrand => { where T: zerogc::GcRebrand<'new_gc, crate::CollectorId>,
+            T::Branded: Sized + zerogc::GcSafe<'new_gc, crate::CollectorId> },
+    },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => T::NEEDS_DROP,
     null_trace => { where T: ::zerogc::NullTrace },
@@ -327,7 +332,9 @@ unsafe_gc_impl!(
             }
         }
         Ok(())
-    }
+    },
+    branded_type => SimpleVecRepr<'new_gc, T::Branded>,
+    collector_id => CollectorId
 );
 
 /// A header for a GC object
@@ -458,7 +465,7 @@ impl GcType {
     }
     /// Get the [GcType] for the specified `Sized` type
     #[inline]
-    pub const fn for_regular<T: GcSafe>() -> &'static Self {
+    pub const fn for_regular<'gc, T: GcSafe<'gc, crate::CollectorId>>() -> &'static Self {
         <T as StaticGcType>::STATIC_TYPE
     }
 }
@@ -466,7 +473,7 @@ impl GcType {
 pub(crate) trait StaticVecType {
     const STATIC_VEC_TYPE: &'static GcType;
 }
-impl<T: GcSafe> StaticVecType for T {
+impl<'gc, T: GcSafe<'gc, crate::CollectorId>> StaticVecType for T {
     const STATIC_VEC_TYPE: &'static GcType = &GcType {
         layout: GcTypeLayout::Vec {
             element_layout: Layout::new::<T>(),
@@ -493,7 +500,7 @@ impl<T: GcSafe> StaticVecType for T {
         },
         drop_func: if T::NEEDS_DROP {
             Some({
-                unsafe fn drop_gc_vec<T: GcSafe>(val: *mut c_void) {
+                unsafe fn drop_gc_vec<'gc, T: GcSafe<'gc, crate::CollectorId>>(val: *mut c_void) {
                     let len = (*GcVecHeader::LAYOUT.from_value_ptr(val as *mut T)).len.get();
                     std::ptr::drop_in_place::<[T]>(std::ptr::slice_from_raw_parts_mut(
                         val as *mut T,
@@ -510,7 +517,7 @@ impl<T: GcSafe> StaticVecType for T {
 pub(crate) trait StaticGcType {
     const STATIC_TYPE: &'static GcType;
 }
-impl<T: GcSafe> StaticGcType for [T] {
+impl<'gc, T: GcSafe<'gc, crate::CollectorId>> StaticGcType for [T] {
     const STATIC_TYPE: &'static GcType = &GcType {
         layout: GcTypeLayout::Array { element_layout: Layout::new::<T>() },
         value_offset_from_common_header: {
@@ -532,7 +539,7 @@ impl<T: GcSafe> StaticGcType for [T] {
         } else { None },
         drop_func: if <T as Trace>::NEEDS_DROP {
             Some({
-                unsafe fn drop_gc_slice<T: GcSafe>(val: *mut c_void) {
+                unsafe fn drop_gc_slice<'gc, T: GcSafe<'gc, crate::CollectorId>>(val: *mut c_void) {
                     let len = (*GcArrayHeader::LAYOUT.from_value_ptr(val as *mut T)).len;
                     std::ptr::drop_in_place::<[T]>(std::ptr::slice_from_raw_parts_mut(
                         val as *mut T,
@@ -544,7 +551,7 @@ impl<T: GcSafe> StaticGcType for [T] {
         } else { None }
     };
 }
-impl<T: GcSafe> StaticGcType for T {
+impl<'gc, T: GcSafe<'gc, crate::CollectorId>> StaticGcType for T {
     const STATIC_TYPE: &'static GcType = &GcType {
         layout: GcTypeLayout::Fixed(Layout::new::<T>()),
         value_offset_from_common_header: {

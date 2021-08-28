@@ -19,7 +19,7 @@ pub mod repr;
 ///
 /// This is a thin pointer, with length stored indirectly in the object's header.
 #[repr(transparent)]
-pub struct GcArray<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
+pub struct GcArray<'gc, T: 'gc, Id: CollectorId> {
     ptr: NonNull<T>,
     marker: PhantomData<Gc<'gc, [T], Id>>
 }
@@ -35,6 +35,9 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcArray<'gc, T, Id> {
         debug_assert_eq!(res.len(), len);
         res
     }
+}
+// Relax T: GcSafe bound
+impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
     /// The value of the array as a slice
     #[inline]
     pub fn as_slice(self) -> &'gc [T] {
@@ -71,8 +74,8 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Deref for GcArray<'gc, T, Id> {
         self.as_slice()
     }
 }
-impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Copy for GcArray<'gc, T, Id> {}
-impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Clone for GcArray<'gc, T, Id> {
+impl<'gc, T, Id: CollectorId> Copy for GcArray<'gc, T, Id> {}
+impl<'gc, T, Id: CollectorId> Clone for GcArray<'gc, T, Id> {
     #[inline]
     fn clone(&self) -> Self {
         *self

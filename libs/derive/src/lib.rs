@@ -169,6 +169,14 @@ impl<T: Parse> Parse for FromLitStr<T> {
     }
 }
 
+pub(crate) fn is_explicitly_unsized(param: &syn::TypeParam) -> bool {
+    param.bounds.iter().any(|bound| {
+        matches!(bound, syn::TypeParamBound::Trait(syn::TraitBound {
+            ref path, modifier: syn::TraitBoundModifier::Maybe(_), ..
+        }) if path.is_ident("Sized"))
+    })
+}
+
 fn span_file_loc(span: Span) -> String {
     /*
      * Source file identifiers in the form `<file_name>:<lineno>`

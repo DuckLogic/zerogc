@@ -8,7 +8,7 @@ use zerogc_derive::Trace;
 use slog::{Logger, Drain, o};
 
 #[derive(Trace)]
-#[zerogc(collector_id(SimpleCollectorId))]
+#[zerogc(collector_ids(SimpleCollectorId))]
 struct Tree<'gc> {
     #[zerogc(mutable(public))]
     children: GcCell<Option<(Gc<'gc, Tree<'gc>>, Gc<'gc, Tree<'gc>>)>>,
