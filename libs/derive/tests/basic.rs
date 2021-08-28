@@ -8,6 +8,7 @@ use zerogc::cell::GcCell;
 use std::marker::PhantomData;
 
 #[derive(Trace)]
+#[zerogc(collector_ids(DummyCollectorId))]
 pub struct SpecificCollector<'gc> {
     gc: Gc<'gc, i32, DummyCollectorId>,
     rec: Gc<'gc, SpecificCollector<'gc>, DummyCollectorId>,
@@ -16,7 +17,8 @@ pub struct SpecificCollector<'gc> {
 }
 
 #[derive(Trace)]
-pub struct Basic<'gc, #[zerogc(collector_id)] Id: CollectorId> {
+#[zerogc(collector_ids(Id))]
+pub struct Basic<'gc, Id: CollectorId> {
     parent: Option<Gc<'gc, Basic<'gc, Id>, Id>>,
     children: Vec<Gc<'gc, Basic<'gc, Id>, Id>>,
     value: String,
@@ -25,8 +27,8 @@ pub struct Basic<'gc, #[zerogc(collector_id)] Id: CollectorId> {
 }
 
 #[derive(Copy, Clone, Trace)]
-#[zerogc(copy)]
-pub struct BasicCopy<'gc, #[zerogc(collector_id)] Id: CollectorId> {
+#[zerogc(copy, collector_ids(Id))]
+pub struct BasicCopy<'gc, Id: CollectorId> {
     test: i32,
     value: i32,
     basic: Option<Gc<'gc, Basic<'gc, Id>, Id>>
@@ -34,8 +36,8 @@ pub struct BasicCopy<'gc, #[zerogc(collector_id)] Id: CollectorId> {
 
 
 #[derive(Copy, Clone, Trace)]
-#[zerogc(copy)]
-pub enum BasicEnum<'gc, #[zerogc(collector_id)] Id: CollectorId> {
+#[zerogc(copy, collector_ids(Id))]
+pub enum BasicEnum<'gc, Id: CollectorId> {
     Unit,
     Tuple(i32),
     First {
@@ -62,8 +64,7 @@ pub enum BasicEnum<'gc, #[zerogc(collector_id)] Id: CollectorId> {
 ///
 /// We shouldn't need to annotate with `unsafe_skip_drop`.
 /// The dummy destructor shouldn't be generated because of `#[zerogc(nop_trace)]`
-#[derive(Trace)]
-#[zerogc(nop_trace)]
+#[derive(NullTrace)]
 #[allow(unused)]
 struct NoDestructorNullTrace {
     val: i32,
@@ -91,7 +92,7 @@ struct NopTrace {
 }
 
 #[derive(Trace)]
-#[zerogc(unsafe_skip_drop)]
+#[zerogc(unsafe_skip_drop, collector_ids(DummyCollectorId))]
 #[allow(unused)]
 struct UnsafeSkipped<'gc> {
     s: &'static str,
@@ -100,14 +101,14 @@ struct UnsafeSkipped<'gc> {
     wow: Gc<'gc, i32, DummyCollectorId>
 }
 
-#[derive(Trace)]
-#[zerogc(nop_trace)]
+#[derive(NullTrace)]
+#[zerogc(ignore_lifetimes("'a"))]
 #[allow(unused)]
-struct LifetimeTrace<#[zerogc(ignore)] 'a, 'gc, #[zerogc(ignore)] T: GcSafe<'gc, DummyCollectorId> + 'a> {
+struct LifetimeTrace<'a: 'gc, 'gc, T: GcSafe<'gc, DummyCollectorId> + 'a> {
     s: String,
     i: i32,
     wow: Box<NopTrace>,
-    other: &'a LifetimeTrace<'a, 'gc, T>,
+    other: &'a u32,
     generic: Box<T>,
     marker: PhantomData<&'gc ()>
 }

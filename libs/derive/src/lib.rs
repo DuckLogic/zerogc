@@ -5,10 +5,12 @@
 )]
 extern crate proc_macro;
 
-use quote::{quote};
-use syn::{parse_macro_input, parse_quote, DeriveInput, Generics, GenericParam, Type, WhereClause};
+use quote::{quote, ToTokens};
+use syn::parse::Parse;
+use syn::punctuated::Punctuated;
+use syn::{DeriveInput, GenericParam, Generics, Token, Type, WhereClause, parse_macro_input, parse_quote};
 use proc_macro2::{TokenStream, Span};
-use darling::{FromDeriveInput};
+use darling::{FromDeriveInput, FromMeta};
 use std::fmt::Display;
 use std::io::Write;
 use crate::derive::TraceDeriveKind;
@@ -137,6 +139,34 @@ fn impl_derive_trace(input: &DeriveInput, kind: TraceDeriveKind) -> Result<Token
     let mut input = derive::TraceDeriveInput::from_derive_input(input)?;
     input.normalize(kind)?;
     input.expand(kind)
+}
+
+/// A list like `#[zerogc(a, b, c)] parsed as a `Punctuated<T, Token![,]>`,
+#[derive(Clone, Debug)]
+pub(crate) struct MetaList<T>(pub Punctuated<T, syn::token::Comma>);
+impl<T> Default for MetaList<T> {
+    fn default() -> Self {
+        MetaList(Default::default())
+    }
+}
+impl<T: Parse> FromMeta for MetaList<T> {
+    fn from_list(items: &[syn::NestedMeta]) -> darling::Result<Self> {
+        let mut res: Punctuated<T, Token![,]> = Default::default();
+        for item in items {
+            res.push(syn::parse2(item.to_token_stream())?);
+
+        }
+        Ok(MetaList(res))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FromLitStr<T>(pub T);
+impl<T: Parse> Parse for FromLitStr<T> {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let s = input.parse::<syn::LitStr>()?;
+        Ok(FromLitStr(s.parse()?))
+    }
 }
 
 fn span_file_loc(span: Span) -> String {

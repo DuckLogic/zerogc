@@ -68,18 +68,17 @@ macro_rules! trait_object_trace {
 }
 
 /// Implement [Trace] and [TraceImmutable] as a no-op,
-/// based on the fact that a type implements [::zerogc::NullTrace]
-///
-/// This expands the type'op,
-/// based on the bound `Self: NullTrace`
+/// based on the fact that a type implements [NullTrace](crate::NullTrace)
 ///
 /// ## Safety
-/// Because this verifies that `Self: NullTrace`, it is safe to generate
-/// a no-op implementations of `Trace`
+/// Because this verifies that `Self: NullTrace`, it is known there
+/// are no values inside that need to be traced (allowing a no-op trace)
+///
+/// In other words, the unsafety is delegated to NullTrace
 #[macro_export]
 macro_rules! impl_trace_for_nulltrace {
     (impl $(<$($lt:lifetime,)* $($param:ident),*>)? Trace for $target:path $(where $($where_clause:tt)*)?) => {
-        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::Trace for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
+        unsafe impl$(<$($lt,)* $($param),*>)? $crate::Trace for $target $(where $($where_clause)*)? {
             const NEEDS_TRACE: bool = false;
             // Since we don't need a dummy-drop, we can just delegate to std
             const NEEDS_DROP: bool = core::mem::needs_drop::<Self>();
@@ -89,10 +88,19 @@ macro_rules! impl_trace_for_nulltrace {
                 <Self as $crate::NullTrace>::verify_null_trace();
                 Ok(())
             }
-        }
-        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::TraceImmutable for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
+
             #[inline]
-            fn visit_immutable<V: $crate::GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
+            unsafe fn visit_inside_gc<'actual_gc, Visitor, ActualId>(
+                gc: &mut $crate::Gc<'actual_gc, Self, ActualId>,
+                visitor: &mut Visitor
+            ) -> Result<(), Visitor::Err> where Visitor: zerogc::GcVisitor,
+                ActualId: zerogc::CollectorId, Self: zerogc::GcSafe<'actual_gc, ActualId> + 'actual_gc {
+                visitor.visit_gc(gc)
+            }
+        }
+        unsafe impl$(<$($lt,)* $($param),*>)? $crate::TraceImmutable for $target $(where $($where_clause)*)? {
+            #[inline]
+            fn visit_immutable<V: $crate::GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
                 Ok(())
             }
         }

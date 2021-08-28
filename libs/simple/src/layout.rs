@@ -259,7 +259,7 @@ impl GcVecHeader {
 ///
 /// NOTE: Length and capacity are stored implicitly in the [GcVecHeader]
 #[repr(C)]
-pub struct SimpleVecRepr<T: GcSafe> {
+pub struct SimpleVecRepr<T: GcSafe<'gc, SimpleCollectorId>> {
     marker: PhantomData<T>,
 }
 impl<T: GcSafe> SimpleVecRepr<T> {

@@ -358,7 +358,7 @@ mod test {
 
     }
     #[derive(Trace)]
-    #[zerogc(collector_id(DummyCollectorId))]
+    #[zerogc(collector_ids(DummyCollectorId))]
     struct Rec<'gc> {
         inner: Gc<'gc, Rec<'gc>>,
         inner_tuple: (Gc<'gc, Rec<'gc>>, Gc<'gc, Option<i32>>),
