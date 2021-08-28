@@ -66,7 +66,6 @@ I'm familiar with some JIT implementations, and I know they tend to use safepoin
 to explicitly control where garbage collections can happen.
 Normally this is an unsafe operation. All live references on the stack must
 be given on the stack or use after.
-It would be unsafe to trust the user to .
 Eventually I realized I could use the borrow checker to restrict
 the usage of roots around safepoints. I was inspired in part by the way
 [indexing](https://github.com/bluss/indexing) uses lifetimes to enforce
@@ -92,8 +91,8 @@ I was not aware of this when I started this project.
     so it wouldn't be suitable .
   - They implement a basic List VM as a proof of concept.
 3. [gc-arena](https://github.com/kyren/gc-arena)
-  - Ironically the original use case for this 
-    collector was a replacement for arena allocation
+  - Seems like a similar idea, implemented a little later.
+  - Works around the awkwardness of lifetimes by using a future-like API.
   - Like our collector, safepoints are explicitly requested by the user
   - However instead of attempting to rebind lifetimes,
     they attempt to use futures to build state machines
@@ -102,9 +101,22 @@ I was not aware of this when I started this project.
 1. The garbage collector can only run in response to an explicit `safepoint!`, not memory pressure,
    - This is a fundamental design limitation.
    - One can think of this as a feature, since garbage collection can be restricted to specific times and places.
-   - The user must be liberal about inserting safepoins
+   - The user must be liberal about inserting safepoints
      - Generally high-level languages which use GCs automatically insert calls to safe points
      - Their safepoints tend to be lower-overhead than ours, so you need to balance the cost/benefit
-2. Unfortunately, implementing `GcSafe` for a type prevents it from having a explicit `Drop` implementation.
+2. Implementing `GcSafe` for a type prevents it from having a explicit `Drop` implementation.
    - This is needed to ensure that the destructors don't do bad things, since we don't want to deal with finalizers.
-   - Of course unsafe code isn't bound by this restriction, since it's assumed to behave properly
+   - Of course unsafe code isn't bound by this restriction, since it's assumed to behave properly (and there is an opt-out if you know you're safe).
+
+### Implementation Flaws
+None of these are fundemental design flaws. They can all be fixed (and should).
+1. Currently, unable to return a garbage collected type from a method that uses a safepoint
+   - This is *not* a fundamental limitation of the design. I have plans to fix the API to support this. 
+   - Unfortunately, this is almost crippling for many use cases, but can be worked around with an 'unchecked_safepoint'
+2. Currently, unable to use short lifetimes in garbage collected code.
+   - This is because `Gc<'gc, T>` currently requires `T: 'gc`
+   - It is possible to relax this restriction, but may make things more awkward to use...
+3. Restriction on borrowing possibly aliased vectors of GC memory
+   - It is difficult to enforce Rust's mutability rules with possibly shared gc memory (See issue #30)
+4. Implementation isn't generational (yet)
+6. Awkward to use from a generic context, because the API hasn't yet taken full advantage of generic associated typesd.
