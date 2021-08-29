@@ -7,10 +7,16 @@
 /// # use zerogc::{Trace, DynTrace, trait_object_trace};
 /// # use zerogc_derive::Trace;
 /// # use zerogc::dummy_impl::{self, DummyCollectorId, Gc};
-/// trait Foo<'gc>: DynTrace + 'gc {
+/// # type OurSpecificId = DummyCollectorId;
+/// trait Foo<'gc>: DynTrace<'gc, OurSpecificId> {
 ///     fn method(&self) -> i32;
 /// }
-/// trait_object_trace!(impl<'gc,> Trace for dyn Foo<'gc>; Branded<'new_gc> => dyn Foo<'new_gc> + 'new_gc, Erased<'min> => dyn Foo<'min> + 'min);
+/// trait_object_trace!(
+///     impl<'gc,> Trace for dyn Foo<'gc>;
+///     Branded<'new_gc> => dyn Foo<'new_gc> + 'new_gc,
+///     collector_id => OurSpecificId,
+///     gc_lifetime => 'gc
+/// );
 /// fn foo<'gc, T: ?Sized + Trace + Foo<'gc>>(t: &T) -> i32 {
 ///     assert_eq!(t.method(), 12);
 ///     t.method() * 2
@@ -19,7 +25,7 @@
 ///     foo(gc.value())
 /// }
 /// #[derive(Trace)]
-/// # #[zerogc(collector_id(DummyCollectorId))]
+/// # #[zerogc(collector_ids(DummyCollectorId))]
 /// struct Bar<'gc> {
 ///     val: Gc<'gc, i32>
 /// }
@@ -39,9 +45,11 @@
 macro_rules! trait_object_trace {
     (impl $(<$($lt:lifetime,)* $($param:ident),*>)? Trace for dyn $target:path $(where $($where_clause:tt)*)?;
         Branded<$branded_lt:lifetime> => $branded:ty,
-        Erased<$erased_lt:lifetime> => $erased:ty) => {
-        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::GcSafe for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {}
-        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::Trace for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
+        collector_id => $collector_id:path,
+        gc_lifetime => $gc_lt:lifetime) => {
+        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::TrustedDrop for dyn $target where Self: $crate::DynTrace<$gc_lt, $collector_id>, $($($where_clause)*)? {}
+        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::GcSafe<$gc_lt, $collector_id> for dyn $target where Self: $crate::DynTrace<$gc_lt, $collector_id>, $($($where_clause)*)? {}
+        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::Trace for dyn $target where Self: $crate::DynTrace::<$gc_lt, $collector_id>, $($($where_clause)*)? {
             /*
              * Insufficient compile-time information to know whether we need to be traced.
              *
@@ -57,11 +65,11 @@ macro_rules! trait_object_trace {
 
             #[inline]
             unsafe fn visit_inside_gc<'actual_gc, V, Id>(gc: &mut $crate::Gc<'actual_gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
-                where V: $crate::GcVisitor, Id: $crate::CollectorId, Self: $crate::GcSafe + 'actual_gc {
+                where V: $crate::GcVisitor, Id: $crate::CollectorId, Self: $crate::GcSafe<'actual_gc, Id> {
                 visitor.visit_trait_object(gc)
             }
         }
-        unsafe impl<$branded_lt, $($($lt,)* $($param:ident,)*)? ActualId: $crate::CollectorId> $crate::GcRebrand<$branded_lt, ActualId> for dyn $target where Self: $crate::DynTrace, $($($where_clause)*)? {
+        unsafe impl<$branded_lt, $($($lt,)* $($param:ident,)*)?> $crate::GcRebrand<$branded_lt, $collector_id> for dyn $target where Self: $crate::DynTrace<$gc_lt, $collector_id>, T::Branded: $crate::DynTrace<$branded_lt, $collectorId>, $($($where_clause)*)? {
             type Branded = $branded;
         }
     }
