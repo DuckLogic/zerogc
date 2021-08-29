@@ -12,7 +12,8 @@ edition = "2018"
 proc-macro = true
 
 [dev-dependencies]
-zerogc = { version = "0.2.0-alpha.5", path = "../.." }
+zerogc = { version = "0.2.0-alpha.5", path = "../..", features = ["serde1"] }
+serde = { version = "1" }
 
 [dependencies]
 # Proc macros
@@ -25,3 +26,7 @@ proc-macro-kwargs = "0.1.1"
 # Misc
 indexmap = "1"
 itertools = "0.10.1"
+
+[features]
+# Indicates that zerogc was compiled with support for serde,
+__serde-internal = []

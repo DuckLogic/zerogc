@@ -100,7 +100,8 @@ macro_rules! unsafe_trace_lock {
 /// (which are already undefined behavior for tracing).
 #[macro_export]
 macro_rules! unsafe_trace_primitive {
-    ($target:ty) => {
+    ($target:ty) => (unsafe_trace_primitive!($target; @ deserialize => delegate););
+    ($target:ty; @ $(deserialize => $strategy:ident)?) => {
         unsafe_gc_impl! {
             target => $target,
             params => [],
@@ -108,7 +109,8 @@ macro_rules! unsafe_trace_primitive {
             NEEDS_TRACE => false,
             NEEDS_DROP => core::mem::needs_drop::<$target>(),
             collector_id => *,
-            visit => |self, visitor| { /* nop */ Ok(()) }
+            visit => |self, visitor| { /* nop */ Ok(()) },
+            $(deserialize => $strategy)*
         }
         unsafe impl<'gc, OwningRef> $crate::GcDirectBarrier<'gc, OwningRef> for $target {
             #[inline(always)]

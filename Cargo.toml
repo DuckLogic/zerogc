@@ -15,6 +15,8 @@ scopeguard = "1.1"
 # gives zerogc batteries included support.
 indexmap = { version = "1.6", optional = true }
 parking_lot = { version = "0.11", optional = true }
+# Serde support (optional)
+serde = { version = "1", optional = true, features = ["derive"] }
 # Used for macros
 zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.5" }
 
@@ -25,10 +27,12 @@ members = ["libs/simple", "libs/derive", "libs/context"]
 default = ["std"]
 # Depend on the standard library (optional)
 #
-# This implements tracing
+# This implements tracing for most standard library types.
 std = ["alloc"]
 # Depend on `extern crate alloc` in addition to the Rust `core`
 # This is implied by using the standard library (feature="std")
 #
 # This implements `Trace` for `Box` and collections like `Vec`
 alloc = []
+# Serde support
+serde1 = ["serde", "zerogc-derive/__serde-internal"]

@@ -210,6 +210,11 @@ unsafe impl<C: RawCollectorImpl> GcContext for CollectorContext<C> {
             result
         })
     }
+
+    #[inline]
+    fn id(&self) -> Self::Id {
+        unsafe { (&*self.raw).collector() }.id()
+    }
 }
 
 /// It's not safe for a context to be sent across threads.

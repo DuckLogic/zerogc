@@ -59,6 +59,10 @@ unsafe impl GcContext for DummyContext {
         let mut child = DummyContext { _priv: () };
         func(&mut child, &mut *value)
     }
+
+    fn id(&self) -> Self::Id {
+        DummyCollectorId { _priv: () }
+    }
 }
 
 
@@ -121,7 +125,7 @@ unsafe impl GcSimpleAlloc for DummyContext {
 }
 
 /// The id for a [dummy gc pointer](Gc)
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct DummyCollectorId {
     _priv: ()
 }

@@ -12,7 +12,8 @@ use crate::{FromLitStr, MetaList};
 #[derive(Copy, Clone, Debug)]
 pub enum TraceDeriveKind {
     NullTrace,
-    Regular
+    Regular,
+    Deserialize
 }
 
 trait PossiblyIgnoredParam {
@@ -134,7 +135,7 @@ pub struct TraceTypeParam {
     #[darling(skip)]
     ignore: bool,
     #[darling(skip)]
-    collector_id: bool
+    collector_id: bool,
 }
 impl TraceTypeParam {
     fn normalize(&mut self) -> Result<(), Error> {
@@ -188,6 +189,9 @@ struct TraceField {
     /// to be traced.
     #[darling(default)]
     unsafe_skip_trace: bool,
+
+    #[darling(forward_attrs(serde))]
+    attrs: Vec<syn::Attribute>
 }
 impl TraceField {
     fn expand_trace(&self, idx: usize, access: &FieldAccess, immutable: bool) -> TokenStream {
@@ -211,9 +215,12 @@ impl TraceField {
 }
 
 #[derive(Debug, FromVariant)]
+#[darling(attributes(zerogc))]
 struct TraceVariant {
     ident: Ident,
-    fields: darling::ast::Fields<TraceField>
+    fields: darling::ast::Fields<TraceField>,
+    #[darling(forward_attrs(serde))]
+    attrs: Vec<syn::Attribute>
 }
 impl TraceVariant {
     fn fields(&self) -> impl Iterator<Item=&'_ TraceField> + '_ {
@@ -267,26 +274,25 @@ pub struct TraceDeriveInput {
     is_copy: bool,
     /// If the type should implement `TraceImmutable` in addition to `Trace
     #[darling(default, rename = "immutable")]
-    wants_immutable_trace: bool
+    wants_immutable_trace: bool,
+    #[darling(forward_attrs(serde))]
+    attrs: Vec<syn::Attribute>
 }
 impl TraceDeriveInput {
-    pub fn determine_field_types(&self, include_ignored: bool) -> HashSet<Type> {
+    fn all_fields(&self) -> Vec<&TraceField> {
         match self.data {
             Data::Enum(ref variants) => {
-                variants.iter()
-                    .flat_map(|var| var.fields())
-                    .filter(|f| !f.unsafe_skip_trace || include_ignored)
-                    .map(|fd| &fd.ty)
-                    .cloned()
-                    .collect()
-            }
-            Data::Struct(ref s) => {
-                s.fields.iter()
-                    .filter(|f| !f.unsafe_skip_trace || include_ignored)
-                    .map(|f| &f.ty).cloned()
-                    .collect()
-            }
+                variants.iter().flat_map(|var| var.fields()).collect()
+            },
+            Data::Struct(ref fields) => fields.iter().collect()
         }
+    }
+    pub fn determine_field_types(&self, include_ignored: bool) -> HashSet<Type> {
+        self.all_fields().iter()
+            .filter(|f| !f.unsafe_skip_trace || include_ignored)
+            .map(|fd| &fd.ty)
+            .cloned()
+            .collect()
     }
     pub fn normalize(&mut self, kind: TraceDeriveKind) -> Result<(), Error> {
         if *self.nop_trace {
@@ -330,6 +336,17 @@ impl TraceDeriveInput {
     fn gc_lifetime(&self) -> Option<&'_ Lifetime> {
         self.generics.gc_lifetime.as_ref()
     }
+    fn generics_with_gc_lifetime(&self, lt: Lifetime) -> (syn::Lifetime, Generics) {
+        let mut generics = self.generics.original.clone();
+        let gc_lifetime: syn::Lifetime = match self.gc_lifetime() {
+            Some(lt) => lt.clone(),
+            None => {
+                generics.params.push(GenericParam::Lifetime(LifetimeDef::new(lt.clone())));
+                lt
+            }
+        };
+        (gc_lifetime, generics)
+    }
     /// Expand a `GcSafe` for a specific combination of `Id` & 'gc
     ///
     /// Implicitly modifies the specified generics
@@ -351,7 +368,8 @@ impl TraceDeriveInput {
             },
             TraceDeriveKind::NullTrace => {
                 quote!(zerogc::NullTrace)
-            }
+            },
+            TraceDeriveKind::Deserialize => unreachable!()
         };
         for tp in self.generics.regular_type_params() {
             let tp = &tp.ident;
@@ -363,12 +381,14 @@ impl TraceDeriveInput {
                     generics.make_where_clause().predicates.push(
                         parse_quote!(#tp: #requirement)
                     )
-                }
+                },
+                TraceDeriveKind::Deserialize => unreachable!()
             }
         }
         let assertion: Ident = match kind {
             TraceDeriveKind::NullTrace => parse_quote!(verify_null_trace),
-            TraceDeriveKind::Regular => parse_quote!(assert_gc_safe)
+            TraceDeriveKind::Regular => parse_quote!(assert_gc_safe),
+            TraceDeriveKind::Deserialize => unreachable!()
         };
         let ty_generics = self.generics.original.split_for_impl().1;
         let (impl_generics, _, where_clause) = generics.split_for_impl();
@@ -383,14 +403,7 @@ impl TraceDeriveInput {
         })
     }
     fn expand_gcsafe(&self, kind: TraceDeriveKind) -> Result<TokenStream, Error> {
-        let mut generics = self.generics.original.clone();
-        let gc_lifetime: syn::Lifetime = match self.gc_lifetime() {
-            Some(lt) => lt.clone(),
-            None => {
-                generics.params.push(parse_quote!('gc));
-                parse_quote!('gc)
-            }
-        };
+        let (gc_lifetime, mut generics) = self.generics_with_gc_lifetime(parse_quote!('gc));
         match kind {
             TraceDeriveKind::NullTrace => {
                 // Verify we don't have any explicit collector id
@@ -410,8 +423,107 @@ impl TraceDeriveInput {
                         self.expand_gcsafe_sepcific(kind, initial, id, gc_lt)
                     }
                 )
-            }
+            },
+            TraceDeriveKind::Deserialize => unreachable!()
         }
+    }
+
+    fn expand_deserialize(&self) -> Result<TokenStream, Error> {
+        if !crate::DESERIALIZE_ENABLED {
+            return Err(Error::custom("The `zerogc/serde1` feature is disabled (please enable it)"));
+        }
+        let (gc_lifetime, generics) = self.generics_with_gc_lifetime(parse_quote!('gc));
+        self.expand_for_each_regular_id(
+            generics, TraceDeriveKind::Deserialize, gc_lifetime,
+            &mut |kind, initial, id, gc_lt| {
+                assert!(matches!(kind, TraceDeriveKind::Deserialize));
+                let id_is_generic = self.generics.original.type_params()
+                    .any(|param| id.is_ident(&param.ident));
+                let mut generics = initial.unwrap();
+                generics.params.push(parse_quote!('deserialize));
+                let requirement = quote!(for<'deser2> zerogc::serde::GcDeserialize::<#gc_lt, 'deser2, #id>);
+                for target in self.generics.regular_type_params() {
+                    let target = &target.ident;
+                    generics.make_where_clause().predicates.push(parse_quote!(#target: #requirement));
+                }
+                let ty_generics = self.generics.original.split_for_impl().1;
+                let (impl_generics, _, where_clause) = generics.split_for_impl();
+                let target_type = &self.ident;
+                let forward_attrs = &self.attrs;
+                let deserialize_field = |f: &TraceField| {
+                    let named = f.ident.as_ref().map(|name| quote!(#name: ));
+                    let ty = &f.ty;
+                    let forwarded_attrs = &f.attrs;
+                    let bound = format!(
+                        "{}: for<'deserialize> zerogc::serde::GcDeserialize<{}, 'deserialize, {}>", ty.to_token_stream(),
+                        gc_lt.to_token_stream(), id.to_token_stream()
+                    );
+                    quote! {
+                        #(#forwarded_attrs)*
+                        # [serde(deserialize_with = "deserialize_hack", bound(deserialize = #bound))]
+                        #named #ty
+                    }
+                };
+                let handle_fields = |fields: &darling::ast::Fields<TraceField>| {
+                    let handled_fields = fields.fields.iter().map(deserialize_field);
+                    match fields.style {
+                        Style::Tuple => {
+                            quote!{ ( #(#handled_fields),* ) }
+                        }
+                        Style::Struct => {
+                            quote!({ #(#handled_fields),* })
+                        }
+                        Style::Unit => quote!()
+                    }
+                };
+                let original_generics = &self.generics.original;
+                let inner = match self.data {
+                    Data::Enum(ref variants) => {
+                        let variants = variants.iter().map(|v| {
+                            let forward_attrs = &v.attrs;
+                            let name = &v.ident;
+                            let inner = handle_fields(&v.fields);
+                            quote! {
+                                #(#forward_attrs)*
+                                #name #inner
+                            }
+                        });
+                        quote!(enum HackRemoteDeserialize #original_generics { #(#variants),* })
+                    }
+                    Data::Struct(ref f) => {
+                        let fields = handle_fields(f);
+                        quote!(struct HackRemoteDeserialize #original_generics # fields)
+                    }
+                };
+                let remote_name = target_type.to_token_stream().to_string();
+                let id_decl = if id_is_generic {
+                    Some(quote!(#id: zerogc::CollectorId,))
+                } else { None };
+                Ok(quote! {
+                    impl #impl_generics zerogc::serde::GcDeserialize<#gc_lt, 'deserialize, #id> for #target_type #ty_generics #where_clause {
+                        fn deserialize_gc<D: serde::Deserializer<'deserialize>>(ctx: &#gc_lt <<#id as zerogc::CollectorId>::System as zerogc::GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+                            use serde::Deserializer;
+                            let _guard = unsafe { zerogc::serde::hack::set_context(ctx) };
+                            unsafe {
+                                debug_assert_eq!(_guard.get_unchecked() as *const _, ctx as *const _);
+                            }
+                            /// Hack function to deserialize via `serde::hack`, with the appropriate `Id` type
+                            ///
+                            /// Needed because the actual function is unsafe
+                            #[track_caller]
+                            fn deserialize_hack<'gc, 'de, #id_decl D: serde::de::Deserializer<'de>, T: zerogc::serde::GcDeserialize<#gc_lt, 'de, #id>>(deser: D) -> Result<T, D::Error> {
+                                unsafe { zerogc::serde::hack::unchecked_deserialize_hack::<'gc, 'de, D, #id, T>(deser) }
+                            }
+                            # [derive(serde::Deserialize)]
+                            # [serde(remote = #remote_name)]
+                            #(#forward_attrs)*
+                            #inner ;
+                            HackRemoteDeserialize::deserialize(deserializer)
+                        }
+                    }
+                })
+            }
+        )
     }
     fn expand_for_each_regular_id(
         &self, generics: Generics,
@@ -669,6 +781,11 @@ impl TraceDeriveInput {
         })
     }
     fn expand_trusted_drop(&self, kind: TraceDeriveKind) -> TokenStream {
+        let mut generics = self.generics.original.clone();
+        for param in self.generics.regular_type_params() {
+            let name = &param.ident;
+            generics.make_where_clause().predicates.push(parse_quote!(#name: zerogc::TrustedDrop));
+        }
         #[allow(clippy::if_same_then_else)] // Only necessary because of detailed comment
         let protective_drop = if self.is_copy {
             /*
@@ -703,7 +820,7 @@ impl TraceDeriveInput {
             }))
         };        
         let target_type = &self.ident;
-        let (impl_generics, ty_generics, where_clause) = self.generics.original.split_for_impl();
+        let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
         quote! {
             #protective_drop
             unsafe impl #impl_generics zerogc::TrustedDrop for #target_type #ty_generics #where_clause {}
@@ -832,6 +949,9 @@ impl TraceDeriveInput {
         })
     }
     pub fn expand(&self, kind: TraceDeriveKind) -> Result<TokenStream, Error> {
+        if matches!(kind, TraceDeriveKind::Deserialize) {
+            return self.expand_deserialize();
+        }
         let gcsafe = self.expand_gcsafe(kind)?;
         let trace_immutable = if self.wants_immutable_trace {
             Some(self.expand_trace(kind, true)?)

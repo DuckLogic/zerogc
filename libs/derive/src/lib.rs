@@ -135,6 +135,22 @@ pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     res
 }
 
+pub(crate) const DESERIALIZE_ENABLED: bool = cfg!(feature = "__serde-internal");
+
+#[proc_macro_derive(GcDeserialize, attributes(zerogc))]
+pub fn gc_deserialize(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let res = From::from(impl_derive_trace(&input, TraceDeriveKind::Deserialize)
+        .unwrap_or_else(|e| e.write_errors()));
+    debug_derive(
+        "derive(GcDeserialize)",
+        &input.ident.to_string(),
+        &format_args!("#[derive(GcDeserialize) for {}", input.ident),
+        &res
+    );
+    res
+}
+
 fn impl_derive_trace(input: &DeriveInput, kind: TraceDeriveKind) -> Result<TokenStream, darling::Error> {
     let mut input = derive::TraceDeriveInput::from_derive_input(input)?;
     input.normalize(kind)?;

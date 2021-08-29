@@ -5,6 +5,7 @@
     unsize,
     trait_alias, // RFC 1733 - Trait aliases
     generic_associated_types, // RFC 1598 - Generic associated types
+    option_result_unwrap_unchecked, // Only used by the 'serde' implementation...
 )]
 #![feature(maybe_uninit_slice)]
 #![feature(new_uninit)]
@@ -53,6 +54,10 @@ pub use crate::vec::GcArray;
 use std::ops::CoerceUnsized;
 use std::marker::Unsize;
 
+
+#[macro_use] // We have macros in here!
+#[cfg(feature = "serde1")]
+pub mod serde;
 #[macro_use]
 mod manually_traced;
 #[macro_use]
@@ -422,6 +427,9 @@ pub unsafe trait GcContext: Sized {
     /// See the [safepoint_recurse!] macro for a safe wrapper
     unsafe fn recurse_context<T, F, R>(&self, root: &mut &mut T, func: F) -> R
         where T: Trace, F: for <'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R;
+
+    /// Get the id of this context
+    fn id(&self) -> Self::Id;
 }
 /// A simple interface to allocating from a [GcContext]. 
 ///
@@ -549,6 +557,9 @@ impl<C: GcContext> FrozenContext<C> {
     }
 }
 
+/// A trait alias for [CollectorId]s that support [SimpleGcALloc]
+pub trait SimpleAllocCollectorId = CollectorId where <<Self as CollectorId>::System as GcSystem>::Context: GcSimpleAlloc;
+
 /// Uniquely identifies the collector in case there are
 /// multiple collectors.
 ///
@@ -562,7 +573,7 @@ impl<C: GcContext> FrozenContext<C> {
 ///
 /// It should be safe to assume that a collector exists
 /// if any of its pointers still do!
-pub unsafe trait CollectorId: Copy + Eq + Debug + NullTrace + TrustedDrop + 'static +for<'gc> GcSafe<'gc, Self> {
+pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop + 'static +for<'gc> GcSafe<'gc, Self> {
     /// The type of the garbage collector system
     type System: GcSystem<Id=Self>;
     /// The raw representation of vectors in this collector.

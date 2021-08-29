@@ -119,7 +119,7 @@ unsafe_trace_primitive!(f64);
 unsafe_trace_primitive!(bool);
 unsafe_trace_primitive!(char);
 // TODO: Get proper support for unsized types (issue #15)
-unsafe_trace_primitive!(&'static str);
+unsafe_trace_primitive!(&'static str; @);
 
 unsafe_gc_impl! {
     target => PhantomData<T>,
@@ -304,6 +304,7 @@ unsafe_gc_impl! {
             Some(ref #mutability value) => visitor.#visit_func::<T>(value),
         }
     },
+    deserialize => unstable_horrible_hack,
 }
 unsafe impl<'gc, OwningRef, V> GcDirectBarrier<'gc, OwningRef> for Option<V>
     where V: GcDirectBarrier<'gc, OwningRef> {
@@ -339,7 +340,8 @@ unsafe_gc_impl! {
         // We can trace `Wrapping` by simply tracing its interior
         visitor.#visit_func(#b self.0)
     },
-    collector_id => *
+    collector_id => *,
+    deserialize => unstable_horrible_hack,
 }
 
 #[cfg(test)]

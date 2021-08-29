@@ -1,12 +1,11 @@
 #![feature(
     arbitrary_self_types, // Used for `zerogc(mutable)`
 )]
-use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, dummy_impl::{self, DummyCollectorId}, GcRebrand};
+use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, dummy_impl::{self, DummyCollectorId}};
 
 use zerogc_derive::{Trace, NullTrace};
 use zerogc::cell::GcCell;
 use std::marker::PhantomData;
-use syn::DataUnion;
 
 #[derive(Trace)]
 #[zerogc(collector_ids(DummyCollectorId))]
