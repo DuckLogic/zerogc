@@ -13,7 +13,7 @@
 /// }
 /// trait_object_trace!(
 ///     impl<'gc,> Trace for dyn Foo<'gc>;
-///     Branded<'new_gc> => dyn Foo<'new_gc> + 'new_gc,
+///     Branded<'new_gc> => (dyn Foo<'new_gc> + 'new_gc),
 ///     collector_id => OurSpecificId,
 ///     gc_lifetime => 'gc
 /// );
@@ -25,7 +25,7 @@
 ///     foo(gc.value())
 /// }
 /// #[derive(Trace)]
-/// # #[zerogc(collector_ids(DummyCollectorId))]
+/// # #[zerogc(collector_ids(EpsilonCollectorId))]
 /// struct Bar<'gc> {
 ///     val: Gc<'gc, i32>
 /// }
@@ -47,9 +47,9 @@ macro_rules! trait_object_trace {
         Branded<$branded_lt:lifetime> => $branded:ty,
         collector_id => $collector_id:path,
         gc_lifetime => $gc_lt:lifetime) => {
-        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::TrustedDrop for dyn $target where Self: $crate::DynTrace<$gc_lt, $collector_id>, $($($where_clause)*)? {}
-        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::GcSafe<$gc_lt, $collector_id> for dyn $target where Self: $crate::DynTrace<$gc_lt, $collector_id>, $($($where_clause)*)? {}
-        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::Trace for dyn $target where Self: $crate::DynTrace::<$gc_lt, $collector_id>, $($($where_clause)*)? {
+        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::TrustedDrop for (dyn $target + $gc_lt) where Self: $crate::DynTrace<$gc_lt, $collector_id>, $($($where_clause)*)? {}
+        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::GcSafe<$gc_lt, $collector_id> for (dyn $target + $gc_lt) where Self: $crate::DynTrace<$gc_lt, $collector_id>, $($($where_clause)*)? {}
+        unsafe impl$(<$($lt,)* $($param:ident),*>)? $crate::Trace for (dyn $target + $gc_lt) where Self: $crate::DynTrace::<$gc_lt, $collector_id>, $($($where_clause)*)? {
             /*
              * Insufficient compile-time information to know whether we need to be traced.
              *
@@ -69,7 +69,7 @@ macro_rules! trait_object_trace {
                 visitor.visit_trait_object(gc)
             }
         }
-        unsafe impl<$branded_lt, $($($lt,)* $($param:ident,)*)?> $crate::GcRebrand<$branded_lt, $collector_id> for dyn $target where Self: $crate::DynTrace<$gc_lt, $collector_id>, T::Branded: $crate::DynTrace<$branded_lt, $collectorId>, $($($where_clause)*)? {
+        unsafe impl<$branded_lt, $($($lt,)* $($param:ident,)*)?> $crate::GcRebrand<$branded_lt, $collector_id> for dyn $target $(where $($where_clause)*)? {
             type Branded = $branded;
         }
     }

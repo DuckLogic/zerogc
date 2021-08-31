@@ -360,7 +360,7 @@ mod test {
 
     }
     #[derive(Trace)]
-    #[zerogc(collector_ids(DummyCollectorId))]
+    #[zerogc(collector_ids(EpsilonCollectorId))]
     struct Rec<'gc> {
         inner: Gc<'gc, Rec<'gc>>,
         inner_tuple: (Gc<'gc, Rec<'gc>>, Gc<'gc, Option<i32>>),

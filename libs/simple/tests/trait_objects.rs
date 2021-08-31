@@ -15,11 +15,16 @@ fn test_collector() -> SimpleCollector {
     )
 }
 
-trait Foo<'gc>: 'gc + DynTrace {
+trait Foo<'gc>: DynTrace<'gc, SimpleCollectorId> {
     fn method(&self) -> i32;
     fn validate(&self);
 }
-trait_object_trace!(impl<'gc,> Trace for dyn Foo<'gc>; Branded<'new_gc> => dyn Foo<'new_gc>, Erased<'min> => dyn Foo<'min>);
+trait_object_trace!(
+    impl<'gc,> Trace for dyn Foo<'gc>;
+    Branded<'new_gc> => dyn Foo<'new_gc>,
+    collector_id => SimpleCollectorId,
+    gc_lifetime => 'gc
+);
 
 fn foo<'gc, T: ?Sized + Trace + Foo<'gc>>(t: &T) -> i32 {
     assert_eq!(t.method(), 12);
@@ -29,7 +34,7 @@ fn bar<'gc>(gc: Gc<'gc, dyn Foo + 'gc>) -> i32 {
     foo(gc.value())
 }
 #[derive(Trace)]
-#[zerogc(collector_id(SimpleCollectorId), unsafe_skip_drop)]
+#[zerogc(collector_ids(SimpleCollectorId), unsafe_skip_drop)]
 struct Bar<'gc> {
     inner: Option<Gc<'gc, Bar<'gc>>>,
     val: Gc<'gc, i32>

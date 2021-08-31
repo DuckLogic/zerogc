@@ -986,7 +986,7 @@ pub unsafe trait TrustedDrop: Trace {}
 /// #[derive(Trace)]
 /// struct MixedGc<'gc, 'js> {
 ///     internal_ptr: Gc<'gc, i32, OtherGcId>,
-///     js_ptr: Gc<'gc, i32, JsGcId>
+///     js_ptr: Gc<'js, i32, JsGcId>
 /// }
 /// impl<'gc, 'js> MixedGc<'gc, 'js> {
 ///     fn verify(&self) {
@@ -1233,7 +1233,7 @@ pub unsafe trait TraceImmutable: Trace {
 /// The garbage collector will be able to use its runtime type information
 /// to find the appropriate implementation at runtime,
 /// even though its not known at compile tme.
-pub unsafe trait DynTrace<'gc, Id: CollectorId> {}
+pub unsafe trait DynTrace<'gc, Id: CollectorId>: 'gc {}
 unsafe impl<'gc, Id: CollectorId, T: ?Sized + Trace + GcSafe<'gc, Id>> DynTrace<'gc, Id> for T {}
 
 impl<'gc, T, U, Id> CoerceUnsized<Gc<'gc, U, Id>> for Gc<'gc, T, Id>

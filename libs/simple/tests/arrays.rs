@@ -15,7 +15,7 @@ fn test_collector() -> SimpleCollector {
 }
 
 #[derive(Trace, Copy, Clone, Debug)]
-#[zerogc(copy, collector_id(SimpleCollectorId))]
+#[zerogc(copy, collector_ids(SimpleCollectorId))]
 struct Dummy<'gc> {
     val: usize,
     inner: Option<Gc<'gc, Dummy<'gc>>>
