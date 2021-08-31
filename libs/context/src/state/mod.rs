@@ -85,13 +85,21 @@ pub unsafe trait RawContext<C>: Debug + self::sealed::Sealed
     }
     /// Get a pointer to the shadow stack
     fn shadow_stack_ptr(&self) -> *mut ShadowStack<C>;
+    /// Get a reference to the collector as a [CollectorRef]
+    ///
+    /// ## Safety
+    /// Assumes the underlying collector is still valid.
+    unsafe fn collector_ref(&self) -> &'_ CollectorRef<C>;
     /// Get a reference to the collector,
     /// assuming that it's valid
     ///
     /// ## Safety
     /// Assumes that the underlying collector
     /// is still valid.
-    unsafe fn collector(&self) -> &C;
+    #[inline]
+    unsafe fn collector(&self) -> &C {
+        self.collector_ref().as_raw()
+    }
     fn state(&self) -> ContextState;
 }
 

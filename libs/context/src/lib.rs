@@ -212,6 +212,11 @@ unsafe impl<C: RawCollectorImpl> GcContext for CollectorContext<C> {
     }
 
     #[inline]
+    fn system(&self) -> &'_ Self::System {
+        unsafe { (&*self.raw).collector_ref() }
+    }
+
+    #[inline]
     fn id(&self) -> Self::Id {
         unsafe { (&*self.raw).collector() }.id()
     }

@@ -6,8 +6,8 @@
 /// ```
 /// # use zerogc::{Trace, DynTrace, trait_object_trace};
 /// # use zerogc_derive::Trace;
-/// # use zerogc::dummy_impl::{self, DummyCollectorId, Gc};
-/// # type OurSpecificId = DummyCollectorId;
+/// # use zerogc::epsilon::{self, EpsilonCollectorId, Gc};
+/// # type OurSpecificId = EpsilonCollectorId;
 /// trait Foo<'gc>: DynTrace<'gc, OurSpecificId> {
 ///     fn method(&self) -> i32;
 /// }
@@ -34,8 +34,8 @@
 ///        **self.val
 ///     }
 /// }
-/// let val = dummy_impl::leaked(12);
-/// let gc: Gc<'_, Bar<'_>> = dummy_impl::leaked(Bar { val });
+/// let val = epsilon::leaked(12);
+/// let gc: Gc<'_, Bar<'_>> = epsilon::leaked(Bar { val });
 /// assert_eq!(bar(gc as Gc<'_, dyn Foo>), 24);
 /// ```
 ///

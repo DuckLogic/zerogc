@@ -15,6 +15,7 @@ use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
 use zerogc::vec::GcVec;
 use zerogc::vec::repr::GcVecRepr;
+use std::hash::{Hasher, Hash};
 
 /// A specific implementation of a collector
 pub unsafe trait RawCollectorImpl: 'static + Sized {
@@ -110,6 +111,12 @@ impl<C: RawCollectorImpl> PartialEq for CollectorId<C> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.ptr == other.ptr
+    }
+}
+impl<C: RawCollectorImpl> Hash for CollectorId<C>  {
+    #[inline]
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        hasher.write_usize(self.ptr.as_ptr() as usize);
     }
 }
 impl<C: RawCollectorImpl> Eq for CollectorId<C> {}

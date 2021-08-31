@@ -6,6 +6,10 @@
     trait_alias, // RFC 1733 - Trait aliases
     generic_associated_types, // RFC 1598 - Generic associated types
     option_result_unwrap_unchecked, // Only used by the 'serde' implementation...
+    // Needed for epsilon collector:
+    once_cell, // RFC 2788 (Probably will be accepted)
+    alloc_layout_extra,
+    const_fn_trait_bound, // NOTE: Needed for the `epsilon_static_array` macro
 )]
 #![feature(maybe_uninit_slice)]
 #![feature(new_uninit)]
@@ -64,7 +68,7 @@ mod manually_traced;
 mod macros;
 pub mod cell;
 pub mod prelude;
-pub mod dummy_impl;
+pub mod epsilon;
 pub mod vec;
 
 /// Invoke the closure with a temporary [GcContext],
@@ -166,9 +170,9 @@ macro_rules! __recurse_context {
 /// ## Example
 /// ```
 /// # use ::zerogc::safepoint;
-/// # let mut context = zerogc::dummy_impl::DummySystem::new().new_context();
+/// # let mut context = zerogc::epsilon::EpsilonSystem::leak().new_context();
 /// # // TODO: Can we please get support for non-Sized types like `String`?!?!?!
-/// let root = zerogc::dummy_impl::leaked(String::from("potato"));
+/// let root = zerogc::epsilon::leaked(String::from("potato"));
 /// let root = safepoint!(context, root);
 /// assert_eq!(**root, "potato");
 /// ```
@@ -292,7 +296,7 @@ pub unsafe trait GcContext: Sized {
     /// ```no_run
     /// # use zerogc::prelude::*;
     /// # use zerogc_derive::Trace;
-    /// # use zerogc::dummy_impl::{Gc, DummyCollectorId, DummyContext as ExampleContext};
+    /// # use zerogc::epsilon::{Gc, EpsilonCollectorId, EpsilonContext as ExampleContext};
     /// # #[derive(Trace)]
     /// # struct Obj { val: u32 }
     /// fn example<'gc>(ctx: &'gc mut ExampleContext, root: Gc<'gc, Obj>) {
@@ -427,6 +431,9 @@ pub unsafe trait GcContext: Sized {
     /// See the [safepoint_recurse!] macro for a safe wrapper
     unsafe fn recurse_context<T, F, R>(&self, root: &mut &mut T, func: F) -> R
         where T: Trace, F: for <'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R;
+
+    /// Get the [GcSystem] associated with this context
+    fn system(&self) -> &'_ Self::System;
 
     /// Get the id of this context
     fn id(&self) -> Self::Id;
@@ -974,8 +981,8 @@ pub unsafe trait TrustedDrop: Trace {}
 /// ```
 /// # use zerogc::{Gc, CollectorId, GcSafe};
 /// # use zerogc_derive::Trace;
-/// # type JsGcId = zerogc::dummy_impl::DummyCollectorId;
-/// # type OtherGcId = zerogc::dummy_impl::DummyCollectorId;
+/// # type JsGcId = zerogc::epsilon::EpsilonCollectorId;
+/// # type OtherGcId = zerogc::epsilon::EpsilonCollectorId;
 /// #[derive(Trace)]
 /// struct MixedGc<'gc, 'js> {
 ///     internal_ptr: Gc<'gc, i32, OtherGcId>,

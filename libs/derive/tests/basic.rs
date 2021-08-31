@@ -1,7 +1,7 @@
 #![feature(
     arbitrary_self_types, // Used for `zerogc(mutable)`
 )]
-use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, dummy_impl::{self, DummyCollectorId}};
+use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, epsilon::{self, EpsilonCollectorId}};
 
 use zerogc_derive::{Trace, NullTrace};
 use zerogc::cell::GcCell;
@@ -10,10 +10,10 @@ use std::marker::PhantomData;
 #[derive(Trace)]
 #[zerogc(collector_ids(DummyCollectorId))]
 pub struct SpecificCollector<'gc> {
-    gc: Gc<'gc, i32, DummyCollectorId>,
-    rec: Gc<'gc, SpecificCollector<'gc>, DummyCollectorId>,
+    gc: Gc<'gc, i32, EpsilonCollectorId>,
+    rec: Gc<'gc, SpecificCollector<'gc>, EpsilonCollectorId>,
     #[zerogc(mutable)]
-    cell: GcCell<Gc<'gc, SpecificCollector<'gc>, DummyCollectorId>>
+    cell: GcCell<Gc<'gc, SpecificCollector<'gc>, EpsilonCollectorId>>
 }
 
 #[derive(Trace)]
@@ -98,13 +98,13 @@ struct UnsafeSkipped<'gc> {
     s: &'static str,
     i: i32,
     #[zerogc(unsafe_skip_trace)]
-    wow: Gc<'gc, i32, DummyCollectorId>
+    wow: Gc<'gc, i32, EpsilonCollectorId>
 }
 
 #[derive(Trace)]
 #[zerogc(ignore_lifetimes("'a"), immutable, collector_ids(DummyCollectorId))]
 #[allow(unused)]
-struct LifetimeTrace<'a: 'gc, 'gc, T: GcSafe<'gc, DummyCollectorId> + 'a> {
+struct LifetimeTrace<'a: 'gc, 'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'a> {
     s: String,
     i: i32,
     wow: Box<NopTrace>,
@@ -115,21 +115,21 @@ struct LifetimeTrace<'a: 'gc, 'gc, T: GcSafe<'gc, DummyCollectorId> + 'a> {
 
 #[test]
 fn basic<'gc>() {
-    let _b = Basic::<dummy_impl::DummyCollectorId> {
+    let _b = Basic::<epsilon::EpsilonCollectorId> {
         value: String::new(),
         parent: None,
         children: vec![],
         cell: GcCell::new(None)
     };
-    assert!(<Basic::<dummy_impl::DummyCollectorId> as Trace>::NEEDS_TRACE);
-    assert!(<BasicCopy::<dummy_impl::DummyCollectorId> as Trace>::NEEDS_TRACE);
-    assert!(<Basic::<dummy_impl::DummyCollectorId> as Trace>::NEEDS_DROP);
-    assert!(!<BasicCopy::<dummy_impl::DummyCollectorId> as Trace>::NEEDS_DROP);
-    assert_copy::<BasicCopy::<dummy_impl::DummyCollectorId>>();
+    assert!(<Basic::<epsilon::EpsilonCollectorId> as Trace>::NEEDS_TRACE);
+    assert!(<BasicCopy::<epsilon::EpsilonCollectorId> as Trace>::NEEDS_TRACE);
+    assert!(<Basic::<epsilon::EpsilonCollectorId> as Trace>::NEEDS_DROP);
+    assert!(!<BasicCopy::<epsilon::EpsilonCollectorId> as Trace>::NEEDS_DROP);
+    assert_copy::<BasicCopy::<epsilon::EpsilonCollectorId>>();
     assert_null_trace::<NopTrace>();
     assert!(!<NopTrace as Trace>::NEEDS_TRACE);
 
-    check_id::<dummy_impl::DummyCollectorId>();
+    check_id::<epsilon::EpsilonCollectorId>();
 
     // We explicitly skipped the only trace field
     assert!(!<UnsafeSkipped<'gc> as Trace>::NEEDS_TRACE);

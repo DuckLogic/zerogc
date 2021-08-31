@@ -2,12 +2,12 @@ use zerogc_derive::{GcDeserialize, Trace};
 
 use zerogc::SimpleAllocCollectorId;
 use zerogc::prelude::*;
-use zerogc::dummy_impl::{DummyCollectorId};
+use zerogc::epsilon::{EpsilonCollectorId};
 
 #[derive(Trace, GcDeserialize)]
 #[zerogc(collector_ids(DummyCollectorId))]
 struct BasicDeserialize<'gc> {
-    test: Gc<'gc, String, DummyCollectorId>
+    test: Gc<'gc, String, EpsilonCollectorId>
 }
 
 #[derive(Trace, GcDeserialize)]

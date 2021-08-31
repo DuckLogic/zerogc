@@ -34,7 +34,7 @@ unsafe_gc_impl! {
     params => [T: TraceImmutable],
     bounds => {
         GcDeserialize => { where T: GcDeserialize<'gc, 'deserialize, Id> + Eq + Hash }
-    }
+    },
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory

@@ -188,8 +188,8 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
     }
 
     #[inline]
-    unsafe fn collector(&self) -> &C {
-        self.collector.as_raw()
+    unsafe fn collector_ref(&self) -> &CollectorRef<C> {
+        &self.collector
     }
 
     #[inline]

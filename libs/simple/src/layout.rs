@@ -266,6 +266,11 @@ impl<'gc, T: GcSafe<'gc, crate::CollectorId>> SimpleVecRepr<'gc, T> {
     #[inline]
     fn header(&self) -> *mut GcVecHeader {
         unsafe {
+            /*
+             * TODO: what if we have a non-standard alignment?\
+             * Our `T` is erased at runtime....
+             * this is a bug in the epsilon collector too
+             */
             (self as *const Self as *mut Self as *mut u8)
                 .sub(GcVecHeader::LAYOUT.value_offset(std::mem::align_of::<T>()))
                 .cast()
@@ -279,7 +284,14 @@ unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> GcVecRepr<'gc> for SimpleVe
 
     #[inline]
     fn element_layout(&self) -> Layout {
-        Layout::new::<T>()
+        unsafe {
+            match (*self.header()).common_header.type_info.layout {
+                GcTypeLayout::Vec {
+                    element_layout, ..
+                } => element_layout,
+                _ => std::hint::unreachable_unchecked()
+            }
+        }
     }
 
     #[inline]

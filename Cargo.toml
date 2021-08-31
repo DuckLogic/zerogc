@@ -19,12 +19,14 @@ parking_lot = { version = "0.11", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 # Used for macros
 zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.5" }
+# Used for the "epsilon" no-op collector
+bumpalo = { version = "3", optional = true }
 
 [workspace]
 members = ["libs/simple", "libs/derive", "libs/context"]
 
 [features]
-default = ["std"]
+default = ["std", "epsilon"]
 # Depend on the standard library (optional)
 #
 # This implements tracing for most standard library types.
@@ -35,4 +37,6 @@ std = ["alloc"]
 # This implements `Trace` for `Box` and collections like `Vec`
 alloc = []
 # Serde support
-serde1 = ["serde", "zerogc-derive/__serde-internal"]
+serde1 = ["serde", "zerogc-derive/__serde-internal", "indexmap/serde-1"]
+# Support the "epsilon" no-op collector
+epsilon = ["bumpalo"]

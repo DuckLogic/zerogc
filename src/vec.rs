@@ -30,10 +30,9 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcArray<'gc, T, Id> {
     /// Pointer and length must be valid, and point to a garbage collected
     /// value allocated from the corresponding [CollectorId]
     #[inline]
-    pub unsafe fn from_raw_ptr(ptr: NonNull<T>, len: usize) -> Self {
-        let res = GcArray { ptr, marker: PhantomData };
-        debug_assert_eq!(res.len(), len);
-        res
+    pub const unsafe fn from_raw_ptr(ptr: NonNull<T>, _len: usize) -> Self {
+        // TODO: It'd be nice to assert the length
+        GcArray { ptr, marker: PhantomData }
     }
 }
 // Relax T: GcSafe bound
