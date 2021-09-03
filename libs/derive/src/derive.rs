@@ -626,15 +626,20 @@ impl TraceDeriveInput {
             &mut fold,
             initial_generics.unwrap_or_else(|| self.generics.original.clone()),
         );
-        for param in self.generics.regular_type_params() {
+        for param in &self.generics.type_params {
             let name = &param.ident;
-            generics.make_where_clause().predicates.push(parse_quote!(#name: zerogc::GcRebrand<#new_lt, #id>));
+            let target: Path = if !self.generics.is_ignored(name) {
+                generics.make_where_clause().predicates.push(parse_quote!(#name: zerogc::GcRebrand<#new_lt, #id>));
+                parse_quote!(#name::Branded)
+            } else {
+                Path::from(name.clone())
+            };
             let rewritten_bounds = param.bounds.iter().cloned().map(|bound| {
                 syn::fold::fold_type_param_bound(&mut ReplaceLt {
                     orig_lt, new_lt: &new_lt
                 }, bound)
             }).collect::<Vec<_>>();
-            generics.make_where_clause().predicates.push(parse_quote!(#name::Branded: #(#rewritten_bounds)+*));
+            generics.make_where_clause().predicates.push(parse_quote!(#target: #(#rewritten_bounds)+*));
         }
         for ignored in &self.generics.ignored_lifetimes {
             generics.make_where_clause().predicates.push(parse_quote!(#ignored: 'new_gc));

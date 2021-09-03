@@ -6,9 +6,10 @@ use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, epsilon::{self, EpsilonC
 use zerogc_derive::{Trace, NullTrace};
 use zerogc::cell::GcCell;
 use std::marker::PhantomData;
+use std::fmt::Debug;
 
 #[derive(Trace)]
-#[zerogc(collector_ids(DummyCollectorId))]
+#[zerogc(collector_ids(EpsilonCollectorId))]
 pub struct SpecificCollector<'gc> {
     gc: Gc<'gc, i32, EpsilonCollectorId>,
     rec: Gc<'gc, SpecificCollector<'gc>, EpsilonCollectorId>,
@@ -92,7 +93,7 @@ struct NopTrace {
 }
 
 #[derive(Trace)]
-#[zerogc(unsafe_skip_drop, collector_ids(DummyCollectorId))]
+#[zerogc(unsafe_skip_drop, collector_ids(EpsilonCollectorId))]
 #[allow(unused)]
 struct UnsafeSkipped<'gc> {
     s: &'static str,
@@ -102,7 +103,7 @@ struct UnsafeSkipped<'gc> {
 }
 
 #[derive(Trace)]
-#[zerogc(ignore_lifetimes("'a"), immutable, collector_ids(DummyCollectorId))]
+#[zerogc(ignore_lifetimes("'a"), immutable, collector_ids(EpsilonCollectorId))]
 #[allow(unused)]
 struct LifetimeTrace<'a: 'gc, 'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'a> {
     s: String,
@@ -111,6 +112,13 @@ struct LifetimeTrace<'a: 'gc, 'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'a> {
     other: &'a u32,
     generic: Box<T>,
     marker: PhantomData<&'gc ()>
+}
+
+#[derive(Trace)]
+#[zerogc(copy, collector_ids(Id), ignore_params(T))]
+struct IgnoredParam<'gc, T: Debug + 'gc, Id: CollectorId> {
+    gc: Gc<'gc, IgnoredParam<'gc, T, Id>, Id>,
+    param: PhantomData<fn() -> T>,
 }
 
 #[test]

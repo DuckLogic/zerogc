@@ -5,7 +5,7 @@ use zerogc::prelude::*;
 use zerogc::epsilon::{EpsilonCollectorId};
 
 #[derive(Trace, GcDeserialize)]
-#[zerogc(collector_ids(DummyCollectorId))]
+#[zerogc(collector_ids(EpsilonCollectorId))]
 struct BasicDeserialize<'gc> {
     test: Gc<'gc, String, EpsilonCollectorId>
 }
