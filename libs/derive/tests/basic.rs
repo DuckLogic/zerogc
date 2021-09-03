@@ -99,8 +99,14 @@ struct UnsafeSkipped<'gc> {
     s: &'static str,
     i: i32,
     #[zerogc(unsafe_skip_trace)]
-    wow: Gc<'gc, i32, EpsilonCollectorId>
+    wow: Gc<'gc, i32, EpsilonCollectorId>,
+    #[zerogc(unsafe_skip_trace)]
+    not_impld: NotImplTrace
 }
+
+
+/// A type that doesn't implement `Trace`
+struct NotImplTrace;
 
 #[derive(Trace)]
 #[zerogc(ignore_lifetimes("'a"), immutable, collector_ids(EpsilonCollectorId))]
