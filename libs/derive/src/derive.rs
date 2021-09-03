@@ -753,11 +753,17 @@ impl TraceDeriveInput {
         let traced_field_types = self.determine_field_types(false);
         let all_field_types = self.determine_field_types(true);
         let needs_trace = traced_field_types.iter().map(|ty| quote_spanned!(ty.span() => <#ty as zerogc::Trace>::NEEDS_TRACE));
-        let needs_drop = all_field_types.iter().map(|ty| if traced_field_types.contains(ty) {
-            quote_spanned!(ty.span() => <#ty as zerogc::Trace>::NEEDS_DROP)
+        let needs_drop = if self.is_copy {
+            vec![quote!(false)]
         } else {
-            quote_spanned!(ty.span() => core::mem::needs_drop::<#ty>())
-        });
+            all_field_types.iter().map(|ty| {
+                if traced_field_types.contains(ty) {
+                    quote_spanned!(ty.span() => <#ty as zerogc::Trace>::NEEDS_DROP)
+                } else {
+                    quote_spanned!(ty.span() => core::mem::needs_drop::<#ty>())
+                }
+            }).collect::<Vec<_>>()
+        };
         let assoc_constants = if !immutable {
             Some(quote! {
                 const NEEDS_TRACE: bool = #(#needs_trace || )* false /* NOTE: Default to *false* if we have no GC types inside */;
