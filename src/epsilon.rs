@@ -16,15 +16,20 @@ use std::ptr::NonNull;
 use std::alloc::Layout;
 use std::rc::Rc;
 use std::cell::Cell;
-use std::ffi::c_void;
 use std::lazy::OnceCell;
 
 use self::{alloc::{EpsilonAlloc}, layout::TypeInfo};
 
-/// Fake a [Gc] that points to the specified value
+/// Coerce a reference into a [Gc] pointer.
+///
+/// This is only supported on the epsilon collector.
+/// Because the epsilon collector never allocates,
+/// it doesn't need to make a distinction between `Gc<T>` and `&T`.
 ///
 /// This will never actually be collected
 /// and will always be valid
+///
+/// TODO: Rename??
 #[inline]
 pub const fn gc<'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'gc>(ptr: &'gc T) -> Gc<'gc, T> {
     /*
@@ -35,46 +40,24 @@ pub const fn gc<'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'gc>(ptr: &'gc T) -> G
     unsafe { std::mem::transmute::<&'gc T, crate::Gc<'gc, T, EpsilonCollectorId>>(ptr) }
 }
 
-/// Statically allocate an array of the specified values
+/// Coerce a slice into a `GcArray`.
 ///
-/// **WARNING**: Because this uses the 'epsilon' collector, it will never
-/// free the underlying memory.
-#[macro_export]
-macro_rules! epsilon_static_array {
-    ([$target:ty; $len:expr] => $values:expr) => {unsafe {
-        #[repr(C)]
-        struct ArrayWithHeader<T, const LEN: usize> {
-            header: $crate::epsilon::ArrayHeaderHack,
-            array: [T; LEN]
-        }
-        static HEADERED: &'static ArrayWithHeader<$target, { $len }> = &ArrayWithHeader {
-            header: self::epsilon::ArrayHeaderHack::for_len::<$target>($len),
-            array: $values
-        };
-        std::mem::transmute::<
-            &'static ArrayWithHeader<$target, { $len }>,
-            $crate::vec::GcArray<'static, $target, $crate::epsilon::EpsilonCollectorId>,
-        >(HEADERED)
-    }}
-}
-/// An wrapper around `self::layout::EpsilonArrayHeader`
+/// This is only supported on the epsilon collector.
+/// Because the epsilon collector never allocates,
+/// it doesn't need to make a distinction between `GcArray<T>` and `&[T]`.
 ///
-/// Internal to the `epsilon_static_array!` macro
-#[doc(hidden)]
-#[repr(C)]
-pub struct ArrayHeaderHack(layout::EpsilonArrayHeader);
-impl ArrayHeaderHack {
-    #[inline]
-    #[doc(hidden)]
-    pub const fn for_len<T>(len: usize) -> ArrayHeaderHack {
-        ArrayHeaderHack(layout::EpsilonArrayHeader {
-            len, common_header: layout::EpsilonHeader {
-                type_info: TypeInfo::of_array::<T>(),
-                next: None
-            }
-        })
-    }
-}
+/// See also: [gc] for converting `&T` -> `Gc<T>`
+#[inline]
+pub const fn gc_array<'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'gc>(slice: &'gc [T]) -> GcArray<'gc, T> {
+    /*
+     * SAFETY: Epsilon uses the 'fat' representation for GcArrays.
+     * That means that repr(GcArray) == repr(&[T]).
+     *
+     * Since we never collect, we are free to transmute
+     * back and forth between them
+     */
+    unsafe { std::mem::transmute::<&'gc [T], crate::GcArray<'gc, T, EpsilonCollectorId>>(slice) }
+} 
 
 /// Allocate a [(fake) Gc](Gc) that points to the specified
 /// value and leak it.
@@ -94,7 +77,7 @@ pub type Gc<'gc, T> = crate::Gc<'gc, T, EpsilonCollectorId>;
 /// that uses the [epsilon collector](EpsilonSystem)
 ///
 /// **WARNING**: This never actually collects any garbage.
-pub type GcArray<'gc, T> = crate::vec::GcArray<'gc, T, EpsilonCollectorId>;
+pub type GcArray<'gc, T> = crate::array::GcArray<'gc, T, EpsilonCollectorId>;
 /// A [garbage collected array](`crate::vec::GcVec`)
 /// that uses the [epsilon collector](EpsilonSystem)
 ///
@@ -402,6 +385,9 @@ unsafe impl NullTrace for EpsilonCollectorId {}
 unsafe impl CollectorId for EpsilonCollectorId {
     type System = EpsilonSystem;
     type RawVecRepr<'gc> = self::layout::EpsilonVecRepr;
+    /// We use fat-pointers for arrays,
+    /// so that we can transmute from `&'static [T]` -> `GcArray`
+    type ArrayRepr<'gc, T: 'gc> = zerogc::array::repr::FatArrayRepr<'gc, T, Self>;
 
     #[inline]
     fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: ?Sized + 'gc, 'gc: 'a {
@@ -410,17 +396,7 @@ unsafe impl CollectorId for EpsilonCollectorId {
     }
 
     #[inline]
-    fn resolve_array_len<'gc, T>(array: GcArray<'gc, T>) -> usize where T: 'gc {
-        unsafe {
-            let offset = std::mem::size_of::<self::layout::EpsilonArrayHeader>() +
-                Layout::new::<self::layout::EpsilonArrayHeader>()
-                    .padding_needed_for(std::mem::align_of::<T>());
-            (*(array.as_raw_ptr() as *mut c_void).sub(offset).cast::<self::layout::EpsilonArrayHeader>()).len
-        }
-    }
-
-    #[inline]
-    fn resolve_array_id<'a, 'gc, T>(_array: &'a GcArray<'gc, T>) -> &'a Self where T: 'gc, 'gc: 'a {
+    fn resolve_array_id<'a, 'gc, T>(_array: &'a Self::ArrayRepr<'gc, T>) -> &'a Self where T: 'gc, 'gc: 'a {
         const ID: EpsilonCollectorId = EpsilonCollectorId { _priv: () };
         &ID
     }

@@ -56,7 +56,7 @@ use core::fmt::{self, Debug, Formatter};
 use zerogc_derive::unsafe_gc_impl;
 
 use crate::vec::{GcVec};
-pub use crate::vec::GcArray;
+pub use crate::array::GcArray;
 use std::ops::CoerceUnsized;
 use std::marker::Unsize;
 
@@ -71,6 +71,7 @@ mod macros;
 pub mod cell;
 pub mod prelude;
 pub mod epsilon;
+pub mod array;
 pub mod vec;
 
 /// Invoke the closure with a temporary [GcContext],
@@ -589,6 +590,9 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
     ///
     /// May be [crate::vec::repr::VecUnsupported] if vectors are unsupported.
     type RawVecRepr<'gc>: crate::vec::repr::GcVecRepr<'gc, Id=Self>;
+    /// The raw reprsentation of `GcArray` pointers
+    /// in this collector.
+    type ArrayRepr<'gc, T: 'gc>: crate::array::repr::GcArrayRepr<'gc, T, Id=Self>;
 
     /// Get the runtime id of the collector that allocated the [Gc]
     ///
@@ -597,14 +601,10 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
     fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self
         where T: ?Sized + 'gc, 'gc: 'a;
 
-    /// Resolve the length of the specified [GcArray]
-    fn resolve_array_len<'gc, T>(array: GcArray<'gc, T, Self>) -> usize
-        where T: 'gc;
-
-    /// Resolve the CollectorId for the specified [GcArray]
+    /// Resolve the CollectorId for the specified [GcArray]'s representation.
     ///
     /// This is the [GcArray] counterpart of `from_gc_ptr`
-    fn resolve_array_id<'a, 'gc, T>(gc: &'a GcArray<'gc, T, Self>) -> &'a Self
+    fn resolve_array_id<'a, 'gc, T>(repr: &'a Self::ArrayRepr<'gc, T>) -> &'a Self
         where T: 'gc, 'gc: 'a;
 
     /// Perform a write barrier before writing to a garbage collected field

@@ -2,7 +2,7 @@ use std::fmt::Debug;
 
 use zerogc_derive::Trace;
 
-use zerogc::{Gc, GcArray, GcContext, GcSimpleAlloc, epsilon_static_array, safepoint_recurse};
+use zerogc::{Gc, GcArray, GcContext, GcSimpleAlloc, safepoint_recurse};
 use zerogc::epsilon::{self, EpsilonCollectorId, EpsilonContext, EpsilonSystem};
 
 #[derive(Trace)]
@@ -63,9 +63,8 @@ fn static_alloc() {
     let sys = EpsilonSystem::leak();
     let ctx = sys.new_context();
     recurse(&ctx, BAR, epsilon::gc(BAR));
-    const FOO: &[u8; 29] = b"Do you wanna build a snowman?";
-    const FOO_LEN: usize = FOO.len();
-    let array: GcArray<'static, u8, EpsilonCollectorId>
-        = epsilon_static_array!([u8; FOO_LEN] => *FOO);
+    const FOO: &[u8] = b"Do you wanna build a snowman?";
+    let array: GcArray<u8, EpsilonCollectorId>
+        = epsilon::gc_array(FOO);
     recurse_array(&ctx, &*FOO, array);
 }

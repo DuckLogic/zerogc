@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 
 use slog::{Logger, o};
 
-use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc, NullTrace, TraceImmutable, GcVisitor, GcArray, TrustedDrop};
+use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc, NullTrace, TraceImmutable, GcVisitor,  TrustedDrop};
 
 use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
@@ -52,10 +52,12 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     fn id_for_gc<'a, 'gc, T>(gc: &'a Gc<'gc, T, CollectorId<Self>>) -> &'a CollectorId<Self>
         where 'gc: 'a, T: ?Sized + 'gc;
 
-    fn id_for_array<'a, 'gc, T>(gc: &'a GcArray<'gc, T, CollectorId<Self>>) -> &'a CollectorId<Self>
+    // TODO: What if we want to customize 'GcArrayRepr'??
+
+    fn id_for_array<'a, 'gc, T>(gc: &'a <CollectorId<Self> as zerogc::CollectorId>::ArrayRepr<'gc, T>) -> &'a CollectorId<Self>
         where 'gc: 'a, T: 'gc;
 
-    fn resolve_array_len<'gc, T>(gc: GcArray<'gc, T, CollectorId<Self>>) -> usize
+    fn resolve_array_len<'gc, T>(gc: <CollectorId<Self> as zerogc::CollectorId>::ArrayRepr<'gc, T>) -> usize
         where T: 'gc;
 
     /// Convert the specified value into a dyn pointer
@@ -291,6 +293,8 @@ impl<C: RawCollectorImpl> CollectorId<C> {
 unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     type System = CollectorRef<C>;
     type RawVecRepr<'gc> = C::RawVecRepr<'gc>;
+    // TODO: What if clients want to customize this?
+    type ArrayRepr<'gc, T: 'gc> = zerogc::array::repr::ThinArrayRepr<'gc, T, Self>;
 
     #[inline]
     fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self where T: ?Sized + 'gc, 'gc: 'a {
@@ -298,12 +302,7 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     }
 
     #[inline]
-    fn resolve_array_len<'gc, T>(gc: GcArray<'gc, T, Self>) -> usize where T: 'gc {
-        C::resolve_array_len(gc)
-    }
-
-    #[inline]
-    fn resolve_array_id<'a, 'gc, T>(gc: &'a GcArray<'gc, T, Self>) -> &'a Self where T: 'gc, 'gc: 'a {
+    fn resolve_array_id<'a, 'gc, T>(gc: &'a Self::ArrayRepr<'gc, T>) -> &'a Self where T: 'gc, 'gc: 'a {
         C::id_for_array(gc)
     }
 
@@ -325,6 +324,12 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
             core::mem::size_of::<CollectorRef<C>>()
         );
         &*(self as *const CollectorId<C> as *const CollectorRef<C>)
+    }
+}
+unsafe impl<C: RawCollectorImpl> zerogc::array::repr::ThinArrayGcAccess for CollectorId<C> {
+    #[inline]
+    fn resolve_array_len<'gc, T>(gc: Self::ArrayRepr<'gc, T>) -> usize where T: 'gc {
+        C::resolve_array_len(gc)
     }
 }
 unsafe impl<'gc, OtherId: zerogc::CollectorId, C: RawCollectorImpl> GcSafe<'gc, OtherId> for CollectorId<C> {}

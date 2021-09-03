@@ -72,6 +72,7 @@ use zerogc_context::collector::{RawSimpleAlloc, RawCollectorImpl};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 use zerogc_context::{CollectionManager as AbstractCollectionManager, RawContext as AbstractRawContext, CollectorContext};
 use zerogc::vec::{GcRawVec};
+use zerogc::array::repr::{GcArrayRepr, ThinArrayRepr};
 use std::cell::Cell;
 use std::ffi::c_void;
 
@@ -142,7 +143,7 @@ pub type CollectorId = ::zerogc_context::CollectorId<RawSimpleCollector>;
 /// A garbage collected pointer, allocated in the "simple" collector
 pub type Gc<'gc, T> = ::zerogc::Gc<'gc, T, CollectorId>;
 /// A garbage collected array, allocated in the "simple" collector
-pub type GcArray<'gc, T> = ::zerogc::vec::GcArray<'gc, T, CollectorId>;
+pub type GcArray<'gc, T> = ::zerogc::array::GcArray<'gc, T, CollectorId>;
 /// A garbage colelcted vector, allocated in the "simple" collector
 pub type GcVec<'gc, T> = ::zerogc::vec::GcVec<'gc, T, SimpleCollectorContext>;
 
@@ -647,10 +648,10 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     }
 
     #[inline]
-    fn id_for_array<'a, 'gc, T>(gc: &'a GcArray<'gc, T>) -> &'a CollectorId where 'gc: 'a, T: 'gc {
+    fn id_for_array<'a, 'gc, T>(repr: &'a ThinArrayRepr<'gc, T, CollectorId>) -> &'a CollectorId where 'gc: 'a, T: 'gc {
         #[cfg(feature = "multiple-collectors")] {
             unsafe {
-                let header = GcArrayHeader::LAYOUT.from_value_ptr(gc.as_raw_ptr());
+                let header = GcArrayHeader::LAYOUT.from_value_ptr(repr.as_raw_ptr());
                 &*(*header).common_header.mark_data.load_snapshot().collector_id_ptr
             }
         }
@@ -661,7 +662,7 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     }
 
     #[inline]
-    fn resolve_array_len<'gc, T>(gc: zerogc::GcArray<'gc, T, CollectorId>) -> usize where T: 'gc {
+    fn resolve_array_len<'gc, T>(gc: ThinArrayRepr<'gc, T, CollectorId>) -> usize where T: 'gc {
         unsafe {
             let header = GcArrayHeader::LAYOUT.from_value_ptr(gc.as_raw_ptr());
             (*header).len
@@ -1002,7 +1003,7 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
     }
 
     #[inline]
-    unsafe fn visit_array<'gc, T, Id>(&mut self, array: &mut ::zerogc::vec::GcArray<'gc, T, Id>) -> Result<(), Self::Err>
+    unsafe fn visit_array<'gc, T, Id>(&mut self, array: &mut ::zerogc::array::GcArray<'gc, T, Id>) -> Result<(), Self::Err>
         where T: GcSafe<'gc, Id>, Id: ::zerogc::CollectorId {
         if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
             /*
@@ -1010,8 +1011,8 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
              * Essentially this is a checked cast
              */
             let array = std::mem::transmute::<
-                &mut ::zerogc::vec::GcArray<'gc, T, Id>,
-                &mut ::zerogc::vec::GcArray<'gc, T, crate::CollectorId>
+                &mut ::zerogc::array::GcArray<'gc, T, Id>,
+                &mut ::zerogc::array::GcArray<'gc, T, crate::CollectorId>
             >(array);
             /*
              * Check the collectors match. Otherwise we're mutating

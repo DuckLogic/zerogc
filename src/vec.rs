@@ -6,7 +6,6 @@
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::mem::ManuallyDrop;
-use core::ptr::{NonNull};
 
 use zerogc_derive::{unsafe_gc_impl};
 
@@ -14,92 +13,6 @@ use crate::{GcSimpleAlloc, Trace, CollectorId, Gc, GcSafe, GcRebrand};
 use crate::vec::repr::{GcVecRepr, ReallocFailedError};
 
 pub mod repr;
-
-/// A garbage collected array.
-///
-/// This is a thin pointer, with length stored indirectly in the object's header.
-#[repr(transparent)]
-pub struct GcArray<'gc, T: 'gc, Id: CollectorId> {
-    ptr: NonNull<T>,
-    marker: PhantomData<Gc<'gc, [T], Id>>
-}
-impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcArray<'gc, T, Id> {
-    /// Create an array from the specified raw pointer and length
-    ///
-    /// ## Safety
-    /// Pointer and length must be valid, and point to a garbage collected
-    /// value allocated from the corresponding [CollectorId]
-    #[inline]
-    pub const unsafe fn from_raw_ptr(ptr: NonNull<T>, _len: usize) -> Self {
-        // TODO: It'd be nice to assert the length
-        GcArray { ptr, marker: PhantomData }
-    }
-}
-// Relax T: GcSafe bound
-impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
-    /// The value of the array as a slice
-    #[inline]
-    pub fn as_slice(self) -> &'gc [T] {
-        unsafe {
-            core::slice::from_raw_parts(self.as_raw_ptr() as *const T, self.len())
-        }
-    }
-    /// Load a raw pointer to the array's value
-    #[inline]
-    pub fn as_raw_ptr(self) -> *mut T {
-        self.ptr.as_ptr()
-    }
-    /// Load the length of the array
-    #[inline]
-    pub fn len(&self) -> usize {
-        Id::resolve_array_len(*self)
-    }
-    /// Check if the array is empty
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    /// Resolve the [CollectorId]
-    #[inline]
-    pub fn collector_id(&self) -> &'_ Id {
-        Id::resolve_array_id(self)
-    }
-}
-impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Deref for GcArray<'gc, T, Id> {
-    type Target = [T];
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        self.as_slice()
-    }
-}
-impl<'gc, T, Id: CollectorId> Copy for GcArray<'gc, T, Id> {}
-impl<'gc, T, Id: CollectorId> Clone for GcArray<'gc, T, Id> {
-    #[inline]
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-// Need to implement by hand, because [T] is not GcRebrand
-unsafe_gc_impl!(
-    target => GcArray<'gc, T, Id>,
-    params => ['gc, T: GcSafe<'gc, Id>, Id: CollectorId],
-    bounds => {
-        TraceImmutable => never,
-        GcRebrand => { where T: GcRebrand<'new_gc, Id>, <T as GcRebrand<'new_gc, Id>>::Branded: Sized + GcSafe<'new_gc, Id> },
-    },
-    null_trace => never,
-    branded_type => GcArray<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,
-    NEEDS_TRACE => true,
-    NEEDS_DROP => false,
-    trace_mut => |self, visitor| {
-        unsafe { visitor.visit_array(self) }
-    },
-    collector_id => Id,
-    visit_inside_gc => |gc, visitor| {
-        visitor.visit_gc(gc)
-    }
-);
 
 /// A version of [Vec] for use with garbage collectors.
 ///
