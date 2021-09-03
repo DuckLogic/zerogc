@@ -78,7 +78,7 @@ pub struct Unsupported<'gc, Id: CollectorId> {
     pub marker: PhantomData<(Id, &'gc ())>,
     /// indicates this type should never exist at runtime
     // TODO: Replace with `!` once stabilized
-    pub never: std::convert::Infallible
+    pub never: core::convert::Infallible
 }
 unsafe_gc_impl! {
     target => Unsupported<'gc, Id>,

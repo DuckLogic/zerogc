@@ -18,7 +18,7 @@ use std::rc::Rc;
 use std::cell::Cell;
 use std::lazy::OnceCell;
 
-use self::{alloc::{EpsilonAlloc}, layout::TypeInfo};
+use self::alloc::{EpsilonAlloc};
 
 /// Coerce a reference into a [Gc] pointer.
 ///

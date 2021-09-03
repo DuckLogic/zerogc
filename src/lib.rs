@@ -474,6 +474,14 @@ pub unsafe trait GcSimpleAlloc: GcContext {
             Gc::from_raw(NonNull::new_unchecked(ptr))
         }
     }
+    /// Allocate a [GcString], copied from the specified source
+    #[inline]
+    fn alloc_str<'gc>(&'gc self, src: &str) -> array::GcString<'gc, Self::Id> {
+        let bytes = self.alloc_slice_copy(src.as_bytes());
+        // SAFETY: Guaranteed by the original `src`
+        unsafe { array::GcString::from_utf8_unchecked(bytes) }
+    }  
+
     /// Allocate a slice with the specified length,
     /// whose memory is uninitialized
     ///
