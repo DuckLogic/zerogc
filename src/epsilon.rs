@@ -9,6 +9,7 @@
 #![cfg(feature = "epsilon")]
 
 mod layout;
+mod alloc;
 
 use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, TrustedDrop};
 use std::ptr::NonNull;
@@ -16,8 +17,9 @@ use std::alloc::Layout;
 use std::rc::Rc;
 use std::cell::Cell;
 use std::ffi::c_void;
-
 use std::lazy::OnceCell;
+
+use self::{alloc::{EpsilonAlloc}, layout::TypeInfo};
 
 /// Fake a [Gc] that points to the specified value
 ///
@@ -43,7 +45,7 @@ macro_rules! epsilon_static_array {
             array: [T; LEN]
         }
         static HEADERED: &'static ArrayWithHeader<$target, { $len }> = &ArrayWithHeader {
-            header: self::epsilon::ArrayHeaderHack::for_len($len),
+            header: self::epsilon::ArrayHeaderHack::for_len::<$target>($len),
             array: $values
         };
         std::mem::transmute::<
@@ -61,10 +63,10 @@ pub struct ArrayHeaderHack(layout::EpsilonArrayHeader);
 impl ArrayHeaderHack {
     #[inline]
     #[doc(hidden)]
-    pub const fn for_len(len: usize) -> ArrayHeaderHack {
+    pub const fn for_len<T>(len: usize) -> ArrayHeaderHack {
         ArrayHeaderHack(layout::EpsilonArrayHeader {
             len, common_header: layout::EpsilonHeader {
-                type_info: None,
+                type_info: TypeInfo::of_array::<T>(),
                 next: None
             }
         })
@@ -130,7 +132,9 @@ unsafe impl GcContext for EpsilonContext {
 
     #[inline]
     fn system(&self) -> &'_ Self::System {
-        unsafe { self.state.cast::<EpsilonSystem>().as_ref() }
+        // Pointer to a pointer
+        unsafe { NonNull::<NonNull<State>>::from(&self.state)
+            .cast::<EpsilonSystem>().as_ref() }
     }
 
 
@@ -151,7 +155,7 @@ impl Drop for EpsilonContext {
 }
 
 struct State {
-    alloc: bumpalo::Bump,
+    alloc: alloc::Default,
     /// The head of the linked-list of allocated objects.
     head: Cell<Option<NonNull<layout::EpsilonHeader>>>,
     empty_vec: OnceCell<NonNull<layout::EpsilonVecRepr>>
@@ -161,6 +165,39 @@ impl State {
     unsafe fn push_state(&self, mut header: NonNull<layout::EpsilonHeader>) {
         header.as_mut().next = self.head.get();
         self.head.set(Some(header));
+    }
+}
+impl Drop for State {
+    fn drop(&mut self) {
+        let mut ptr = self.head.get();
+        unsafe {
+            while let Some(header) = ptr {
+                let header_layout = layout::EpsilonHeader::LAYOUT;
+                let desired_align = header.as_ref().type_info.layout.align();
+                let padding = header_layout.padding_needed_for(desired_align);
+                let value_ptr = (header.as_ptr() as *const u8)
+                    .add(header_layout.size())
+                    .add(padding);
+                if let Some(drop_func) = header.as_ref().type_info.drop_func {
+                    (drop_func)(value_ptr as *const _ as *mut _);
+                }
+                let next = header.as_ref().next;
+                if self::alloc::Default::NEEDS_EXPLICIT_FREE {
+                    let value_layout = header.as_ref().determine_layout();
+                    let original_header = NonNull::new_unchecked(header.cast::<u8>()
+                        .as_ptr()
+                        .sub(header.as_ref().type_info.layout.common_header_offset()));
+                    let header_size = value_ptr.cast::<u8>()
+                        .offset_from(original_header.as_ptr()) as usize;
+                    let combined_layout = Layout::from_size_align_unchecked(
+                        value_layout.size() + header_size,
+                        value_layout.align().max(layout::EpsilonHeader::LAYOUT.align())
+                    );
+                    self.alloc.free_alloc(original_header, combined_layout);
+                }
+                ptr = next;
+            }
+        }
     }
 }
 
@@ -191,7 +228,7 @@ impl EpsilonSystem {
     #[inline]
     pub fn leak() -> Self {
         EpsilonSystem::from_state(Rc::new(State {
-            alloc: bumpalo::Bump::new(),
+            alloc: self::alloc::Default::new(),
             head: Cell::new(None),
             empty_vec: OnceCell::new()
         }))
@@ -228,13 +265,16 @@ unsafe impl GcSimpleAlloc for EpsilonContext {
     #[inline]
     unsafe fn alloc_uninit<'gc, T>(&'gc self) -> (Self::Id, *mut T) where T: GcSafe<'gc, EpsilonCollectorId> + 'gc {
         let id = self.id();
-        let ptr = if let Some(tp) = self::layout::TypeInfo::of::<T>() {
+        let tp = self::layout::TypeInfo::of::<T>();
+        let needs_header = self::alloc::Default::NEEDS_EXPLICIT_FREE
+            || !tp.may_ignore();
+        let ptr = if needs_header {
             let (overall_layout, offset) = self::layout::EpsilonHeader::LAYOUT
                 .extend(Layout::new::<T>()).unwrap();
             let mem = self.system().state().alloc.alloc_layout(overall_layout);
             let header = mem.cast::<self::layout::EpsilonHeader>();
             header.as_ptr().write(self::layout::EpsilonHeader {
-                type_info: Some(tp),
+                type_info: tp,
                 next: None
             });
             self.system().state().push_state(header);
@@ -392,7 +432,7 @@ unsafe impl CollectorId for EpsilonCollectorId {
     unsafe fn assume_valid_system(&self) -> &Self::System {
         /*
          * NOTE: Supporting this would lose our ability to go from `&'static T` -> `Gc<'gc, T, EpsilonCollectorId>
-         * It would also nessesitate a header for `Copy` objects.
+         * It would also necessitate a header for `Copy` objects.
          */
         unimplemented!("Unable to convert EpsilonCollectorId -> EpsilonSystem")
     }

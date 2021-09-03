@@ -26,7 +26,7 @@ bumpalo = { version = "3", optional = true }
 members = ["libs/simple", "libs/derive", "libs/context"]
 
 [features]
-default = ["std", "epsilon"]
+default = ["std", "epsilon", "epsilon-arena-alloc"]
 # Depend on the standard library (optional)
 #
 # This implements tracing for most standard library types.
@@ -39,4 +39,7 @@ alloc = []
 # Serde support
 serde1 = ["serde", "zerogc-derive/__serde-internal", "indexmap/serde-1"]
 # Support the "epsilon" no-op collector
-epsilon = ["bumpalo"]
+epsilon = []
+# Configure the "epsilon" collector use arena allocation
+# (on by default)
+epsilon-arena-alloc = ["epsilon", "bumpalo"]

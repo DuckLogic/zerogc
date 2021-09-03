@@ -9,6 +9,8 @@
     // Needed for epsilon collector:
     once_cell, // RFC 2788 (Probably will be accepted)
     alloc_layout_extra,
+    const_fn_fn_ptr_basics,
+    const_option,
     const_fn_trait_bound, // NOTE: Needed for the `epsilon_static_array` macro
 )]
 #![feature(maybe_uninit_slice)]
