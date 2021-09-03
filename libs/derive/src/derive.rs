@@ -569,7 +569,7 @@ impl TraceDeriveInput {
             for ignored in &self.generics.ignored_lifetimes {
                 generics.make_where_clause().predicates.push(parse_quote!(#ignored: 'new_gc))
             }
-            generics.make_where_clause().predicates.push(parse_quote!(Self: GcSafe<'new_gc, Id>));
+            generics.make_where_clause().predicates.push(parse_quote!(Self: zerogc::GcSafe<'new_gc, Id>));
             if let Some(ref gc_lt) = self.gc_lifetime() {
                 return Err(Error::custom("A NullTrace type may not have a 'gc lifetime").with_span(gc_lt))
             }
