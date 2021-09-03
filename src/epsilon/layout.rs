@@ -16,6 +16,12 @@ pub struct EpsilonHeader {
     /// The next allocated object, or `None` if this is the final object.
     pub next: Option<NonNull<EpsilonHeader>>
 }
+/*
+ * We are Send + Sync because once we are allocated
+ * `next` and `type_info` cannot change
+ */
+unsafe impl Send for EpsilonHeader {}
+unsafe impl Sync for EpsilonHeader {}
 impl EpsilonHeader {
     pub const LAYOUT: Layout = Layout::new::<Self>();
     /// Assume the specified object has a header,

@@ -26,10 +26,13 @@ use self::{alloc::{EpsilonAlloc}, layout::TypeInfo};
 /// This will never actually be collected
 /// and will always be valid
 #[inline]
-pub fn gc<'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'gc>(ptr: &'gc T) -> Gc<'gc, T> {
-    unsafe {
-        Gc::from_raw(NonNull::from(ptr))
-    }
+pub const fn gc<'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'gc>(ptr: &'gc T) -> Gc<'gc, T> {
+    /*
+     * SAFETY: Epsilon never collects unless explicitly added to
+     * the linked list of allocated objects.
+     * Therefore any reference can be assumed to be a Gc ptr.
+     */
+    unsafe { std::mem::transmute::<&'gc T, crate::Gc<'gc, T, EpsilonCollectorId>>(ptr) }
 }
 
 /// Statically allocate an array of the specified values
@@ -50,7 +53,7 @@ macro_rules! epsilon_static_array {
         };
         std::mem::transmute::<
             &'static ArrayWithHeader<$target, { $len }>,
-            $crate::epsilon::GcArray<'static, $target, $crate::epsilon::EpsilonCollectorId>,
+            $crate::vec::GcArray<'static, $target, $crate::epsilon::EpsilonCollectorId>,
         >(HEADERED)
     }}
 }

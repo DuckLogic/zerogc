@@ -1,7 +1,9 @@
+use std::fmt::Debug;
+
 use zerogc_derive::Trace;
 
-use zerogc::{safepoint_recurse, Gc, GcSimpleAlloc};
-use zerogc::epsilon::{EpsilonCollectorId, EpsilonContext, EpsilonSystem};
+use zerogc::{Gc, GcArray, GcContext, GcSimpleAlloc, epsilon_static_array, safepoint_recurse};
+use zerogc::epsilon::{self, EpsilonCollectorId, EpsilonContext, EpsilonSystem};
 
 #[derive(Trace)]
 #[zerogc(collector_ids(EpsilonCollectorId))]
@@ -41,3 +43,29 @@ fn recursive() {
     safepoint_recurse!(ctx, first, |ctx, root| recurse(ctx, 18, root));
 }
 
+#[test]
+fn static_alloc() {
+    fn recurse<'gc, T: ?Sized + PartialEq + Debug>(
+        _ctx: &'gc EpsilonContext,
+        expected: &T,
+        test: Gc<'gc, T, EpsilonCollectorId>
+    ) {
+        assert_eq!(test.value(), expected);
+    } 
+    fn recurse_array<'gc, T: PartialEq + Debug>(
+        _ctx: &'gc EpsilonContext,
+        expected: &[T],
+        test: GcArray<'gc, T, EpsilonCollectorId>
+    ) {
+        assert_eq!(test.as_slice(), expected);
+    } 
+    const BAR: &i32 = &12;
+    let sys = EpsilonSystem::leak();
+    let ctx = sys.new_context();
+    recurse(&ctx, BAR, epsilon::gc(BAR));
+    const FOO: &[u8; 29] = b"Do you wanna build a snowman?";
+    const FOO_LEN: usize = FOO.len();
+    let array: GcArray<'static, u8, EpsilonCollectorId>
+        = epsilon_static_array!([u8; FOO_LEN] => *FOO);
+    recurse_array(&ctx, &*FOO, array);
+}
