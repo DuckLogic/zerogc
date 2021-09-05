@@ -447,7 +447,6 @@ impl TraceDeriveInput {
                     generics.make_where_clause().predicates.push(parse_quote!(#target: #requirement));
                 }
                 let ty_generics = self.generics.original.split_for_impl().1;
-                generics.make_where_clause().predicates.push(parse_quote!(#id: zerogc::SimpleAllocCollectorId));
                 let (impl_generics, _, where_clause) = generics.split_for_impl();
                 let target_type = &self.ident;
                 let forward_attrs = &self.attrs;
@@ -498,7 +497,7 @@ impl TraceDeriveInput {
                 };
                 let remote_name = target_type.to_token_stream().to_string();
                 let id_decl = if id_is_generic {
-                    Some(quote!(#id: zerogc::SimpleAllocCollectorId,))
+                    Some(quote!(#id: zerogc::CollectorId,))
                 } else { None };
                 Ok(quote! {
                     impl #impl_generics zerogc::serde::GcDeserialize<#gc_lt, 'deserialize, #id> for #target_type #ty_generics #where_clause {
