@@ -41,13 +41,13 @@ impl<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserialize<'g
 #[macro_export]
 macro_rules! impl_delegating_deserialize {
     (impl GcDeserialize for $target:path) => (
-        impl_delegating_deserialize!(impl <'gc, 'de, Id> GcDeserialize<'gc, 'de, Id> for $target where Id: zerogc::CollectorId);
+        $crate::impl_delegating_deserialize!(impl <'gc, 'de, Id> GcDeserialize<'gc, 'de, Id> for $target where Id: zerogc::CollectorId);
     );
     (impl $(<$($lt:lifetime,)* $($param:ident),*>)? GcDeserialize<$gc:lifetime, $de:lifetime, $id:ident> for $target:path $(where $($where_clause:tt)*)?) => {
         impl$(<$($lt,)* $($param),*>)? $crate::serde::GcDeserialize<$gc, $de, $id> for $target
-            where Self: Deserialize<'deserialize> + $(, $($where_clause)*)?{
-            fn deserialize_gc<D: serde::Deserializer<$de>>(_ctx: <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, <D as serde::Deserializer<$de>>::Error> {
-                <Self as serde::Deserialize<'deserialize>>::deserialize(deserializer)
+            where Self: Deserialize<$de> + $(, $($where_clause)*)?{
+            fn deserialize_gc<D: serde::Deserializer<$de>>(_ctx: <<$id as $crate::CollectorId>::System as $crate::GcSystem>::Context, deserializer: D) -> Result<Self, <D as serde::Deserializer<$de>>::Error> {
+                <Self as serde::Deserialize<$de>>::deserialize(deserializer)
             }
         }
     };
