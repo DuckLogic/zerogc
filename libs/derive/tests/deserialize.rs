@@ -1,4 +1,4 @@
-use zerogc_derive::{GcDeserialize, Trace};
+use zerogc_derive::{GcDeserialize, NullTrace, Trace};
 
 use zerogc::SimpleAllocCollectorId;
 use zerogc::prelude::*;
@@ -14,4 +14,9 @@ struct BasicDeserialize<'gc> {
 #[zerogc(collector_ids(Id))]
 struct DeserializeParameterized<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> {
     test: Gc<'gc, Vec<T>, Id>
+}
+
+#[derive(NullTrace, GcDeserialize)]
+enum PlainEnum {
+
 }

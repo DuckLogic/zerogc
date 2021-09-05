@@ -437,9 +437,9 @@ impl TraceDeriveInput {
             generics, TraceDeriveKind::Deserialize, gc_lifetime,
             &mut |kind, initial, id, gc_lt| {
                 assert!(matches!(kind, TraceDeriveKind::Deserialize));
-                let id_is_generic = self.generics.original.type_params()
-                    .any(|param| id.is_ident(&param.ident));
                 let mut generics = initial.unwrap();
+                let id_is_generic = generics.type_params()
+                    .any(|param| id.is_ident(&param.ident));
                 generics.params.push(parse_quote!('deserialize));
                 let requirement = quote!(for<'deser2> zerogc::serde::GcDeserialize::<#gc_lt, 'deser2, #id>);
                 for target in self.generics.regular_type_params() {
