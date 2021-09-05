@@ -936,7 +936,7 @@ impl TraceDeriveInput {
             unsafe impl #impl_generics #trait_name for #target_type #ty_generics #where_clause {
                 #assoc_constants
                 #visit_inside_gc
-                fn #method_name<V: zerogc::GcVisitor>(&#mutability self, gc_visitor: &mut V) -> Result<(), V::Err> {
+                fn #method_name<TargetVisitor: zerogc::GcVisitor>(&#mutability self, gc_visitor: &mut TargetVisitor) -> Result<(), TargetVisitor::Err> {
                     #trace_impl
                     Ok(())
                 }
