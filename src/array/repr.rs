@@ -5,6 +5,9 @@
 //! 1. FatArrayRepr - Represents arrays as a fat pointer
 //! 2. ThinArrayRepr - Represents arrays as a thin pointer,
 //!    with the length stored indirectly in the object header.
+#![allow(
+    clippy::len_without_is_empty, // This is really an internal interface...
+)]
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 

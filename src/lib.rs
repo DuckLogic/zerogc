@@ -511,6 +511,36 @@ pub unsafe trait GcSimpleAlloc: GcContext {
             )
         }
     }
+    /// Allocate an array, taking ownership of the values in
+    /// the specified vec.
+    #[inline]
+    fn alloc_array_from_vec<'gc, T>(&'gc self, mut src: Vec<T>) -> GcArray<'gc, T, Self::Id> 
+        where T: GcSafe<'gc, Self::Id> + 'gc {
+        unsafe {
+            let ptr = src.as_ptr();
+            let len = src.len();
+            /*
+             * NOTE: Don't steal ownership of the
+             * source Vec until *after* we allocate.
+             *
+             * It is possible allocation panics in
+             * which case we want to free the source elements.
+             */
+            let (_, dest) = self.alloc_uninit_slice::<T>(len);
+            /*
+             * NOTE: From here to the end,
+             * we should be infallible.
+             */
+            src.set_len(0);
+            dest.copy_from_nonoverlapping(ptr, len);
+            let res = GcArray::from_raw_ptr(
+                NonNull::new_unchecked(ptr as *mut _),
+                len
+            );
+            drop(src);
+            res
+        }
+    }
     /// Allocate a slice by filling it with results from the specified closure.
     ///
     /// The closure receives the target index as its only argument.
