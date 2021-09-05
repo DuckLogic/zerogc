@@ -1,6 +1,6 @@
 use darling::{Error, FromMeta, FromGenerics, FromTypeParam, FromDeriveInput, FromVariant, FromField};
 use proc_macro2::{Ident, TokenStream, Span};
-use syn::{Generics, Type, GenericParam, TypeParam, Lifetime, Path, parse_quote, PathArguments, GenericArgument, TypePath, Meta, LifetimeDef};
+use syn::{GenericArgument, GenericParam, Generics, Lifetime, LifetimeDef, LitStr, Meta, Path, PathArguments, Type, TypeParam, TypePath, parse_quote};
 use darling::util::{SpannedValue};
 use quote::{quote_spanned, quote, format_ident, ToTokens};
 use darling::ast::{Style, Data};
@@ -189,7 +189,8 @@ struct TraceField {
     /// to be traced.
     #[darling(default)]
     unsafe_skip_trace: bool,
-
+    #[darling(default, rename = "serde")]
+    serde_opts: Option<SerdeFieldOpts>,
     #[darling(forward_attrs(serde))]
     attrs: Vec<syn::Attribute>
 }
@@ -249,7 +250,64 @@ impl TraceVariant {
     }
 }
 
-#[derive(FromDeriveInput)]
+/// Custom `#[serde(bound(deserialize = ""))]
+#[derive(Debug, Clone, FromMeta)]
+struct CustomSerdeBounds {
+    /// The custom deserialize bound
+    deserialize: LitStr
+}
+
+/// Options for `#[zerogc(serde)]` on a type
+#[derive(Debug, Clone, Default, FromMeta)]
+struct SerdeTypeOpts {
+    /// Delegate directly to the `Deserialize` implementation,
+    /// without generating a wrapper.
+    ///
+    /// Effectively calls `zerogc::derive_delegating_deserialize!`
+    ///
+    /// Requires `Self: serde::Deserialize`
+    ///
+    /// If this is present,
+    /// then all other options are ignored.
+    #[darling(default)]
+    delegate: bool,
+    /// Override the inferred bounds
+    ///
+    /// Equivalent to `#[serde(bound(....))]`
+    #[darling(default, rename = "bound")]
+    custom_bounds: Option<CustomSerdeBounds>,
+}
+
+#[derive(Debug, Clone, Default, FromMeta)]
+struct SerdeFieldOpts {
+    /// Delegate to the `serde::Deserialize`
+    /// implementation instead of using `GcDeserialize`
+    ///
+    /// If this option is present,
+    /// then all other options are ignored.
+    #[darling(default)]
+    delegate: bool,
+    /// Override the inferred bounds for the field.
+    #[darling(default, rename = "bound")]
+    custom_bounds: Option<CustomSerdeBounds>,
+    /// Deserialize this field using a custom
+    /// deserialization function.
+    ///
+    /// Equivalent to `#[serde(deserialize_with = "...")]`
+    #[darling(default)]
+    deserialize_with: Option<LitStr>,
+    /// Skip deserializing this field.
+    ///
+    /// Equivalent to `#[serde(skip_deserializing)]`.
+    ///
+    /// May choose to override the default with a
+    /// regular `#[serde(default = "...")]`
+    /// (but not with the #[zerogc(serde(...))])` syntax)
+    #[darling(default)]
+    skip_deserializing: bool
+}
+
+#[derive(Debug, FromDeriveInput)]
 #[darling(attributes(zerogc))]
 pub struct TraceDeriveInput {
     pub ident: Ident,
@@ -275,6 +333,8 @@ pub struct TraceDeriveInput {
     /// If the type should implement `TraceImmutable` in addition to `Trace
     #[darling(default, rename = "immutable")]
     wants_immutable_trace: bool,
+    #[darling(default, rename = "serde")]
+    serde_opts: Option<SerdeTypeOpts>,
     #[darling(forward_attrs(serde))]
     attrs: Vec<syn::Attribute>
 }
@@ -437,14 +497,17 @@ impl TraceDeriveInput {
             generics, TraceDeriveKind::Deserialize, gc_lifetime,
             &mut |kind, initial, id, gc_lt| {
                 assert!(matches!(kind, TraceDeriveKind::Deserialize));
+                let type_opts = self.serde_opts.clone().unwrap_or_default();
                 let mut generics = initial.unwrap();
                 let id_is_generic = generics.type_params()
                     .any(|param| id.is_ident(&param.ident));
                 generics.params.push(parse_quote!('deserialize));
                 let requirement = quote!(for<'deser2> zerogc::serde::GcDeserialize::<#gc_lt, 'deser2, #id>);
-                for target in self.generics.regular_type_params() {
-                    let target = &target.ident;
-                    generics.make_where_clause().predicates.push(parse_quote!(#target: #requirement));
+                if !type_opts.delegate {
+                    for target in self.generics.regular_type_params() {
+                        let target = &target.ident;
+                        generics.make_where_clause().predicates.push(parse_quote!(#target: #requirement));
+                    }
                 }
                 let ty_generics = self.generics.original.split_for_impl().1;
                 let (impl_generics, _, where_clause) = generics.split_for_impl();
@@ -454,13 +517,32 @@ impl TraceDeriveInput {
                     let named = f.ident.as_ref().map(|name| quote!(#name: ));
                     let ty = &f.ty;
                     let forwarded_attrs = &f.attrs;
-                    let bound = format!(
-                        "{}: for<'deserialize> zerogc::serde::GcDeserialize<{}, 'deserialize, {}>", ty.to_token_stream(),
-                        gc_lt.to_token_stream(), id.to_token_stream()
-                    );
+                    let serde_opts = f.serde_opts.clone().unwrap_or_default();
+                    let serde_attr = if serde_opts.delegate {
+                        quote!()
+                    } else {
+                        let deserialize_with = serde_opts.deserialize_with.as_ref().map_or_else(
+                            || String::from("deserialize_hack"),
+                            |with| with.value()
+                        );
+                        let custom_bound = if serde_opts.skip_deserializing || serde_opts.deserialize_with.is_some() {
+                            quote!()
+                        } else {
+                            let bound = serde_opts.custom_bounds
+                                .as_ref().map_or_else(
+                                || format!(
+                                    "{}: for<'deserialize> zerogc::serde::GcDeserialize<{}, 'deserialize, {}>", ty.to_token_stream(),
+                                   gc_lt.to_token_stream(), id.to_token_stream()
+                                ),
+                                |bounds| bounds.deserialize.value()
+                            );
+                            quote!(, bound(deserialize = #bound))
+                        };
+                        quote!(# [serde(deserialize_with = #deserialize_with #custom_bound)])
+                    };
                     quote! {
                         #(#forwarded_attrs)*
-                        # [serde(deserialize_with = "deserialize_hack", bound(deserialize = #bound))]
+                        #serde_attr
                         #named #ty
                     }
                 };
@@ -499,29 +581,46 @@ impl TraceDeriveInput {
                 let id_decl = if id_is_generic {
                     Some(quote!(#id: zerogc::CollectorId,))
                 } else { None };
-                Ok(quote! {
-                    impl #impl_generics zerogc::serde::GcDeserialize<#gc_lt, 'deserialize, #id> for #target_type #ty_generics #where_clause {
-                        fn deserialize_gc<D: serde::Deserializer<'deserialize>>(ctx: &#gc_lt <<#id as zerogc::CollectorId>::System as zerogc::GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
-                            use serde::Deserializer;
-                            let _guard = unsafe { zerogc::serde::hack::set_context(ctx) };
-                            unsafe {
-                                debug_assert_eq!(_guard.get_unchecked() as *const _, ctx as *const _);
-                            }
-                            /// Hack function to deserialize via `serde::hack`, with the appropriate `Id` type
-                            ///
-                            /// Needed because the actual function is unsafe
-                            #[track_caller]
-                            fn deserialize_hack<'gc, 'de, #id_decl D: serde::de::Deserializer<'de>, T: zerogc::serde::GcDeserialize<#gc_lt, 'de, #id>>(deser: D) -> Result<T, D::Error> {
-                                unsafe { zerogc::serde::hack::unchecked_deserialize_hack::<'gc, 'de, D, #id, T>(deser) }
-                            }
-                            # [derive(serde::Deserialize)]
-                            # [serde(remote = #remote_name)]
-                            #(#forward_attrs)*
-                            #inner ;
-                            HackRemoteDeserialize::deserialize(deserializer)
+                if !type_opts.delegate && !original_generics.lifetimes().any(|lt| lt.lifetime == *gc_lt) {
+                    return Err(Error::custom("No 'gc lifetime found during #[derive(GcDeserialize)]. Consider #[zerogc(serde(delegate))] or a PhantomData."))
+                }
+                if type_opts.delegate {
+                    Ok(quote! {
+                        impl #impl_generics zerogc::serde::GcDeserialize<#gc_lt, 'deserialize, #id> for #target_type #ty_generics #where_clause {
+                            fn deserialize_gc<D: serde::Deserializer<'deserialize>>(_ctx: &#gc_lt <<#id as zerogc::CollectorId>::System as zerogc::GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+                                <Self as serde::Deserialize<'deserialize>>::deserialize(deserializer)
+                            }                           
                         }
-                    }
-                })
+                    })
+                } else {
+                    let custom_bound = type_opts.custom_bounds.as_ref().map(|bounds| {
+                        let de_bounds = bounds.deserialize.value();
+                        quote!(, bound(deserialize = #de_bounds))
+                    });
+                    Ok(quote! {
+                        impl #impl_generics zerogc::serde::GcDeserialize<#gc_lt, 'deserialize, #id> for #target_type #ty_generics #where_clause {
+                            fn deserialize_gc<D: serde::Deserializer<'deserialize>>(ctx: &#gc_lt <<#id as zerogc::CollectorId>::System as zerogc::GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+                                use serde::Deserializer;
+                                let _guard = unsafe { zerogc::serde::hack::set_context(ctx) };
+                                unsafe {
+                                    debug_assert_eq!(_guard.get_unchecked() as *const _, ctx as *const _);
+                                }
+                                /// Hack function to deserialize via `serde::hack`, with the appropriate `Id` type
+                                ///
+                                /// Needed because the actual function is unsafe
+                                #[track_caller]
+                                fn deserialize_hack<'gc, 'de, #id_decl D: serde::de::Deserializer<'de>, T: zerogc::serde::GcDeserialize<#gc_lt, 'de, #id>>(deser: D) -> Result<T, D::Error> {
+                                    unsafe { zerogc::serde::hack::unchecked_deserialize_hack::<'gc, 'de, D, #id, T>(deser) }
+                                }
+                                # [derive(serde::Deserialize)]
+                                # [serde(remote = #remote_name #custom_bound)]
+                                #(#forward_attrs)*
+                                #inner ;
+                                HackRemoteDeserialize::deserialize(deserializer)
+                            }
+                        }
+                    })
+                }
             }
         )
     }

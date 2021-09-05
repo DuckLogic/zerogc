@@ -12,7 +12,6 @@
 use std::marker::PhantomData;
 
 use crate::array::{GcArray, GcString};
-use indexmap::set::Union;
 use serde::{Serialize, de::{self, Deserializer, Visitor, DeserializeSeed}, ser::SerializeSeq};
 
 use crate::prelude::*;
