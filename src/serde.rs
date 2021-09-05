@@ -11,7 +11,8 @@
 //! that requires a [GcContext].
 use std::marker::PhantomData;
 
-use serde::de::{Deserializer, DeserializeSeed};
+use crate::array::{GcArray, GcString};
+use serde::de::{self, Deserializer, DeserializeSeed};
 
 use crate::prelude::*;
 
@@ -32,6 +33,36 @@ impl<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserialize<'g
     #[inline]
     fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
         Ok(ctx.alloc(T::deserialize_gc(ctx, deserializer)?))
+    }
+}
+
+
+impl<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserialize<'gc, 'de, Id> for GcArray<'gc, T, Id>
+    where <Id::System as GcSystem>::Context: GcSimpleAlloc {
+    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+        Ok(ctx.alloc_array_from_vec(
+            Vec::<T>::deserialize_gc(ctx, deserializer)?
+        ))
+    }
+}
+
+
+impl<'gc, 'de, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for GcString<'gc, Id>
+    where <Id::System as GcSystem>::Context: GcSimpleAlloc {
+    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+        struct GcStrVisitor<'gc, A: GcSimpleAlloc> {
+            ctx: &'gc A
+        }
+        impl<'de, 'gc, A: GcSimpleAlloc> de::Visitor<'de> for GcStrVisitor<'gc, A> {
+            type Value = GcString<'gc, A::Id>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a string")
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> where E: de::Error, {
+                Ok(self.ctx.alloc_str(v))
+            }
+        }
+        deserializer.deserialize_str(GcStrVisitor { ctx })
     }
 }
 
