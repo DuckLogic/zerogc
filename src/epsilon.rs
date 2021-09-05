@@ -11,12 +11,7 @@
 mod layout;
 mod alloc;
 
-use crate::{
-    CollectorId, internals::ConstCollectorId,
-    GcContext, GcSafe, GcSimpleAlloc, GcSystem,
-    GcVisitor, NullTrace, Trace, TraceImmutable,
-    TrustedDrop
-};
+use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, TrustedDrop, internals::ConstCollectorId};
 use std::ptr::NonNull;
 use std::alloc::Layout;
 use std::rc::Rc;
@@ -48,7 +43,7 @@ pub const fn gc<'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'gc>(ptr: &'gc T) -> G
 /// Coerce a slice into a `GcArray`.
 ///
 /// This is only supported on the epsilon collector.
-/// Because the epsilon collector never allocates,
+/// Because the epsilon collector never collects,
 /// it doesn't need to make a distinction between `GcArray<T>` and `&[T]`.
 ///
 /// See also: [gc] for converting `&T` -> `Gc<T>`
@@ -64,6 +59,27 @@ pub const fn gc_array<'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'gc>(slice: &'gc
     unsafe { std::mem::transmute::<&'gc [T], crate::GcArray<'gc, T, EpsilonCollectorId>>(slice) }
 } 
 
+/// Coerce a `&str` into a `GcString`
+///
+/// This is only supported on the epsilon collector,
+/// because the epsilon collector never collects.
+///
+/// See also [gc_array] for converting `&[T]` -> `GcArray<T>`
+#[inline]
+pub const fn gc_str<'gc>(s: &'gc str) -> GcString<'gc> {
+    /*
+     * SAFETY: Epsilon uses the 'fat' representation for GcArrays.
+     * This means that repr(GcArray) == repr(&[T])
+     *
+     * Because we already know the string is UTF8 encoded,
+     * we can take advantage of the fact that repr(str) == repr(&[u8])
+     * and repr(GcArray) == repr(GcString).
+     * Instead of going `str -> &[T] -> GcArray -> GcString`
+     * we can just go directly from `str -> GcString`
+     */
+    unsafe { std::mem::transmute::<&'gc str, crate::array::GcString<'gc, EpsilonCollectorId>>(s) }
+}
+
 /// Allocate a [(fake) Gc](Gc) that points to the specified
 /// value and leak it.
 ///
@@ -78,7 +94,7 @@ pub fn leaked<'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'static>(value: T) -> Gc
 ///
 /// **WARNING**: This never actually collects any garbage
 pub type Gc<'gc, T> = crate::Gc<'gc, T, EpsilonCollectorId>;
-/// A [garbage collected array](`crate::vec::GcArray`)
+/// A [garbage collected array](`crate::array::GcArray`)
 /// that uses the [epsilon collector](EpsilonSystem)
 ///
 /// **WARNING**: This never actually collects any garbage.
@@ -88,6 +104,11 @@ pub type GcArray<'gc, T> = crate::array::GcArray<'gc, T, EpsilonCollectorId>;
 ///
 /// **WARNING**: This never actually collects any garbage.
 pub type GcVec<'gc, T> = crate::vec::GcVec<'gc, T, EpsilonContext>;
+/// A [garbage collected string](`crate::array::GcString`)
+/// that uses the epsilon collector.
+///
+/// **WARNING**: This never actually collects any garbage
+pub type GcString<'gc> = crate::array::GcString<'gc, EpsilonCollectorId>;
 
 /// A never-collecting garbage collector context.
 ///
