@@ -105,7 +105,7 @@ macro_rules! impl_delegating_deserialize {
     (impl $(<$($lt:lifetime,)* $($param:ident),*>)? GcDeserialize<$gc:lifetime, $de:lifetime, $id:ident> for $target:path $(where $($where_clause:tt)*)?) => {
         impl$(<$($lt,)* $($param),*>)? $crate::serde::GcDeserialize<$gc, $de, $id> for $target
             where Self: Deserialize<$de> + $(, $($where_clause)*)?{
-            fn deserialize_gc<D: serde::Deserializer<$de>>(_ctx: <<$id as $crate::CollectorId>::System as $crate::GcSystem>::Context, deserializer: D) -> Result<Self, <D as serde::Deserializer<$de>>::Error> {
+            fn deserialize_gc<D: serde::Deserializer<$de>>(_ctx: &$gc <<$id as $crate::CollectorId>::System as $crate::GcSystem>::Context, deserializer: D) -> Result<Self, <D as serde::Deserializer<$de>>::Error> {
                 <Self as serde::Deserialize<$de>>::deserialize(deserializer)
             }
         }
