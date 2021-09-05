@@ -38,7 +38,8 @@ struct DeserializeWith<'gc, Id: CollectorId> {
     doesnt_gc_deser: DoesntImplGcDeserialize,
     #[zerogc(serde(deserialize_with = "but_its_a_unit", bound(deserialize = "")))]
     doesnt_deser_at_all: DoesntDeserAtAll,
-    marker: PhantomData<&'gc Id>
+    marker: PhantomData<&'gc Id>,
+    deser: Gc<'gc, String, Id>
 }
 
 #[derive(NullTrace, serde::Deserialize)]

@@ -276,6 +276,15 @@ struct SerdeTypeOpts {
     /// Equivalent to `#[serde(bound(....))]`
     #[darling(default, rename = "bound")]
     custom_bounds: Option<CustomSerdeBounds>,
+    /// Require that Id::System::Context: GcSimpleAlloc
+    ///
+    /// This is necessary for the standard implementation
+    /// of `GcDeserialize for Gc` to apply.
+    ///
+    /// It is automatically inferred if you have any `Gc`, `GcArray`
+    /// or `GcString` fields (ignoring fully qualified paths).
+    #[darling(default)]
+    require_simple_alloc: bool,
 }
 
 #[derive(Debug, Clone, Default, FromMeta)]
@@ -493,6 +502,30 @@ impl TraceDeriveInput {
             return Err(Error::custom("The `zerogc/serde1` feature is disabled (please enable it)"));
         }
         let (gc_lifetime, generics) = self.generics_with_gc_lifetime(parse_quote!('gc));
+        let should_require_simple_alloc = self.all_fields().iter().any(|field| {
+            let is_gc_allocated = match field.ty {
+                Type::Path(ref p) if p.path.segments.len() == 1 => {
+                    /*
+                     * If we exactly match 'Gc', 'GcArray' or 'GcString',
+                     * then it can be assumed we are garbage collected
+                     * and that we should require Id::System::Context: GcSimpleAlloc
+                     */
+                    let name = &p.path.segments.last().unwrap().ident;
+                    name == "Gc" || name == "GcArrray" || name == "GcString"
+                },
+                _ => false
+            };
+            if let Some(ref custom_opts) = field.serde_opts {
+                if custom_opts.delegate || custom_opts.skip_deserializing ||
+                    custom_opts.custom_bounds.is_some() || custom_opts.deserialize_with.is_some() {
+                    return false;
+                }
+            }
+            is_gc_allocated
+        }) || self.serde_opts.as_ref().map_or(false, |opts| opts.require_simple_alloc);
+        let do_require_simple_alloc = |id: &dyn ToTokens| {
+            quote!(<<#id as zerogc::CollectorId>::System as zerogc::GcSystem>::Context: zerogc::GcSimpleAlloc)
+        };
         self.expand_for_each_regular_id(
             generics, TraceDeriveKind::Deserialize, gc_lifetime,
             &mut |kind, initial, id, gc_lt| {
@@ -507,6 +540,11 @@ impl TraceDeriveInput {
                     for target in self.generics.regular_type_params() {
                         let target = &target.ident;
                         generics.make_where_clause().predicates.push(parse_quote!(#target: #requirement));
+                    }
+                    if should_require_simple_alloc {
+                        generics.make_where_clause().predicates.push(
+                            syn::parse2(do_require_simple_alloc(&id)).unwrap()
+                        );
                     }
                 }
                 let ty_generics = self.generics.original.split_for_impl().1;
@@ -593,10 +631,20 @@ impl TraceDeriveInput {
                         }
                     })
                 } else {
-                    let custom_bound = type_opts.custom_bounds.as_ref().map(|bounds| {
+                    let custom_bound = if let Some(ref bounds) = type_opts.custom_bounds {
                         let de_bounds = bounds.deserialize.value();
                         quote!(, bound(deserialize = #de_bounds))
-                    });
+                    } else if should_require_simple_alloc {
+                        let de_bounds = format!("{}", do_require_simple_alloc(&id));
+                        quote!(, bound(deserialize = #de_bounds))
+                    } else {
+                        quote!()
+                    };
+                    let hack_where_bound = if should_require_simple_alloc && id_is_generic {
+                        do_require_simple_alloc(&quote!(Id))
+                    } else {
+                        quote!()
+                    };
                     Ok(quote! {
                         impl #impl_generics zerogc::serde::GcDeserialize<#gc_lt, 'deserialize, #id> for #target_type #ty_generics #where_clause {
                             fn deserialize_gc<D: serde::Deserializer<'deserialize>>(ctx: &#gc_lt <<#id as zerogc::CollectorId>::System as zerogc::GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
@@ -609,7 +657,8 @@ impl TraceDeriveInput {
                                 ///
                                 /// Needed because the actual function is unsafe
                                 #[track_caller]
-                                fn deserialize_hack<'gc, 'de, #id_decl D: serde::de::Deserializer<'de>, T: zerogc::serde::GcDeserialize<#gc_lt, 'de, #id>>(deser: D) -> Result<T, D::Error> {
+                                fn deserialize_hack<'gc, 'de, #id_decl D: serde::de::Deserializer<'de>, T: zerogc::serde::GcDeserialize<#gc_lt, 'de, #id>>(deser: D) -> Result<T, D::Error>
+                                    where #hack_where_bound {
                                     unsafe { zerogc::serde::hack::unchecked_deserialize_hack::<'gc, 'de, D, #id, T>(deser) }
                                 }
                                 # [derive(serde::Deserialize)]
