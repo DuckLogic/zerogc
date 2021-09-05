@@ -17,10 +17,14 @@ macro_rules! trace_tuple {
     { $single_param:ident } => {
         trace_tuple_impl!();
         trace_tuple_impl!($single_param);
+        #[cfg(feature = "serde1")]
+        deser_tuple_impl!($single_param);
     };
     { $first_param:ident, $($param:ident),* } => {
         trace_tuple! { $($param),* }
         trace_tuple_impl!( $first_param, $($param),*);
+        #[cfg(feature = "serde1")]
+        deser_tuple_impl!($first_param, $($param),*);
     };
 }
 
@@ -99,6 +103,60 @@ macro_rules! trace_tuple_impl {
                         - (self as *const Self as usize);
                     $param.write_barrier(owner, field_offset + start_offset);
                 };)*
+            }
+        }
+    };
+}
+
+#[cfg(feature = "serde1")]
+macro_rules! deser_tuple_impl {
+    ( $($param:ident),+ ) => {
+
+        impl<'gc, 'de, Id: $crate::CollectorId, $($param),*> $crate::serde::GcDeserialize<'gc, 'de, Id> for ($($param,)*)
+            where $($param: $crate::serde::GcDeserialize<'gc, 'de, Id>),* {
+            #[allow(non_snake_case, unused)]
+            fn deserialize_gc<Deser: serde::Deserializer<'de>>(
+                ctx: &'gc <<Id as $crate::CollectorId>::System as $crate::GcSystem>::Context,
+                deser: Deser
+            ) -> Result<Self, <Deser as serde::Deserializer<'de>>::Error> {
+                use serde::de::{Visitor, Error, SeqAccess};
+                use std::marker::PhantomData;
+                use $crate::{CollectorId, GcSystem};
+                struct TupleVisitor<'gc, 'de, Id: $crate::CollectorId, $($param: $crate::serde::GcDeserialize<'gc, 'de, Id>),*> {
+                    ctx: &'gc <Id::System as GcSystem>::Context,
+                    marker: PhantomData<(&'de (), ( $($param,)*) )>
+                }
+                impl<'gc, 'de, Id: CollectorId, $($param: $crate::serde::GcDeserialize<'gc, 'de, Id>),*>
+                     Visitor<'de> for TupleVisitor<'gc, 'de, Id, $($param),*> {
+                    type Value = ($($param,)*);
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        let mut count = 0;
+                        $(
+                            let $param = ();
+                            count += 1;
+                        )*
+                        write!(f, "a tuple of len {}", count)
+                    }
+                    fn visit_seq<SeqAcc: SeqAccess<'de>>(self, mut seq: SeqAcc) -> Result<Self::Value, SeqAcc::Error> {
+                        let mut idx = 0;
+                        $(
+                            let $param = match seq.next_element_seed($crate::serde::GcDeserializeSeed::new(self.ctx))? {
+                                Some(value) => value,
+                                None => return Err(Error::invalid_length(idx, &self))
+                            };
+                            idx += 1;
+                        )*
+                        Ok(($($param,)*))
+                    }
+                }
+                let mut len = 0;
+                $(
+                    let _hack = PhantomData::<$param>;
+                    len += 1;
+                )*
+                Ok(deser.deserialize_tuple(len, TupleVisitor {
+                    marker: PhantomData, ctx
+                })?)
             }
         }
     };

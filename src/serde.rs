@@ -12,7 +12,8 @@
 use std::marker::PhantomData;
 
 use crate::array::{GcArray, GcString};
-use serde::{Serialize, de::{self, Deserializer, DeserializeSeed}, ser::SerializeSeq};
+use indexmap::set::Union;
+use serde::{Serialize, de::{self, Deserializer, Visitor, DeserializeSeed}, ser::SerializeSeq};
 
 use crate::prelude::*;
 
@@ -93,6 +94,35 @@ impl<'gc, Id: CollectorId> Serialize for GcString<'gc, Id> {
     }
 }
 
+/*
+ * impl GcDeserialize for PhantomData<T>
+ * regardless of T
+ * NOTE: We still need T: 'gc because of GcSafe bound....
+ * TODO: Remove this if and when T: GcSafe becomes independent of T: 'gc
+ */
+impl<'gc, 'de, T: 'gc, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for PhantomData<T> {
+    fn deserialize_gc<D: Deserializer<'de>>(_ctx: &'gc <Id::System as GcSystem>::Context, _deserializer: D) -> Result<Self, D::Error> {
+        Ok(PhantomData)
+    }
+}
+
+impl<'gc, 'de, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for () {
+    fn deserialize_gc<D: Deserializer<'de>>(_ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+
+        struct UnitVisitor;
+        impl<'de> Visitor<'de> for UnitVisitor {
+            type Value = ();
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a unit tuple")
+            }
+            fn visit_unit<E>(self) -> Result<Self::Value, E> where
+                    E: de::Error, {
+                Ok(())
+            }
+        }
+        deserializer.deserialize_unit(UnitVisitor)
+    }
+}
 
 /// Implement [GcDeserialize] for a type by delegating to its [serde::Deserialize] implementation.
 ///
