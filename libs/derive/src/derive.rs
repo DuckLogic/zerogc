@@ -231,9 +231,9 @@ impl TraceVariant {
         match self.fields.style {
             Style::Unit => (quote!(), FieldAccess::None),
             Style::Tuple => {
-                let prefix: Ident = parse_quote!(member);
+                let prefix: Ident = parse_quote!(_member);
                 let destructure = self.fields.iter().enumerate().map(|(idx, field)| {
-                    let name = format_ident!("member{}", span = field.ty.span(), idx);
+                    let name = format_ident!("_member{}", span = field.ty.span(), idx);
                     quote!(ref #mutability #name)
                 });
                 (quote!((#(#destructure),*)), FieldAccess::Variable {
