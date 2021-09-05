@@ -40,10 +40,13 @@ impl<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserialize<'g
 /// This should only be used for types that can never have gc pointers inside of them (or if you don't care to support that).
 #[macro_export]
 macro_rules! impl_delegating_deserialize {
+    (impl GcDeserialize for $target:path) => (
+        impl_delegating_deserialize!(impl <'gc, 'de, Id> GcDeserialize<'gc, 'de, Id> for $target where Id: zerogc::CollectorId);
+    );
     (impl $(<$($lt:lifetime,)* $($param:ident),*>)? GcDeserialize<$gc:lifetime, $de:lifetime, $id:ident> for $target:path $(where $($where_clause:tt)*)?) => {
         impl$(<$($lt,)* $($param),*>)? $crate::serde::GcDeserialize<$gc, $de, $id> for $target
             where Self: Deserialize<'deserialize> + $(, $($where_clause)*)?{
-            fn deserialize_gc(_ctx: <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+            fn deserialize_gc<D: serde::Deserializer<$de>>(_ctx: <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, <D as serde::Deserializer<$de>>::Error> {
                 <Self as serde::Deserialize<'deserialize>>::deserialize(deserializer)
             }
         }
