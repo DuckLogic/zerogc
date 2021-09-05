@@ -6,10 +6,10 @@ use core::str;
 use core::fmt::{self, Formatter, Debug, Display};
 use core::hash::{Hash, Hasher};
 
-use crate::{CollectorId, GcSafe, GcRebrand};
+use crate::{CollectorId, internals::ConstCollectorId, GcSafe, GcRebrand};
 use zerogc_derive::{Trace, unsafe_gc_impl};
 
-use self::repr::GcArrayRepr;
+use self::repr::{GcArrayRepr};
 
 pub mod repr;
 
@@ -48,18 +48,41 @@ impl<'gc, Id: CollectorId> GcString<'gc, Id> {
     /// Undefined behavior if the bytes aren't valid
     /// UTF8, just like with [core::str::from_utf8_unchecked]
     #[inline]
-    pub unsafe fn from_utf8_unchecked(bytes: GcArray<'gc, u8, Id>) -> Self {
+    pub const unsafe fn from_utf8_unchecked(bytes: GcArray<'gc, u8, Id>) -> Self {
         GcString { bytes }
     }
     /// Retrieve this string as a raw array of bytes
     #[inline]
-    pub fn as_bytes(&self) -> GcArray<'gc, u8, Id> {
+    pub const fn as_bytes(&self) -> GcArray<'gc, u8, Id> {
         self.bytes
     }
     /// Convert this string into a slice of bytes
     #[inline]
     pub fn as_str(&self) -> &'gc str {
         unsafe { str::from_utf8_unchecked(self.as_bytes().as_slice()) }
+    }
+}
+/// Const access to [GcString]
+pub trait ConstStringAccess<'gc> {
+    /// Get this string as a slice of bytes
+    fn as_bytes_const(&self) -> &'gc [u8];
+    /// Convert this string to a `str` slice
+    fn as_str_const(&self) -> &'gc str;
+    /// Get the length of this string (in bytes)
+    fn len_const(&self) -> usize;
+}
+impl<'gc, Id: ~const ConstCollectorId> const ConstStringAccess<'gc> for GcString<'gc, Id> {
+    #[inline]
+    fn as_bytes_const(&self) -> &'gc [u8] {
+        self.bytes.as_slice_const()
+    }
+    #[inline]
+    fn as_str_const(&self) -> &'gc str {
+        unsafe { str::from_utf8_unchecked(self.as_bytes_const()) }
+    }
+    #[inline]
+    fn len_const(&self) -> usize {
+        self.bytes.len_const()
     }
 }
 impl<'gc, Id: CollectorId> Deref for GcString<'gc, Id> {
@@ -92,28 +115,16 @@ impl<'gc, Id: CollectorId> Display for GcString<'gc, Id> {
 pub struct GcArray<'gc, T: 'gc, Id: CollectorId> {
     repr: Id::ArrayRepr<'gc, T>
 }
-impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcArray<'gc, T, Id> {
-    /// Create an array from the specified raw pointer and length
-    ///
-    /// ## Safety
-    /// Pointer and length must be valid, and point to a garbage collected
-    /// value allocated from the corresponding [CollectorId]
-    #[inline]
-    pub unsafe fn from_raw_ptr(ptr: NonNull<T>, len: usize) -> Self {
-        GcArray { repr: Id::ArrayRepr::<'gc, T>::from_raw_parts(ptr, len) }
-    }
-}
-// Relax T: GcSafe bound
 impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
-    /// The value of the array as a slice
+    /// Convert this array into a slice
     #[inline]
-    pub fn as_slice(self) -> &'gc [T] {
+    pub fn as_slice(&self) -> &'gc [T] {
         self.repr.as_slice()
     }
     /// Load a raw pointer to the array's value
     #[inline]
-    pub fn as_raw_ptr(self) -> *mut T {
-        self.repr.as_raw_ptr()
+    pub fn as_raw_ptr(&self) -> *mut T {
+        self.as_slice().as_ptr() as *mut T
     }
     /// Load the length of the array
     #[inline]
@@ -123,7 +134,7 @@ impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
     /// Check if the array is empty
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.repr.is_empty()
+        self.len() == 0
     }
     /// Resolve the [CollectorId]
     #[inline]
@@ -134,6 +145,68 @@ impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
     #[inline]
     pub fn as_raw_repr(&self) -> &Id::ArrayRepr<'gc, T> {
         &self.repr
+    }
+    /// Create an array from the specified raw pointer and length
+    ///
+    /// ## Safety
+    /// Pointer and length must be valid, and point to a garbage collected
+    /// value allocated from the corresponding [CollectorId]
+    #[inline]
+    pub unsafe fn from_raw_ptr(ptr: NonNull<T>, len: usize) -> Self {
+        GcArray { repr: Id::ArrayRepr::<'gc, T>::from_raw_parts(ptr, len) }
+    }
+}
+/// Const access to [GcString]
+pub trait ConstArrayAccess<'gc, T> {
+    /// The value of the array as a slice
+    fn as_slice_const(&self) -> &'gc [T];
+    /// Load a raw pointer to the array's value
+    fn as_raw_ptr_const(&self) -> *mut T;
+    /// The length of this array
+    fn len_const(&self) -> usize;
+}
+// Relax T: GcSafe bound
+impl<'gc, T, Id: ~const ConstCollectorId> const ConstArrayAccess<'gc, T> for GcArray<'gc, T, Id> {
+    #[inline]
+    fn as_slice_const(&self) -> &'gc [T] {
+        /*
+         * TODO: This is horrible, but currently nessicarry
+         * to do this in a const-fn context.
+         */
+        match Id::ArrayRepr::<'gc, T>::UNCHECKED_KIND {
+            repr::ArrayReprKind::Fat => {
+                unsafe {
+                    core::mem::transmute_copy::<
+                        Id::ArrayRepr<'gc, T>,
+                        &'gc [T]
+                    >(&self.repr)
+                }
+            },
+            repr::ArrayReprKind::Thin => {
+                unsafe {
+                    let ptr = core::mem::transmute_copy::<
+                        Id::ArrayRepr<'gc, T>,
+                        NonNull<T>
+                    >(&self.repr);
+                    &*core::ptr::slice_from_raw_parts(
+                        ptr.as_ptr(),
+                        Id::resolve_array_len_const(
+                            &self.repr
+                        )
+                    )
+                }
+            },
+        }
+    }
+    /// Load a raw pointer to the array's value
+    #[inline]
+    fn as_raw_ptr_const(&self) -> *mut T {
+        self.as_slice_const().as_ptr() as *mut T
+    }
+    /// Load the length of the array
+    #[inline]
+    fn len_const(&self) -> usize {
+        self.as_slice_const().len()
     }
 }
 impl<'gc, T, Id: CollectorId> Deref for GcArray<'gc, T, Id> {
@@ -192,7 +265,7 @@ impl<'gc, T: Hash, Id: CollectorId> Hash for GcArray<'gc, T, Id> {
     fn hash<H: Hasher>(&self, hasher: &mut H) {
         T::hash_slice(self.as_slice(), hasher)
     }
-} 
+}
 // Need to implement by hand, because [T] is not GcRebrand
 unsafe_gc_impl!(
     target => GcArray<'gc, T, Id>,

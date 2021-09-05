@@ -11,7 +11,12 @@
 mod layout;
 mod alloc;
 
-use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, TrustedDrop};
+use crate::{
+    CollectorId, internals::ConstCollectorId,
+    GcContext, GcSafe, GcSimpleAlloc, GcSystem,
+    GcVisitor, NullTrace, Trace, TraceImmutable,
+    TrustedDrop
+};
 use std::ptr::NonNull;
 use std::alloc::Layout;
 use std::rc::Rc;
@@ -382,6 +387,12 @@ unsafe impl TraceImmutable for EpsilonCollectorId {
 }
 
 unsafe impl NullTrace for EpsilonCollectorId {}
+unsafe impl const ConstCollectorId for EpsilonCollectorId {
+    #[inline]
+    fn resolve_array_len_const<'gc, T: 'gc>(repr: &Self::ArrayRepr<'gc, T>) -> usize {
+        repr.len()
+    }
+}
 unsafe impl CollectorId for EpsilonCollectorId {
     type System = EpsilonSystem;
     type RawVecRepr<'gc> = self::layout::EpsilonVecRepr;
@@ -400,6 +411,12 @@ unsafe impl CollectorId for EpsilonCollectorId {
         const ID: EpsilonCollectorId = EpsilonCollectorId { _priv: () };
         &ID
     }
+
+    #[inline]
+    fn resolve_array_len<'gc, T: 'gc>(repr: &Self::ArrayRepr<'gc, T>) -> usize {
+        repr.len()
+    }
+
 
     #[inline]
     unsafe fn gc_write_barrier<'gc, T, V>(

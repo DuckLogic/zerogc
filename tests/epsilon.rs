@@ -1,8 +1,12 @@
+#![feature(const_trait_impl)]
 use std::fmt::Debug;
 
 use zerogc_derive::Trace;
 
-use zerogc::{Gc, GcArray, GcContext, GcSimpleAlloc, safepoint_recurse};
+use zerogc::{
+    Gc, GcArray, GcSimpleAlloc, safepoint_recurse,
+};
+use zerogc::array::ConstArrayAccess;
 use zerogc::epsilon::{self, EpsilonCollectorId, EpsilonContext, EpsilonSystem};
 
 #[derive(Trace)]
@@ -68,3 +72,12 @@ fn static_alloc() {
         = epsilon::gc_array(FOO);
     recurse_array(&ctx, &*FOO, array);
 }
+
+pub const fn const_gc<'gc, T: 'gc>(gc: Gc<'gc, T, EpsilonCollectorId>) {
+    gc.value();
+}
+
+pub const fn const_array<'gc, T: 'gc>(gc: GcArray<'gc, T, EpsilonCollectorId>) {
+    gc.as_slice_const();
+}
+

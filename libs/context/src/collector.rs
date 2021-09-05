@@ -9,13 +9,20 @@ use alloc::sync::Arc;
 
 use slog::{Logger, o};
 
-use zerogc::{Gc, GcSafe, GcSystem, Trace, GcSimpleAlloc, NullTrace, TraceImmutable, GcVisitor,  TrustedDrop};
+use zerogc::array::repr::ThinArrayRepr;
+use zerogc::{Gc, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, TrustedDrop};
 
 use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
 use zerogc::vec::GcVec;
 use zerogc::vec::repr::GcVecRepr;
 use std::hash::{Hasher, Hash};
+
+
+pub unsafe trait ConstRawCollectorImpl: RawCollectorImpl {
+    fn resolve_array_len_const<'gc, T>(gc: &ThinArrayRepr<'gc, T, CollectorId<Self>>) -> usize
+        where T: 'gc;
+}
 
 /// A specific implementation of a collector
 pub unsafe trait RawCollectorImpl: 'static + Sized {
@@ -56,9 +63,10 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
 
     fn id_for_array<'a, 'gc, T>(gc: &'a <CollectorId<Self> as zerogc::CollectorId>::ArrayRepr<'gc, T>) -> &'a CollectorId<Self>
         where 'gc: 'a, T: 'gc;
-
-    fn resolve_array_len<'gc, T>(gc: <CollectorId<Self> as zerogc::CollectorId>::ArrayRepr<'gc, T>) -> usize
+ 
+    fn resolve_array_len<'gc, T>(repr: &ThinArrayRepr<'gc, T, CollectorId<Self>>) -> usize
         where T: 'gc;
+
 
     /// Convert the specified value into a dyn pointer
     unsafe fn as_dyn_trace_pointer<T: Trace>(t: *mut T) -> Self::DynTracePtr;
@@ -306,6 +314,11 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
         C::id_for_array(gc)
     }
 
+    #[inline]
+    fn resolve_array_len<'gc, T>(repr: &ThinArrayRepr<'gc, T, Self>) -> usize
+        where T: 'gc {
+        C::resolve_array_len(repr)
+    }
 
     #[inline(always)]
     unsafe fn gc_write_barrier<'gc, O, V>(
@@ -326,10 +339,10 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
         &*(self as *const CollectorId<C> as *const CollectorRef<C>)
     }
 }
-unsafe impl<C: RawCollectorImpl> zerogc::array::repr::ThinArrayGcAccess for CollectorId<C> {
+unsafe impl<C: ~const ConstRawCollectorImpl> const zerogc::internals::ConstCollectorId for CollectorId<C> {
     #[inline]
-    fn resolve_array_len<'gc, T>(gc: Self::ArrayRepr<'gc, T>) -> usize where T: 'gc {
-        C::resolve_array_len(gc)
+    fn resolve_array_len_const<'gc, T>(repr: &Self::ArrayRepr<'gc, T>) -> usize where T: 'gc {
+        C::resolve_array_len_const(repr)
     }
 }
 unsafe impl<'gc, OtherId: zerogc::CollectorId, C: RawCollectorImpl> GcSafe<'gc, OtherId> for CollectorId<C> {}

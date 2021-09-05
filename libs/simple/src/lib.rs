@@ -662,7 +662,7 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     }
 
     #[inline]
-    fn resolve_array_len<'gc, T>(gc: ThinArrayRepr<'gc, T, CollectorId>) -> usize where T: 'gc {
+    fn resolve_array_len<'gc, T>(gc: &ThinArrayRepr<'gc, T, CollectorId>) -> usize where T: 'gc {
         unsafe {
             let header = GcArrayHeader::LAYOUT.from_value_ptr(gc.as_raw_ptr());
             (*header).len

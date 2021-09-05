@@ -5,6 +5,7 @@
     unsize,
     trait_alias, // RFC 1733 - Trait aliases
     generic_associated_types, // RFC 1598 - Generic associated types
+    const_raw_ptr_deref, // Needed for const Gc::value
     option_result_unwrap_unchecked, // Only used by the 'serde' implementation...
     // Needed for epsilon collector:
     once_cell, // RFC 2788 (Probably will be accepted)
@@ -12,6 +13,9 @@
     const_fn_fn_ptr_basics,
     const_option,
     const_fn_trait_bound, // NOTE: Needed for the `epsilon_static_array` macro
+    const_trait_impl, // EXPERIMENTAL: const Deref
+    const_slice_from_raw_parts,
+    const_transmute_copy,
 )]
 #![feature(maybe_uninit_slice)]
 #![feature(new_uninit)]
@@ -73,6 +77,7 @@ pub mod prelude;
 pub mod epsilon;
 pub mod array;
 pub mod vec;
+pub mod internals;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.
@@ -578,6 +583,7 @@ impl<C: GcContext> FrozenContext<C> {
 /// A trait alias for [CollectorId]s that support [SimpleGcALloc]
 pub trait SimpleAllocCollectorId = CollectorId where <<Self as CollectorId>::System as GcSystem>::Context: GcSimpleAlloc;
 
+
 /// Uniquely identifies the collector in case there are
 /// multiple collectors.
 ///
@@ -591,7 +597,7 @@ pub trait SimpleAllocCollectorId = CollectorId where <<Self as CollectorId>::Sys
 ///
 /// It should be safe to assume that a collector exists
 /// if any of its pointers still do!
-pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop + 'static +for<'gc> GcSafe<'gc, Self> {
+pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop + 'static + for<'gc> GcSafe<'gc, Self> {
     /// The type of the garbage collector system
     type System: GcSystem<Id=Self>;
     /// The raw representation of vectors in this collector.
@@ -600,7 +606,7 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
     type RawVecRepr<'gc>: crate::vec::repr::GcVecRepr<'gc, Id=Self>;
     /// The raw reprsentation of `GcArray` pointers
     /// in this collector.
-    type ArrayRepr<'gc, T: 'gc>: crate::array::repr::GcArrayRepr<'gc, T, Id=Self>;
+    type ArrayRepr<'gc, T: 'gc>: ~const crate::array::repr::GcArrayRepr<'gc, T, Id=Self>;
 
     /// Get the runtime id of the collector that allocated the [Gc]
     ///
@@ -614,6 +620,9 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
     /// This is the [GcArray] counterpart of `from_gc_ptr`
     fn resolve_array_id<'a, 'gc, T>(repr: &'a Self::ArrayRepr<'gc, T>) -> &'a Self
         where T: 'gc, 'gc: 'a;
+
+    /// Resolve the length of the specified array
+    fn resolve_array_len<'gc, T: 'gc>(repr: &Self::ArrayRepr<'gc, T>) -> usize;
 
     /// Perform a write barrier before writing to a garbage collected field
     ///
@@ -706,7 +715,7 @@ impl<'gc, T: ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
 
     /// The value of the underlying pointer
     #[inline(always)]
-    pub fn value(&self) -> &'gc T {
+    pub const fn value(&self) -> &'gc T {
         unsafe { *(&self.value as *const NonNull<T> as *const &'gc T) }
     }
     /// Cast this reference to a raw pointer
@@ -760,7 +769,7 @@ unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> Trace for Gc<'gc,
         visitor.visit_gc(gc)
     }
 }
-impl<'gc, T: GcSafe<'gc, Id> + ?Sized + 'gc, Id: CollectorId> Deref for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + ?Sized + 'gc, Id: CollectorId> const Deref for Gc<'gc, T, Id> {
     type Target = &'gc T;
 
     #[inline(always)]

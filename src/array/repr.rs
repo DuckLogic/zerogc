@@ -1,7 +1,7 @@
 //! Defines the underlying reprsention of a [GcArray] pointer.
 //!
 //!
-//! Two default implementations are also included:
+//! Two possible implementations are also available:
 //! 1. FatArrayRepr - Represents arrays as a fat pointer
 //! 2. ThinArrayRepr - Represents arrays as a thin pointer,
 //!    with the length stored indirectly in the object header.
@@ -11,6 +11,14 @@ use core::ptr::NonNull;
 
 use crate::{CollectorId, Gc};
 
+/// The type of [GcArrayRepr] impl
+#[derive(Copy, Clone, Debug)]
+pub enum ArrayReprKind {
+    /// A `FatArrayRepr`, which can be transmuted <-> to `&[T]`
+    Fat,
+    /// A `ThinArrayRepr`, which can be transmuted <-> to `NonNull<T>`
+    Thin
+}
 
 /// The raw representation of a GcArray pointer.
 ///
@@ -26,9 +34,14 @@ use crate::{CollectorId, Gc};
 ///
 /// The underlying 'repr' is responsible
 /// for dropping memory as appropriate.
-pub unsafe trait GcArrayRepr<'gc, T>: Copy {
+pub unsafe trait GcArrayRepr<'gc, T>: Copy + sealed::Sealed {
     /// The repr's collector
     type Id: CollectorId;
+    /// The "kind" of the array (whether fat or thin)
+    ///
+    /// This is necessary to correctly
+    /// transmute in a const-fn context
+    const UNCHECKED_KIND: ArrayReprKind;
     /// Construct an array representation from a combination
     /// of a pointer and length.
     ///
@@ -37,37 +50,31 @@ pub unsafe trait GcArrayRepr<'gc, T>: Copy {
     /// ## Safety
     /// The combination of pointer + length must be valid. 
     unsafe fn from_raw_parts(ptr: NonNull<T>, len: usize) -> Self;
-    /// Get the length of the array
-    fn len(&self) -> usize;
-    /// Check if the array is empty
-    #[inline]
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    /// Load a raw pointer to the array's value
+    /// Convert the value to a slice
+    fn as_slice(&self) -> &'gc [T];
+    /// Get a raw pointer to this array's elements.
     fn as_raw_ptr(&self) -> *mut T;
-    /// Get the value of the array as a slice
-    #[inline]
-    fn as_slice(&self) -> &'gc [T] {
-        // SAFETY: Guaranteed by the unsafety of the trait
-        unsafe {
-            std::slice::from_raw_parts(
-                self.as_raw_ptr() as *const T,
-                self.len()
-            )
-        }
-    }
+    /// Get the length of this value
+    fn len(&self) -> usize;
 }
 
 /// Represents an array as a fat pointer.
 ///
 /// ## Safety
-/// This type is guarenteed to be compatible with `&[T]`.
+/// This type is guaranteed to be compatible with `&[T]`.
 /// Transmuting back and forth is safe.
 #[repr(transparent)]
 pub struct FatArrayRepr<'gc, T: 'gc, Id: CollectorId> {
     slice: NonNull<[T]>,
     marker: PhantomData<Gc<'gc, [T], Id>>
+}
+impl<'gc, T, Id: CollectorId> self::sealed::Sealed for FatArrayRepr<'gc, T, Id> {}
+impl<'gc, T, Id: CollectorId> FatArrayRepr<'gc, T, Id> {
+    /// Get the length of this fat array (stored inline)
+    #[inline]
+    pub const fn len(&self) -> usize {
+        unsafe { (&*self.slice.as_ptr()).len() }
+    }
 }
 impl<'gc, T, Id: CollectorId> Copy for FatArrayRepr<'gc, T, Id> {}
 impl<'gc, T, Id: CollectorId> Clone for FatArrayRepr<'gc, T, Id> {
@@ -79,6 +86,7 @@ impl<'gc, T, Id: CollectorId> Clone for FatArrayRepr<'gc, T, Id> {
 
 unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for FatArrayRepr<'gc, T, Id> {
     type Id = Id;
+    const UNCHECKED_KIND: ArrayReprKind = ArrayReprKind::Fat;
 
     #[inline]
     unsafe fn from_raw_parts(ptr: NonNull<T>, len: usize) -> Self {
@@ -93,8 +101,8 @@ unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for FatArrayRepr<'gc, T
     }
 
     #[inline]
-    fn len(&self) -> usize {
-        unsafe { self.slice.as_ref().len() }
+    fn as_slice(&self) -> &'gc [T] {
+        unsafe { &*self.slice.as_ptr() }
     }
 
     #[inline]
@@ -103,10 +111,9 @@ unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for FatArrayRepr<'gc, T
     }
 
     #[inline]
-    fn as_slice(&self) -> &'gc [T] {
-        unsafe { &*self.slice.as_ptr() }
+    fn len(&self) -> usize {
+        self.len()
     }
-
 }
 
 /// Represents an array as a thin pointer,
@@ -117,49 +124,50 @@ unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for FatArrayRepr<'gc, T
 /// and can be transmuted back and forth
 /// (assuming the appropriate invariants are met).
 #[repr(transparent)]
-pub struct ThinArrayRepr<'gc, T: 'gc, Id: ThinArrayGcAccess> {
+pub struct ThinArrayRepr<'gc, T: 'gc, Id: CollectorId> {
     elements: NonNull<T>,
     marker: PhantomData<Gc<'gc, [T], Id>>    
 }
-impl<'gc, T, Id: ThinArrayGcAccess> Copy for ThinArrayRepr<'gc, T, Id> {}
-impl<'gc, T, Id: ThinArrayGcAccess> Clone for ThinArrayRepr<'gc, T, Id> {
+impl<'gc, T, Id: CollectorId> Copy for ThinArrayRepr<'gc, T, Id> {}
+impl<'gc, T, Id: CollectorId> Clone for ThinArrayRepr<'gc, T, Id> {
     #[inline]
     fn clone(&self) -> Self {
         *self
     }
 }
-unsafe impl<'gc, T, Id: ThinArrayGcAccess> GcArrayRepr<'gc, T> for ThinArrayRepr<'gc, T, Id> {
+impl<'gc, T, Id: CollectorId> self::sealed::Sealed for ThinArrayRepr<'gc, T, Id> {}
+unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for ThinArrayRepr<'gc, T, Id> {
     type Id = Id;
-    #[inline]
-    fn len(&self) -> usize {
-        Id::resolve_array_len(*self)
-    }
-
+    const UNCHECKED_KIND: ArrayReprKind = ArrayReprKind::Thin;
     #[inline]
     unsafe fn from_raw_parts(ptr: NonNull<T>, len: usize) -> Self {
         let res = ThinArrayRepr { elements: ptr, marker: PhantomData };
-        debug_assert_eq!(res.len(), len);
+        debug_assert_eq!(
+            res.len(),
+            len
+        );
         res
     }
-
+    #[inline]
+    fn as_slice(&self) -> &'gc [T] {
+        unsafe { core::slice::from_raw_parts(
+            self.elements.as_ptr(),
+            self.len()
+        ) }
+    }
     #[inline]
     fn as_raw_ptr(&self) -> *mut T {
         self.elements.as_ptr()
     }
+    #[inline]
+    fn len(&self) -> usize {
+        unsafe { Id::resolve_array_len(
+            &*(self as *const Self
+                as *const Id::ArrayRepr<'gc, T>)
+        ) }
+    }
 }
 
-/// The raw array access used to implement []
-///
-/// This should be considered an implementation detail.
-///
-/// Usage of this type is incredibly niche unless you
-/// plan on implementing your own collector.
-///
-/// ## Safety
-/// The returned length must be correct.
-#[doc(hidden)]
-pub unsafe trait ThinArrayGcAccess: CollectorId {
-    /// Resolve the length of the specified [GcArray]
-    fn resolve_array_len<'gc, T>(repr: ThinArrayRepr<'gc, T, Self>) -> usize
-        where T: 'gc;
+mod sealed {
+    pub trait Sealed {}
 }
