@@ -12,7 +12,7 @@
 use std::marker::PhantomData;
 
 use crate::array::{GcArray, GcString};
-use serde::de::{self, Deserializer, DeserializeSeed};
+use serde::{Serialize, de::{self, Deserializer, DeserializeSeed}, ser::SerializeSeq};
 
 use crate::prelude::*;
 
@@ -65,6 +65,34 @@ impl<'gc, 'de, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for GcString<'gc, Id
         deserializer.deserialize_str(GcStrVisitor { ctx })
     }
 }
+
+impl<'gc, T: Serialize, Id: CollectorId> Serialize for Gc<'gc, T, Id> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>  where
+        S: serde::Serializer {
+        self.value().serialize(serializer)
+    }
+}
+
+
+impl<'gc, T: Serialize, Id: CollectorId> Serialize for GcArray<'gc, T, Id> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>  where
+        S: serde::Serializer {
+        let mut seq = serializer.serialize_seq(Some(self.len()))?;
+        for val in self.as_slice().iter() {
+            seq.serialize_element(val)?;
+        }
+        seq.end()
+    }
+}
+
+
+impl<'gc, Id: CollectorId> Serialize for GcString<'gc, Id> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>  where
+        S: serde::Serializer {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 
 /// Implement [GcDeserialize] for a type by delegating to its [serde::Deserialize] implementation.
 ///
