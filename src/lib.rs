@@ -51,9 +51,9 @@ extern crate self as zerogc;
  * unless there's good justification to use an unstable feature.
  */
 use core::mem::{self};
-use core::ops::{Deref, DerefMut};
+use core::ops::{Deref, DerefMut, CoerceUnsized};
 use core::ptr::{NonNull, Pointee, DynMetadata};
-use core::marker::PhantomData;
+use core::marker::{PhantomData, Unsize};
 use core::hash::{Hash, Hasher};
 use core::fmt::{self, Debug, Formatter};
 
@@ -61,8 +61,6 @@ use zerogc_derive::unsafe_gc_impl;
 
 use crate::vec::{GcVec};
 pub use crate::array::GcArray;
-use std::ops::CoerceUnsized;
-use std::marker::Unsize;
 
 
 #[macro_use] // We have macros in here!
@@ -514,6 +512,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// Allocate an array, taking ownership of the values in
     /// the specified vec.
     #[inline]
+    #[cfg(feature = "alloc")]
     fn alloc_array_from_vec<'gc, T>(&'gc self, mut src: Vec<T>) -> GcArray<'gc, T, Self::Id> 
         where T: GcSafe<'gc, Self::Id> + 'gc {
         unsafe {

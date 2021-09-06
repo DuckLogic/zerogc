@@ -4,6 +4,7 @@
 use core::fmt::{self, Debug, Formatter};
 use core::ptr::NonNull;
 use core::marker::PhantomData;
+use core::hash::{Hasher, Hash};
 
 use alloc::sync::Arc;
 
@@ -16,7 +17,6 @@ use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
 use zerogc::vec::GcVec;
 use zerogc::vec::repr::GcVecRepr;
-use std::hash::{Hasher, Hash};
 
 
 pub unsafe trait ConstRawCollectorImpl: RawCollectorImpl {

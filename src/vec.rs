@@ -59,7 +59,7 @@ impl<'gc, T: GcSafe<'gc, Ctx::Id>, Ctx: GcSimpleAlloc> GcVec<'gc, T, Ctx> {
         match self.raw.try_push(val) {
             Ok(()) => {},
             Err(InsufficientCapacityError { }) => {
-                unsafe { std::hint::unreachable_unchecked(); }
+                unsafe { core::hint::unreachable_unchecked(); }
             }
         }
     }
@@ -87,7 +87,7 @@ impl<'gc, T: GcSafe<'gc, Ctx::Id>, Ctx: GcSimpleAlloc> GcVec<'gc, T, Ctx> {
                 self.raw.len()
             );
             new_mem.as_repr_mut().set_len(self.raw.len());
-            let mut old_mem = std::mem::replace(&mut self.raw, new_mem);
+            let mut old_mem = core::mem::replace(&mut self.raw, new_mem);
             old_mem.as_repr_mut().set_len(0); // We don't want to drop the old elements
         }
     }
@@ -170,7 +170,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcRawVec<'gc, T, Id> {
         where Ctx: GcSimpleAlloc<Id=Id>, F: FnOnce(&mut GcVec<'gc, T, Ctx>) -> R {
         let vec = ManuallyDrop::new(GcVec {
             // NOTE: This is okay, because we will restore any changes via `scopeguard`
-            raw: unsafe { std::ptr::read(self) },
+            raw: unsafe { core::ptr::read(self) },
             context: ctx
         });
         let mut guard = scopeguard::guard(vec, |vec| {
@@ -185,10 +185,10 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcRawVec<'gc, T, Id> {
         where Ctx: GcSimpleAlloc<Id=Id>, F: FnOnce(&GcVec<'gc, T, Ctx>) -> R {
         let vec = ManuallyDrop::new(GcVec {
             // NOTE: This is okay, because we will forget it later
-            raw: unsafe { std::ptr::read(self) },
+            raw: unsafe { core::ptr::read(self) },
             context: ctx
         });
-        let guard = scopeguard::guard(vec, std::mem::forget);
+        let guard = scopeguard::guard(vec, core::mem::forget);
         func(&*guard)
     }
     /// The length of this vector
@@ -214,7 +214,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcRawVec<'gc, T, Id> {
             let old_len = self.len();
             // Drop after we set the length, in case it panics
             self.repr.set_len(0);
-            std::ptr::drop_in_place::<[T]>(std::ptr::slice_from_raw_parts_mut(
+            core::ptr::drop_in_place::<[T]>(core::ptr::slice_from_raw_parts_mut(
                 elements, old_len
             ));
         }
@@ -257,7 +257,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcRawVec<'gc, T, Id> {
     /// this is bound to the lifetime of the current value.
     #[inline]
     pub fn as_slice(&self) -> &[T] {
-        unsafe { std::slice::from_raw_parts(
+        unsafe { core::slice::from_raw_parts(
             self.as_ptr(),
             self.len()
         ) }
