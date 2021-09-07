@@ -9,11 +9,18 @@
 //! As a workaround, zerogc introduces a `GcDeserialize` type,
 //! indicating an implementation of [serde::Deserialize]
 //! that requires a [GcContext].
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
+use std::hash::{BuildHasher, Hash};
+
+use serde::Serialize;
+use serde::de::{self, Deserializer, Visitor, DeserializeSeed, MapAccess, SeqAccess};
+use serde::ser::SerializeSeq;
+
+#[cfg(feature = "indexmap")]
+use indexmap::{IndexMap, IndexSet};
 
 use crate::array::{GcArray, GcString};
-use serde::{Serialize, de::{self, Deserializer, Visitor, DeserializeSeed}, ser::SerializeSeq};
-
 use crate::prelude::*;
 
 #[doc(hidden)]
@@ -161,3 +168,107 @@ impl<'de, 'gc, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> DeserializeSeed<
         T::deserialize_gc(self.context, deserializer)
     }
 }
+
+macro_rules! impl_for_map {
+    ($target:ident <K, V, S> $(where $($bounds:tt)*)?) => {
+        impl<'gc, 'de, Id: CollectorId,
+            K: Eq + Hash + GcDeserialize<'gc, 'de, Id>,
+            V: GcDeserialize<'gc, 'de, Id>,
+            S: BuildHasher + Default
+        > GcDeserialize<'gc, 'de, Id> for $target<K, V, S> $(where $($bounds)*)* {
+            fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+                struct MapVisitor<
+                    'gc, 'de, Id: CollectorId,
+                    K: GcDeserialize<'gc, 'de, Id>,
+                    V: GcDeserialize<'gc, 'de, Id>,
+                    S: BuildHasher + Default
+                > {
+                    ctx: &'gc <Id::System as GcSystem>::Context,
+                    marker: PhantomData<(&'de S, K, V)>
+                }
+                impl<'gc, 'de, Id: CollectorId,
+                    K: Eq + Hash + GcDeserialize<'gc, 'de, Id>,
+                    V: GcDeserialize<'gc, 'de, Id>,
+                    S: BuildHasher + Default
+                > Visitor<'de> for MapVisitor<'gc, 'de, Id, K, V, S> {
+                    type Value = $target<K, V, S>;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str(concat!("a ", stringify!($target)))
+                    }
+                    #[inline]
+                    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+                        where A: MapAccess<'de>, {
+                        let mut values = $target::<K, V, S>::with_capacity_and_hasher(
+                            access.size_hint().unwrap_or(0).min(1024),
+                            S::default()
+                        );
+                        while let Some((key, value)) = access.next_entry_seed(
+                            GcDeserializeSeed::new(self.ctx),
+                            GcDeserializeSeed::new(self.ctx)
+                        )? {
+                            values.insert(key, value);
+                        }
+
+                        Ok(values)
+                    }
+                }
+                let visitor: MapVisitor<Id, K, V, S> = MapVisitor { ctx, marker: PhantomData };
+                deserializer.deserialize_map(visitor)
+            }
+        }
+    };
+}
+
+macro_rules! impl_for_set {
+    ($target:ident <T, S> $(where $($bounds:tt)*)?) => {
+        impl<'gc, 'de, Id: CollectorId,
+            T: Eq + Hash + GcDeserialize<'gc, 'de, Id>,
+            S: BuildHasher + Default
+        > GcDeserialize<'gc, 'de, Id> for $target<T, S> $(where $($bounds)*)* {
+            fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+                struct SetVisitor<
+                    'gc, 'de, Id: CollectorId,
+                    T: GcDeserialize<'gc, 'de, Id>,
+                    S: BuildHasher + Default
+                > {
+                    ctx: &'gc <Id::System as GcSystem>::Context,
+                    marker: PhantomData<fn(&'de (), S) -> T>
+                }
+                impl<'gc, 'de, Id: CollectorId,
+                    T: Eq + Hash + GcDeserialize<'gc, 'de, Id>,
+                    S: BuildHasher + Default
+                > Visitor<'de> for SetVisitor<'gc, 'de, Id, T, S> {
+                    type Value = $target<T, S>;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str(concat!("a ", stringify!($target)))
+                    }
+                    #[inline]
+                    fn visit_seq<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+                        where A: SeqAccess<'de>, {
+                        let mut values = $target::<T, S>::with_capacity_and_hasher(
+                            access.size_hint().unwrap_or(0).min(1024),
+                            S::default()
+                        );
+                        while let Some(value) = access.next_element_seed(
+                            GcDeserializeSeed::new(self.ctx)
+                        )? {
+                            values.insert(value);
+                        }
+
+                        Ok(values)
+                    }
+                }
+                let visitor: SetVisitor<Id, T, S> = SetVisitor { ctx, marker: PhantomData };
+                deserializer.deserialize_seq(visitor)
+            }
+        }
+    };
+}
+
+
+impl_for_map!(HashMap<K, V, S> where K: TraceImmutable, S: 'static);
+impl_for_set!(HashSet<T, S> where T: TraceImmutable, S: 'static);
+#[cfg(feature = "indexmap")]
+impl_for_map!(IndexMap<K, V, S> where K: TraceImmutable, S: 'static);
+#[cfg(feature = "indexmap")]
+impl_for_set!(IndexSet<T, S> where T: TraceImmutable, S: 'static);

@@ -154,9 +154,9 @@ macro_rules! deser_tuple_impl {
                     let _hack = PhantomData::<$param>;
                     len += 1;
                 )*
-                Ok(deser.deserialize_tuple(len, TupleVisitor {
+                deser.deserialize_tuple(len, TupleVisitor {
                     marker: PhantomData, ctx
-                })?)
+                })
             }
         }
     };
