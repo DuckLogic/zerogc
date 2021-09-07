@@ -6,9 +6,9 @@ use zerogc_derive::unsafe_gc_impl;
 
 unsafe_gc_impl! {
     target => IndexMap<K, V, S>,
-    params => [K: TraceImmutable, V, S: 'static],
+    params => [K, V, S: 'static],
     bounds => {
-        Trace => { where K: TraceImmutable, V: Trace, S: 'static },
+        Trace => { where K: Trace, V: Trace, S: 'static },
         TraceImmutable => { where K: TraceImmutable, V: TraceImmutable, S: 'static },
         TrustedDrop => { where K: TrustedDrop, V: TrustedDrop, S: 'static },
         GcSafe => { where K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, S: 'static },
@@ -17,10 +17,19 @@ unsafe_gc_impl! {
     NEEDS_TRACE => K::NEEDS_TRACE || V::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
     collector_id => *,
-    visit => |self, visitor| {
-        for (key, value) in self.#iter() {
+    trace_mut => |self, visitor| {
+        for idx in 0..self.len() {
+            let (key, value) = self.get_index_mut(idx).unwrap();
+            visitor.visit::<K>(key)?;
+            visitor.visit::<V>(value)?;
+        }
+        // NOTE: S: 'static implies S: NullTrace
+        Ok(())
+    },
+    trace_immutable => |self, visitor| {
+        for (key, value) in self.iter() {
             visitor.visit_immutable::<K>(key)?;
-            visitor.#visit_func::<V>(value)?;
+            visitor.visit_immutable::<V>(value)?;
         }
         // NOTE: S: 'static implies S: NullTrace
         Ok(())
