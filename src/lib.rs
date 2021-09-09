@@ -58,6 +58,7 @@ use core::hash::{Hash, Hasher};
 use core::fmt::{self, Debug, Formatter};
 
 use zerogc_derive::unsafe_gc_impl;
+pub use zerogc_derive::{Trace, NullTrace};
 
 use crate::vec::{GcVec};
 pub use crate::array::GcArray;
