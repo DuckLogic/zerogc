@@ -12,7 +12,6 @@ unsafe_gc_impl! {
         TraceImmutable => { where K: TraceImmutable, V: TraceImmutable, S: 'static },
         TrustedDrop => { where K: TrustedDrop, V: TrustedDrop, S: 'static },
         GcSafe => { where K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, S: 'static },
-        GcDeserialize => { where K: GcDeserialize<'gc, 'de, Id>, V: GcDeserialize<'gc, 'de, Id>, S: 'static }
     },
     null_trace => { where K: NullTrace, V: NullTrace },
     NEEDS_TRACE => K::NEEDS_TRACE || V::NEEDS_TRACE,
@@ -47,7 +46,6 @@ unsafe_gc_impl! {
         TraceImmutable => { where T: TraceImmutable, S: 'static },
         TrustedDrop => { where T: TrustedDrop, S: 'static },
         GcSafe => { where T: GcSafe<'gc, Id>, S: 'static },
-        GcDeserialize => { where K: GcDeserialize<'gc, 'de, Id>, V: GcDeserialize<'gc, 'de, Id>, S: 'static },
     },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory

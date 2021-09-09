@@ -5,7 +5,6 @@
 /// ## Example
 /// ```
 /// # use zerogc::{Trace, DynTrace, trait_object_trace};
-/// # use zerogc_derive::Trace;
 /// # use zerogc::epsilon::{self, EpsilonCollectorId, Gc};
 /// # type OurSpecificId = EpsilonCollectorId;
 /// trait Foo<'gc>: DynTrace<'gc, OurSpecificId> {

@@ -272,3 +272,43 @@ impl_for_set!(HashSet<T, S> where T: TraceImmutable, S: 'static);
 impl_for_map!(IndexMap<K, V, S> where K: TraceImmutable, S: 'static);
 #[cfg(feature = "indexmap")]
 impl_for_set!(IndexSet<T, S> where T: TraceImmutable, S: 'static);
+
+#[cfg(test)]
+mod test {
+    use crate::epsilon::{EpsilonSystem, EpsilonCollectorId};
+    use super::*;
+    #[test]
+    #[cfg(feature = "indexmap")]
+    fn indexmap() {
+        let system = EpsilonSystem::leak();
+        let ctx = system.new_context();
+        const INPUT: &str = r##"{"foo": "bar", "eats": "turds"}"##;
+        let mut deser = serde_json::Deserializer::from_str(INPUT);
+        let s = |s: &'static str| String::from(s);
+        assert_eq!(
+            <IndexMap<String, Gc<String, EpsilonCollectorId>> as GcDeserialize<EpsilonCollectorId>>::deserialize_gc(&ctx, &mut deser).unwrap(),
+            indexmap::indexmap!(
+                s("foo") => ctx.alloc(s("bar")),
+                s("eats") => ctx.alloc(s("turds"))
+            )
+        );
+        let mut deser = serde_json::Deserializer::from_str(INPUT);
+        assert_eq!(
+            <IndexMap<String, Gc<String, EpsilonCollectorId>, fnv::FnvBuildHasher> as GcDeserialize<EpsilonCollectorId>>::deserialize_gc(&ctx, &mut deser).unwrap(),
+            indexmap::indexmap!(
+                s("foo") => ctx.alloc(s("bar")),
+                s("eats") => ctx.alloc(s("turds"))
+            )
+        );
+    }
+    #[test]
+    fn gc() {
+        let system = EpsilonSystem::leak();
+        let ctx = system.new_context();
+        let mut deser = serde_json::Deserializer::from_str(r#"128"#);
+        assert_eq!(
+            <Gc<i32, EpsilonCollectorId> as GcDeserialize<EpsilonCollectorId>>::deserialize_gc(&ctx, &mut deser).unwrap(),
+            ctx.alloc(128)
+        );
+    }
+}
