@@ -320,6 +320,7 @@ impl MacroInput {
                     Some(clause) => clause.predicates,
                     None => return Ok(None)
                 });
+            crate::sort_params(&mut generics);
             let (impl_generics, _, where_clause) = generics.split_for_impl();
             Ok(Some(quote! {
                 unsafe impl #impl_generics #zerogc_crate::GcSafe<#gc_lt, #id_type> for #target_type #where_clause {}
@@ -344,6 +345,7 @@ impl MacroInput {
                     None => return Ok(None)
                 }
             );
+            crate::sort_params(&mut generics);
             let deserialize = match *strategy {
                 DeserializeStrategy::Delegate(_span) => {
                     // NOTE: quote_spanned messes up hygiene
@@ -518,6 +520,7 @@ impl MacroInput {
                 }
             }
             generics.params.push(parse_quote!('new_gc));
+            crate::sort_params(&mut generics);
             let (impl_generics, _, where_clause) = generics.split_for_impl();
             let target_trait = quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>);
             fn rewrite_brand_trait(

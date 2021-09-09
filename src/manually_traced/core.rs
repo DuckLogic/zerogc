@@ -199,29 +199,20 @@ unsafe_gc_impl! {
 
 trace_tuple! { A, B, C, D, E, F, G, H, I }
 
-macro_rules! trace_array {
-    ($size:tt) => {
-        unsafe_gc_impl! {
-            target => [T; $size],
-            params => [T],
-            null_trace => { where T: NullTrace },
-            bounds => {
-                GcRebrand => { where T: GcRebrand<'new_gc, Id>, T::Branded: Sized },
-            },
-            NEEDS_TRACE => T::NEEDS_TRACE,
-            NEEDS_DROP => T::NEEDS_DROP,
-            branded_type => [<T as GcRebrand<'new_gc, Id>>::Branded; $size],
-            collector_id => *,
-            trace_template => |self, visitor| {
-                visitor.#trace_func(#b*self as #b [T])
-            },
-        }
-    };
-    { $($size:tt),* } => ($(trace_array!($size);)*)
-}
-trace_array! {
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-    24, 32, 48, 64, 100, 128, 256, 512, 1024, 2048, 4096
+unsafe_gc_impl! {
+    target => [T; SIZE],
+    params => [T, const SIZE: usize],
+    null_trace => { where T: NullTrace },
+    bounds => {
+        GcRebrand => { where T: GcRebrand<'new_gc, Id>, T::Branded: Sized },
+    },
+    NEEDS_TRACE => T::NEEDS_TRACE,
+    NEEDS_DROP => T::NEEDS_DROP,
+    branded_type => [<T as GcRebrand<'new_gc, Id>>::Branded; SIZE],
+    collector_id => *,
+    trace_template => |self, visitor| {
+        visitor.#trace_func(#b*self as #b [T])
+    },
 }
 
 /*

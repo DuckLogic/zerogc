@@ -37,6 +37,30 @@ pub(crate) fn zerogc_crate() -> TokenStream {
     quote!(::zerogc)
 }
 
+/// Sort the parameters so that lifetime parameters come before
+/// type parameters, and type parameters come before const paramaters
+pub(crate) fn sort_params(generics: &mut Generics) {
+    #[derive(Eq, PartialEq, Ord, PartialOrd, Copy, Clone, Debug)]
+    enum ParamOrder {
+        Lifetime,
+        Type,
+        Const,
+        EndPunct
+    }
+    let mut pairs = std::mem::take(&mut generics.params).into_pairs()
+        .collect::<Vec<_>>();
+    use syn::punctuated::Pair;
+    pairs.sort_by_key(|pair| {
+        match pair {
+            Pair::Punctuated(syn::GenericParam::Lifetime(_), _) => ParamOrder::Lifetime,
+            Pair::Punctuated(syn::GenericParam::Type(_), _) => ParamOrder::Type,
+            Pair::Punctuated(syn::GenericParam::Const(_), _) => ParamOrder::Const,
+            Pair::End(_) => ParamOrder::EndPunct,
+        }
+    });
+    generics.params = pairs.into_iter().collect();
+}
+
 pub(crate) fn emit_warning(msg: impl ToString, span: Span) {
     let mut d = proc_macro::Diagnostic::new(proc_macro::Level::Warning, msg.to_string());
     d.set_spans(span.unwrap());
