@@ -136,3 +136,5 @@ mod stdlib;
 mod indexmap;
 #[cfg(feature = "parking_lot")]
 mod parking_lot;
+#[cfg(feature = "arrayvec")]
+mod arrayvec;
