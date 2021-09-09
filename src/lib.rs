@@ -784,18 +784,18 @@ unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> Trace for Gc<'gc,
     const NEEDS_DROP: bool = false;
 
     #[inline]
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+    fn trace<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
         unsafe {
             // We're delegating with a valid pointer.
-            <T as Trace>::visit_inside_gc(self, visitor)
+            <T as Trace>::trace_inside_gc(self, visitor)
         }
     }
 
     #[inline]
-    unsafe fn visit_inside_gc<'actual_gc, V, ActualId>(gc: &mut Gc<'actual_gc, Self, ActualId>, visitor: &mut V) -> Result<(), V::Err>
+    unsafe fn trace_inside_gc<'actual_gc, V, ActualId>(gc: &mut Gc<'actual_gc, Self, ActualId>, visitor: &mut V) -> Result<(), V::Err>
         where V: GcVisitor, ActualId: CollectorId, Self: GcSafe<'actual_gc, ActualId> {
         // Double indirection is fine. It's just a `Sized` type
-        visitor.visit_gc(gc)
+        visitor.trace_gc(gc)
     }
 }
 impl<'gc, T: GcSafe<'gc, Id> + ?Sized + 'gc, Id: CollectorId> const Deref for Gc<'gc, T, Id> {
@@ -1122,7 +1122,7 @@ unsafe_gc_impl! {
     branded_type => AssumeNotTraced<T>,
     NEEDS_TRACE => false,
     NEEDS_DROP => core::mem::needs_drop::<T>(),
-    visit => |self, visitor| { /* nop */ Ok(()) }
+    trace_template => |self, visitor| { /* nop */ Ok(()) }
 }
 
 /// Changes all references to garbage collected
@@ -1191,11 +1191,7 @@ pub unsafe trait Trace {
     /// a no-op drop implementation (for safety)
     /// which would lead to a false positive with `core::mem::needs_drop()`
     const NEEDS_DROP: bool;
-    /// Visit each field in this type
-    ///
-    /// Users should never invoke this method, and always call the `V::visit` instead.
-    /// Only the collector itself is premitted to call this method,
-    /// and **it is undefined behavior for the user to invoke this**.
+    /// Trace each field in this type.
     ///
     /// Structures should trace each of their fields,
     /// and collections should trace each of their elements.
@@ -1208,8 +1204,8 @@ pub unsafe trait Trace {
     /// ## Permitted Behavior
     /// - Reading your own memory (includes iteration)
     ///   - Interior mutation is undefined behavior, even if you use `GcCell`
-    /// - Calling `GcVisitor::visit` with the specified collector
-    ///   - `GarbageCollector::trace` already verifies that it owns the data, so you don't need to do that
+    /// - Calling `GcVisitor::trace` with the specified collector
+    ///   - `GcVisitor::trace` already verifies that the ids match, so you don't need to do that
     /// - Panicking on unrecoverable errors
     ///   - This should be reserved for cases where you are seriously screwed up,
     ///       and can't fulfill your contract to trace your interior properly.
@@ -1224,20 +1220,20 @@ pub unsafe trait Trace {
     /// - It is undefined behavior to mutate any of your own data.
     ///   - The mutable `&mut self` is just so copying collectors can relocate GC pointers
     /// - Calling other operations on the garbage collector (including allocations)
-    fn visit<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err>;
-    /// Visit this object, assuming its already inside a GC pointer.
+    fn trace<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err>;
+    /// Trace this object behind a [Gc] pointer.
     ///
     /// This is **required** to delegate to one of the following methods on [GcVisitor]:
-    /// 1. [GcVisitor::visit_gc] - For regular, `Sized` types
-    /// 2. [GcVisitor::visit_array] - For slices and arrays
-    /// 3. [GcVisitor::visit_trait_object] - For trait objects
+    /// 1. [GcVisitor::trace_gc] - For regular, `Sized` types
+    /// 2. [GcVisitor::trace_array] - For slices and arrays
+    /// 3. [GcVisitor::trace_trait_object] - For trait objects
     ///
     /// ## Safety
     /// This must delegate to the appropriate method on [GcVisitor],
     /// or undefined behavior will result.
     ///
     /// The user is required to supply an appropriate [Gc] pointer.
-    unsafe fn visit_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
+    unsafe fn trace_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
         where V: GcVisitor, Id: CollectorId, Self: GcSafe<'gc, Id> + 'gc;
 }
 
@@ -1250,11 +1246,11 @@ pub unsafe trait Trace {
 /// Likewise primitives (with new garbage collected data) can also
 /// implement this (since they have nothing to trace).
 pub unsafe trait TraceImmutable: Trace {
-    /// Visit an immutable reference to this type
+    /// Trace an immutable reference to this type
     ///
     /// The visitor may want to relocate garbage collected pointers,
-    /// which this type must support.
-    fn visit_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err>;
+    /// so any `Gc` pointers must be behind interior mutability.
+    fn trace_immutable<V: GcVisitor>(&self, visitor: &mut V) -> Result<(), V::Err>;
 }
 
 /// A type that can be traced via dynamic dispatch,
@@ -1307,22 +1303,22 @@ pub unsafe trait GcVisitor: Sized {
     /// The type of errors returned by this visitor
     type Err: Debug;
 
-    /// Visit a reference to the specified value
-    #[inline(always)]
-    fn visit<T: Trace + ?Sized>(&mut self, value: &mut T) -> Result<(), Self::Err> {
-        value.visit(self)
+    /// Trace a reference to the specified value
+    #[inline]
+    fn trace<T: Trace + ?Sized>(&mut self, value: &mut T) -> Result<(), Self::Err> {
+        value.trace(self)
     }
-    /// Visit a reference to the specified value
-    #[inline(always)]
-    fn visit_immutable<T: TraceImmutable + ?Sized>(&mut self, value: &T) -> Result<(), Self::Err> {
-        value.visit_immutable(self)
+    /// Trace an immutable reference to the specified value
+    #[inline]
+    fn trace_immutable<T: TraceImmutable + ?Sized>(&mut self, value: &T) -> Result<(), Self::Err> {
+        value.trace_immutable(self)
     }
 
     /// Visit a garbage collected pointer
     ///
     /// ## Safety
     /// Undefined behavior if the GC pointer isn't properly visited.
-    unsafe fn visit_gc<'gc, T, Id>(
+    unsafe fn trace_gc<'gc, T, Id>(
         &mut self, gc: &mut Gc<'gc, T, Id>
     ) -> Result<(), Self::Err>
         where T: GcSafe<'gc, Id> + 'gc, Id: CollectorId;
@@ -1331,7 +1327,7 @@ pub unsafe trait GcVisitor: Sized {
     ///
     /// ## Safety
     /// The trait object must point to a garbage collected object.
-    unsafe fn visit_trait_object<'gc, T, Id>(
+    unsafe fn trace_trait_object<'gc, T, Id>(
         &mut self, gc: &mut Gc<'gc, T, Id>
     ) -> Result<(), Self::Err>
         where T: ?Sized + GcSafe<'gc, Id> + 'gc + Pointee<Metadata=DynMetadata<T>> + DynTrace<'gc, Id>,
@@ -1341,7 +1337,7 @@ pub unsafe trait GcVisitor: Sized {
     ///
     /// ## Safety
     /// Undefined behavior if the vector is invalid.
-    unsafe fn visit_vec<'gc, T, Id>(
+    unsafe fn trace_vec<'gc, T, Id>(
         &mut self, raw: &mut Gc<'gc, Id::RawVecRepr<'gc>, Id>
     ) -> Result<(), Self::Err>
         where T: GcSafe<'gc, Id> + 'gc, Id: CollectorId;
@@ -1350,7 +1346,7 @@ pub unsafe trait GcVisitor: Sized {
     ///
     /// ## Safety
     /// Undefined behavior if the array is invalid.
-    unsafe fn visit_array<'gc, T, Id>(
+    unsafe fn trace_array<'gc, T, Id>(
         &mut self, array: &mut GcArray<'gc, T, Id>
     ) -> Result<(), Self::Err>
         where T: GcSafe<'gc, Id> + 'gc, Id: CollectorId;

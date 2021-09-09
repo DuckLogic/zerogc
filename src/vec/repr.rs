@@ -92,7 +92,7 @@ unsafe_gc_impl! {
     NEEDS_TRACE => false,
     NEEDS_DROP => false,
     collector_id => Id,
-    visit => |self, visitor| { /* nop */ Ok(()) }
+    trace_template => |self, visitor| { /* nop */ Ok(()) }
 }
 unsafe impl<'gc, Id: CollectorId> GcVecRepr<'gc> for Unsupported<'gc, Id> {
     type Id = Id;

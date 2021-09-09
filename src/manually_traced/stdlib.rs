@@ -26,10 +26,10 @@ unsafe_gc_impl! {
     NEEDS_TRACE => K::NEEDS_TRACE || V::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
     collector_id => *,
-    visit => |self, visitor| {
+    trace_template => |self, visitor| {
         for (key, value) in self.#iter() {
-            visitor.visit_immutable::<K>(key)?;
-            visitor.#visit_func::<V>(value)?;
+            visitor.trace_immutable::<K>(key)?;
+            visitor.#trace_func::<V>(value)?;
         }
         // NOTE: Because S: 'static, we can assume S: NullTrace
         Ok(())
@@ -53,9 +53,9 @@ unsafe_gc_impl! {
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
     collector_id => *,
-    visit => |self, visitor| {
+    trace_template => |self, visitor| {
         for val in self.iter() {
-            visitor.visit_immutable::<T>(val)?;
+            visitor.trace_immutable::<T>(val)?;
         }       
         // NOTE: Because S: 'static, we can assume S: NullTrace
         Ok(())

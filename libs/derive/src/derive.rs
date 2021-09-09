@@ -207,9 +207,9 @@ impl TraceField {
             parse_quote!(zerogc::Trace)
         };
         let method_name: Ident = if immutable {
-            parse_quote!(visit_immutable)
+            parse_quote!(trace_immutable)
         } else {
-            parse_quote!(visit)
+            parse_quote!(trace)
         };
         quote_spanned!(self.ty.span() => <#ty as #trait_name>::#method_name(#access, gc_visitor)?)
     }
@@ -284,7 +284,7 @@ struct SerdeTypeOpts {
     /// It is automatically inferred if you have any `Gc`, `GcArray`
     /// or `GcString` fields (ignoring fully qualified paths).
     #[darling(default)]
-    require_simple_alloc: bool,
+    require_simple_alloc: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, FromMeta)]
@@ -502,7 +502,7 @@ impl TraceDeriveInput {
             return Err(Error::custom("The `zerogc/serde1` feature is disabled (please enable it)"));
         }
         let (gc_lifetime, generics) = self.generics_with_gc_lifetime(parse_quote!('gc));
-        let should_require_simple_alloc = self.all_fields().iter().any(|field| {
+        let default_should_require_simple_alloc = self.all_fields().iter().any(|field| {
             let is_gc_allocated = match field.ty {
                 Type::Path(ref p) if p.path.segments.len() == 1 => {
                     /*
@@ -522,7 +522,10 @@ impl TraceDeriveInput {
                 }
             }
             is_gc_allocated
-        }) || self.serde_opts.as_ref().map_or(false, |opts| opts.require_simple_alloc);
+        });
+        let should_require_simple_alloc = self.serde_opts.as_ref()
+            .and_then(|opts| opts.require_simple_alloc)
+            .unwrap_or(default_should_require_simple_alloc);
         let do_require_simple_alloc = |id: &dyn ToTokens| {
             quote!(<<#id as zerogc::CollectorId>::System as zerogc::GcSystem>::Context: zerogc::GcSimpleAlloc)
         };
@@ -859,9 +862,9 @@ impl TraceDeriveInput {
             parse_quote!(zerogc::Trace)
         };
         let method_name: Ident = if immutable {
-            parse_quote!(visit_immutable)
+            parse_quote!(trace_immutable)
         } else {
-            parse_quote!(visit)
+            parse_quote!(trace)
         };
         let mut generics = self.generics.original.clone();
         for regular in self.generics.regular_type_params() {
@@ -925,9 +928,9 @@ impl TraceDeriveInput {
                 ActualId: zerogc::CollectorId, Self: zerogc::GcSafe<'actual_gc, ActualId> + 'actual_gc);
             Some(quote! {
                 #[inline]
-                unsafe fn visit_inside_gc<'actual_gc, Visitor, ActualId>(gc: &mut zerogc::Gc<'actual_gc, Self, ActualId>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
+                unsafe fn trace_inside_gc<'actual_gc, Visitor, ActualId>(gc: &mut zerogc::Gc<'actual_gc, Self, ActualId>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
                 #where_clause {
-                    visitor.visit_gc(gc)
+                    visitor.trace_gc(gc)
                 }
             })
         } else { None };

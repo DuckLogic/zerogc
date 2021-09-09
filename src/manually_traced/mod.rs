@@ -60,7 +60,7 @@ macro_rules! unsafe_trace_lock {
             trace_mut => |self, visitor| {
                 let $get_mut = self;
                 let value: &mut $target_type = $get_mut_expr;
-                visitor.visit::<$target_type>(value)
+                visitor.trace::<$target_type>(value)
             },
             trace_immutable => |self, visitor| {
                 if !<Self as Trace>::NEEDS_TRACE { return Ok(()) };
@@ -69,7 +69,7 @@ macro_rules! unsafe_trace_lock {
                 #[allow(unused_mut)]
                 let mut guard = $acquire_guard;
                 let guard_value = &mut *guard;
-                visitor.visit(guard_value)
+                visitor.trace(guard_value)
             }
         );
     };
@@ -109,7 +109,7 @@ macro_rules! unsafe_trace_primitive {
             NEEDS_TRACE => false,
             NEEDS_DROP => core::mem::needs_drop::<$target>(),
             collector_id => *,
-            visit => |self, visitor| { /* nop */ Ok(()) },
+            trace_template => |self, visitor| { /* nop */ Ok(()) },
             $(deserialize => $strategy)*
         }
         unsafe impl<'gc, OwningRef> $crate::GcDirectBarrier<'gc, OwningRef> for $target {

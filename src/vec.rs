@@ -104,7 +104,7 @@ unsafe_gc_impl!(
     NEEDS_TRACE => true,
     NEEDS_DROP => <T as Trace>::NEEDS_DROP /* if our inner type needs a drop */,
     trace_mut => |self, visitor| {
-        unsafe { visitor.visit_vec::<T, _>(self.raw.as_repr_mut()) }
+        unsafe { visitor.trace_vec::<T, _>(self.raw.as_repr_mut()) }
     },
     collector_id => Ctx::Id
 );
@@ -295,6 +295,6 @@ unsafe_gc_impl!(
     NEEDS_TRACE => true,
     NEEDS_DROP => false, // GcVecRepr is responsible for Drop
     trace_mut => |self, visitor| {
-        unsafe { visitor.visit_vec::<T, Id>(self.as_repr_mut()) }
+        unsafe { visitor.trace_vec::<T, Id>(self.as_repr_mut()) }
     },
 );

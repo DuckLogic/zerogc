@@ -477,21 +477,21 @@ unsafe impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Trace for GcHa
     const NEEDS_TRACE: bool = false;
     const NEEDS_DROP: bool = true;
     #[inline(always)]
-    fn visit<V>(&mut self, _visitor: &mut V) -> Result<(), V::Err>
+    fn trace<V>(&mut self, _visitor: &mut V) -> Result<(), V::Err>
         where V: zerogc::GcVisitor {
         Ok(())
     }
 
     #[inline]
-    unsafe fn visit_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
+    unsafe fn trace_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
         where V: GcVisitor, Id: zerogc::CollectorId, Self: GcSafe<'gc, Id> {
         // Fine to stuff inside a pointer. We're a `Sized` type
-        visitor.visit_gc(gc)
+        visitor.trace_gc(gc)
     }
 }
 unsafe impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> TraceImmutable for GcHandle<T, C> {
     #[inline(always)]
-    fn visit_immutable<V>(&self, _visitor: &mut V) -> Result<(), V::Err>
+    fn trace_immutable<V>(&self, _visitor: &mut V) -> Result<(), V::Err>
         where V: GcVisitor {
         Ok(())
     }

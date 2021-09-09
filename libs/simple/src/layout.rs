@@ -191,7 +191,7 @@ unsafe_gc_impl!(
     NEEDS_TRACE => true,
     NEEDS_DROP => true,
     null_trace => never,
-    visit => |self, visitor| {
+    trace_template => |self, visitor| {
         unreachable!()
     }
 );
@@ -330,7 +330,7 @@ unsafe_gc_impl!(
         unsafe {
             let start: *mut T = self.ptr() as *const T as *mut T;
             for i in 0..self.len() {
-                visitor.visit(&mut *start.add(i))?;
+                visitor.trace(&mut *start.add(i))?;
             }
         }
         Ok(())
@@ -340,7 +340,7 @@ unsafe_gc_impl!(
         unsafe {
             let start: *mut T = self.ptr() as *const T as *mut T;
             for i in 0..self.len() {
-                visitor.visit_immutable(&*start.add(i))?;
+                visitor.trace_immutable(&*start.add(i))?;
             }
         }
         Ok(())
@@ -503,7 +503,7 @@ impl<'gc, T: GcSafe<'gc, crate::CollectorId>> StaticVecType for T {
                         val as *mut T,
                         len
                     );
-                    let Ok(()) = <[T] as Trace>::visit(slice, visitor);
+                    let Ok(()) = <[T] as Trace>::trace(slice, visitor);
                 }
                 visit::<T> as unsafe fn(*mut c_void, &mut MarkVisitor)
             })
@@ -544,7 +544,7 @@ impl<'gc, T: GcSafe<'gc, crate::CollectorId>> StaticGcType for [T] {
                         val as *mut T,
                         len
                     );
-                    let Ok(()) = <[T] as Trace>::visit(slice, visitor);
+                    let Ok(()) = <[T] as Trace>::trace(slice, visitor);
                 }
                 visit::<T> as unsafe fn(*mut c_void, &mut MarkVisitor)
             })

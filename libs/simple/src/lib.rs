@@ -218,7 +218,7 @@ pub unsafe trait DynTrace {
 }
 unsafe impl<T: Trace + ?Sized> DynTrace for T {
     fn trace(&mut self, visitor: &mut MarkVisitor) {
-        let Ok(()) = self.visit(visitor);
+        let Ok(()) = self.trace(visitor);
     }
 }
 
@@ -816,7 +816,7 @@ impl RawSimpleCollector {
                             as *const *mut SimpleVecRepr<()>
                             as *const Gc<SimpleVecRepr<DynamicObj>>);
                         // TODO: Assert not moving?
-                        let Ok(()) = visitor.visit_vec::<(), _>(&mut target_gc);
+                        let Ok(()) = visitor.trace_vec::<(), _>(&mut target_gc);
                     }
                 }
             }
@@ -944,7 +944,7 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
     type Err = !;
 
     #[inline]
-    unsafe fn visit_gc<'gc, T, Id>(
+    unsafe fn trace_gc<'gc, T, Id>(
         &mut self, gc: &mut ::zerogc::Gc<'gc, T, Id>
     ) -> Result<(), Self::Err>
         where T: GcSafe<'gc, Id>, Id: ::zerogc::CollectorId {
@@ -972,7 +972,7 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
         }
     }
 
-    unsafe fn visit_trait_object<'gc, T, Id>(&mut self, gc: &mut zerogc::Gc<'gc, T, Id>) -> Result<(), Self::Err>
+    unsafe fn trace_trait_object<'gc, T, Id>(&mut self, gc: &mut zerogc::Gc<'gc, T, Id>) -> Result<(), Self::Err>
         where T: ?Sized + GcSafe<'gc, Id> + Pointee<Metadata=DynMetadata<T>> + zerogc::DynTrace<'gc, Id>, Id: zerogc::CollectorId {
         if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
             /*
@@ -996,14 +996,14 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
     }
 
     #[inline]
-    unsafe fn visit_vec<'gc, T, Id>(&mut self, raw: &mut ::zerogc::Gc<'gc, Id::RawVecRepr<'gc>, Id>) -> Result<(), Self::Err>
+    unsafe fn trace_vec<'gc, T, Id>(&mut self, raw: &mut ::zerogc::Gc<'gc, Id::RawVecRepr<'gc>, Id>) -> Result<(), Self::Err>
         where T: GcSafe<'gc, Id>, Id: ::zerogc::CollectorId {
         // Just visit our innards as if they were a regular `Gc` reference
-        self.visit_gc(raw)
+        self.trace_gc(raw)
     }
 
     #[inline]
-    unsafe fn visit_array<'gc, T, Id>(&mut self, array: &mut ::zerogc::array::GcArray<'gc, T, Id>) -> Result<(), Self::Err>
+    unsafe fn trace_array<'gc, T, Id>(&mut self, array: &mut ::zerogc::array::GcArray<'gc, T, Id>) -> Result<(), Self::Err>
         where T: GcSafe<'gc, Id>, Id: ::zerogc::CollectorId {
         if TypeId::of::<Id>() == TypeId::of::<crate::CollectorId>() {
             /*
@@ -1052,7 +1052,7 @@ impl MarkVisitor<'_> {
     unsafe fn _visit_own_gc<'gc, T: Trace + ?Sized>(
         &mut self, gc: &mut Gc<'gc, T>
     ) {
-        self._visit_own_gc_with(gc, |val, visitor| <T as Trace>::visit(val, visitor))
+        self._visit_own_gc_with(gc, |val, visitor| <T as Trace>::trace(val, visitor))
     }
     /// Visit a GC type whose [::zerogc::CollectorId] matches our own,
     /// tracing it with the specified closure

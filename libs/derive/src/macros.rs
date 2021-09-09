@@ -138,16 +138,7 @@ pub struct MacroInput {
     /// This is necessary if the type is not `Sized`
     #[kwarg(optional)]
     visit_inside_gc: Option<VisitInsideGcClosure>,
-    /*
-     * The following three arguments are parsed
-     * into a 'VisitImpl' via the 'parse_visitor' function.
-     *
-     * TODO: Make the name for this option 'visit_template'
-     *
-     * I feel like that's a more accurate description
-     * of its function.....
-     */
-    #[kwarg(optional, rename = "visit")]
+    #[kwarg(optional, rename = "trace_template")]
     raw_visit_template: Option<VisitClosure>,
     #[kwarg(optional, rename = "trace_mut")]
     trace_mut_closure: Option<VisitClosure>,
@@ -263,7 +254,7 @@ impl MacroInput {
         let visit_impl = self.parse_visitor()?.expand_impl(mutable)?;
         let (impl_generics, _, where_clause) = generics.split_for_impl();
         let trait_name = if mutable { quote!(#zerogc_crate::Trace) } else { quote!(#zerogc_crate::TraceImmutable) };
-        let visit_method_name = if mutable { quote!(visit) } else { quote!(visit_immutable) };
+        let trace_method_name = if mutable { quote!(trace) } else { quote!(trace_immutable) };
         let needs_drop_const = if mutable {
             let expr = &self.needs_drop;
             Some(quote!(const NEEDS_DROP: bool = {
@@ -286,7 +277,7 @@ impl MacroInput {
         let visit_inside_gc = if mutable {
             let expr = match self.visit_inside_gc {
                 Some(ref expr) => expr.0.body.clone(),
-                None => quote!(visitor.visit_gc(gc))
+                None => quote!(visitor.trace_gc(gc))
             };
             let where_clause = if let Some(ref clause) = self.bounds.visit_inside_gc {
                 clause.clone()
@@ -295,7 +286,7 @@ impl MacroInput {
             };
             Some(quote! {
                 #[inline]
-                unsafe fn visit_inside_gc<'actual_gc, Visitor, ActualId>(gc: &mut #zerogc_crate::Gc<'actual_gc, Self, ActualId>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
+                unsafe fn trace_inside_gc<'actual_gc, Visitor, ActualId>(gc: &mut #zerogc_crate::Gc<'actual_gc, Self, ActualId>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
                     #where_clause {
                     #expr
                 }
@@ -313,7 +304,7 @@ impl MacroInput {
                 #needs_trace_const
                 #needs_drop_const
                 #[inline] // TODO: Should this be unconditional?
-                fn #visit_method_name<Visitor: #zerogc_crate::GcVisitor + ?Sized>(&#mutability self, visitor: &mut Visitor) -> Result<(), Visitor::Err> {
+                fn #trace_method_name<Visitor: #zerogc_crate::GcVisitor + ?Sized>(&#mutability self, visitor: &mut Visitor) -> Result<(), Visitor::Err> {
                     #visit_impl
                 }
                 #visit_inside_gc
@@ -791,7 +782,7 @@ pub enum VisitImpl {
     /// | #mutability    | `` (empty) | `mut`              |
     /// | #as_ref        | `as_ref`   | `as_mut`           |
     /// | #iter          | `iter`     | `iter_mut`         |
-    /// | #visit_func    | `visit`    | `visit_immutable`  |
+    /// | #trace_func    | `trace`    | `trace_immutable`  |
     /// | #b             | `&`        | `&mut`             |
     /// | ## (escape)    | `#`        | `#`                |
     ///
@@ -816,7 +807,7 @@ enum MagicVarType {
     Mutability,
     AsRef,
     Iter,
-    VisitFunc,
+    TraceFunc,
     B
 }
 impl MagicVarType {
@@ -826,7 +817,7 @@ impl MagicVarType {
             "mutability" => MagicVarType::Mutability,
             "as_ref" => MagicVarType::AsRef,
             "iter" => MagicVarType::Iter,
-            "visit_func" => MagicVarType::VisitFunc,
+            "trace_func" => MagicVarType::TraceFunc,
             "b" => MagicVarType::B,
             _ => return Err(
                 Error::new(ident.span(),
@@ -862,11 +853,11 @@ impl VisitImpl {
                                 quote!(iter)
                             }
                         }
-                        MagicVarType::VisitFunc => {
+                        MagicVarType::TraceFunc => {
                             if mutable {
-                                quote!(visit)
+                                quote!(trace)
                             } else {
-                                quote!(visit_immutable)
+                                quote!(trace_immutable)
                             }
                         }
                         MagicVarType::B => {

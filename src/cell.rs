@@ -99,7 +99,7 @@ unsafe_gc_impl!(
          * In other words is possible to safely trace a `GcCell`
          * with a garbage collected type, as long as it is never mutated.
          */
-        visitor.visit(self.get_mut())
+        visitor.trace(self.get_mut())
     },
     trace_immutable => |self, visitor| {
         /*
@@ -108,7 +108,7 @@ unsafe_gc_impl!(
          * We require `NullTrace` in order to `set` our internals.
          */
         let mut value = self.get();
-        visitor.visit(&mut value)?;
+        visitor.trace(&mut value)?;
         self.set(value);
         Ok(())
     }

@@ -19,9 +19,9 @@ unsafe_gc_impl! {
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
     collector_id => *,
-    visit => |self, visitor| {
+    trace_template => |self, visitor| {
         // Delegate to slice
-        visitor.#visit_func::<[T]>(#b**self as #b [T])
+        visitor.#trace_func::<[T]>(#b**self as #b [T])
     },
     deserialize => unstable_horrible_hack,
 }
@@ -32,8 +32,8 @@ unsafe_gc_impl! {
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
     collector_id => *,
-    visit => |self, visitor| {
-        visitor.#visit_func::<T>(#b **self)
+    trace_template => |self, visitor| {
+        visitor.#trace_func::<T>(#b **self)
     },
     deserialize => unstable_horrible_hack,
 }
@@ -45,9 +45,9 @@ unsafe_gc_impl! {
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
     collector_id => *,
-    visit => |self, visitor| {
+    trace_template => |self, visitor| {
         // We must always visit immutable, since we have shared references
-        visitor.visit_immutable::<T>(&**self)
+        visitor.trace_immutable::<T>(&**self)
     },
 }
 unsafe_gc_impl! {
@@ -57,9 +57,9 @@ unsafe_gc_impl! {
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
     collector_id => *,
-    visit => |self, visitor| {
+    trace_template => |self, visitor| {
         // We must always visit immutable, since we have shared references
-        visitor.visit_immutable::<T>(&**self)
+        visitor.trace_immutable::<T>(&**self)
     },
 }
 // String is a primitive with no internal references

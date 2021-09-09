@@ -392,17 +392,17 @@ unsafe impl Trace for EpsilonCollectorId {
     const NEEDS_DROP: bool = false;
 
     #[inline]
-    fn visit<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
+    fn trace<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
         Ok(())
     }
 
-    unsafe fn visit_inside_gc<'gc, V, Id>(gc: &mut crate::Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err> where V: GcVisitor, Id: CollectorId, Self: GcSafe<'gc, Id> + 'gc {
-        visitor.visit_gc(gc)
+    unsafe fn trace_inside_gc<'gc, V, Id>(gc: &mut crate::Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err> where V: GcVisitor, Id: CollectorId, Self: GcSafe<'gc, Id> + 'gc {
+        visitor.trace_gc(gc)
     }
 }
 unsafe impl TraceImmutable for EpsilonCollectorId {
     #[inline]
-    fn visit_immutable<V: GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
+    fn trace_immutable<V: GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
         Ok(())
     }
 }

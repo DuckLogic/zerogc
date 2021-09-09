@@ -350,20 +350,20 @@ unsafe impl<C: RawCollectorImpl> Trace for CollectorId<C> {
     const NEEDS_TRACE: bool = false;
     const NEEDS_DROP: bool = false;
     #[inline(always)]
-    fn visit<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
+    fn trace<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
         Ok(())
     }
 
     #[inline]
-    unsafe fn visit_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err> where V: GcVisitor, Id: zerogc::CollectorId, Self: GcSafe<'gc, Id> {
+    unsafe fn trace_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err> where V: GcVisitor, Id: zerogc::CollectorId, Self: GcSafe<'gc, Id> {
         // Fine to stuff inside a pointer. We're a regular 'Sized' type
-        visitor.visit_gc(gc)
+        visitor.trace_gc(gc)
     }
 }
 unsafe impl<C: RawCollectorImpl> TrustedDrop for CollectorId<C> {}
 unsafe impl<C: RawCollectorImpl> TraceImmutable for CollectorId<C> {
     #[inline(always)]
-    fn visit_immutable<V: GcVisitor>(&self, _visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
+    fn trace_immutable<V: GcVisitor>(&self, _visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
         Ok(())
     }
 }

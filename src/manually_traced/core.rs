@@ -47,10 +47,10 @@ macro_rules! trace_tuple_impl {
                 GcRebrand => { where $($param: GcRebrand<'new_gc, Id>,)* $($param::Branded: Sized),* },
             },
             branded_type => ( $(<$param as GcRebrand<'new_gc, Id>>::Branded,)* ),
-            visit => |self, visitor| {
+            trace_template => |self, visitor| {
                 ##[allow(non_snake_case)]
                 let ($(ref #mutability $param,)*) = *self;
-                $(visitor.#visit_func($param)?;)*
+                $(visitor.#trace_func($param)?;)*
                 Ok(())
             },
             collector_id => *
@@ -194,7 +194,7 @@ unsafe_gc_impl! {
     NEEDS_TRACE => false,
     collector_id => *,
     NEEDS_DROP => core::mem::needs_drop::<Self>(),
-    visit => |self, visitor| { /* nop */ Ok(()) }
+    trace_template => |self, visitor| { /* nop */ Ok(()) }
 }
 
 trace_tuple! { A, B, C, D, E, F, G, H, I }
@@ -212,8 +212,8 @@ macro_rules! trace_array {
             NEEDS_DROP => T::NEEDS_DROP,
             branded_type => [<T as GcRebrand<'new_gc, Id>>::Branded; $size],
             collector_id => *,
-            visit => |self, visitor| {
-                visitor.#visit_func(#b*self as #b [T])
+            trace_template => |self, visitor| {
+                visitor.#trace_func(#b*self as #b [T])
             },
         }
     };
@@ -255,8 +255,8 @@ unsafe_gc_impl! {
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => false, // We never need to be dropped
     collector_id => *,
-    visit => |self, visitor| {
-        visitor.visit_immutable::<T>(&**self)
+    trace_template => |self, visitor| {
+        visitor.trace_immutable::<T>(&**self)
     }
 }
 
@@ -272,7 +272,7 @@ unsafe_gc_impl!(
     NEEDS_TRACE => false,
     NEEDS_DROP => T::NEEDS_DROP,
     collector_id => *,
-    visit => |self, visitor| {
+    trace_template => |self, visitor| {
         Ok(()) /* nop */
     }
 );
@@ -287,7 +287,7 @@ unsafe_gc_impl!(
     NEEDS_TRACE => false,
     NEEDS_DROP => T::NEEDS_DROP,
     collector_id => *,
-    visit => |self, visitor| {
+    trace_template => |self, visitor| {
         Ok(()) /* nop */
     }
 );
@@ -316,8 +316,8 @@ unsafe_gc_impl! {
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => false, // Although not `Copy`, mut references don't need to be dropped
     collector_id => *,
-    visit => |self, visitor| {
-        visitor.#visit_func::<T>(#b **self)
+    trace_template => |self, visitor| {
+        visitor.#trace_func::<T>(#b **self)
     }
 }
 
@@ -337,9 +337,9 @@ unsafe_gc_impl! {
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => ::core::mem::needs_drop::<T>(),
-    visit => |self, visitor| {
+    trace_template => |self, visitor| {
         for val in self.#iter() {
-            visitor.#visit_func(val)?;
+            visitor.#trace_func(val)?;
         }
         Ok(())
     },
@@ -356,10 +356,10 @@ unsafe_gc_impl! {
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => T::NEEDS_DROP,
     collector_id => *,
-    visit => |self, visitor| {
+    trace_template => |self, visitor| {
         match *self {
             None => Ok(()),
-            Some(ref #mutability value) => visitor.#visit_func::<T>(value),
+            Some(ref #mutability value) => visitor.#trace_func::<T>(value),
         }
     },
     deserialize => unstable_horrible_hack,
@@ -394,9 +394,9 @@ unsafe_gc_impl! {
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => T::NEEDS_DROP,
-    visit => |self, visitor| {
+    trace_template => |self, visitor| {
         // We can trace `Wrapping` by simply tracing its interior
-        visitor.#visit_func(#b self.0)
+        visitor.#trace_func(#b self.0)
     },
     collector_id => *,
     deserialize => unstable_horrible_hack,

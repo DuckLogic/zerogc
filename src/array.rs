@@ -279,10 +279,10 @@ unsafe_gc_impl!(
     NEEDS_TRACE => true,
     NEEDS_DROP => false,
     trace_mut => |self, visitor| {
-        unsafe { visitor.visit_array(self) }
+        unsafe { visitor.trace_array(self) }
     },
     collector_id => Id,
     visit_inside_gc => |gc, visitor| {
-        visitor.visit_gc(gc)
+        visitor.trace_gc(gc)
     }
 );

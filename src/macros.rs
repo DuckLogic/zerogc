@@ -59,14 +59,14 @@ macro_rules! trait_object_trace {
             // Likewise for `NEEDS_DROP`
             const NEEDS_DROP: bool = true;
 
-            fn visit<V: $crate::GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
+            fn trace<V: $crate::GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
                 unimplemented!("Unable to use DynTrace outside of a Gc")
             }
 
             #[inline]
-            unsafe fn visit_inside_gc<'actual_gc, V, Id>(gc: &mut $crate::Gc<'actual_gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
+            unsafe fn trace_inside_gc<'actual_gc, V, Id>(gc: &mut $crate::Gc<'actual_gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
                 where V: $crate::GcVisitor, Id: $crate::CollectorId, Self: $crate::GcSafe<'actual_gc, Id> {
-                visitor.visit_trait_object(gc)
+                visitor.trace_trait_object(gc)
             }
         }
         unsafe impl<$branded_lt, $($($lt,)* $($param:ident,)*)?> $crate::GcRebrand<$branded_lt, $collector_id> for dyn $target $(where $($where_clause)*)? {
@@ -92,23 +92,23 @@ macro_rules! impl_trace_for_nulltrace {
             const NEEDS_DROP: bool = core::mem::needs_drop::<Self>();
 
             #[inline]
-            fn visit<V: $crate::GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
+            fn trace<V: $crate::GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
                 <Self as $crate::NullTrace>::verify_null_trace();
                 Ok(())
             }
 
             #[inline]
-            unsafe fn visit_inside_gc<'actual_gc, Visitor, ActualId>(
+            unsafe fn trace_inside_gc<'actual_gc, Visitor, ActualId>(
                 gc: &mut $crate::Gc<'actual_gc, Self, ActualId>,
                 visitor: &mut Visitor
             ) -> Result<(), Visitor::Err> where Visitor: zerogc::GcVisitor,
                 ActualId: zerogc::CollectorId, Self: zerogc::GcSafe<'actual_gc, ActualId> + 'actual_gc {
-                visitor.visit_gc(gc)
+                visitor.trace_gc(gc)
             }
         }
         unsafe impl$(<$($lt,)* $($param),*>)? $crate::TraceImmutable for $target $(where $($where_clause)*)? {
             #[inline]
-            fn visit_immutable<V: $crate::GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
+            fn trace_immutable<V: $crate::GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
                 Ok(())
             }
         }

@@ -20,16 +20,16 @@ unsafe_gc_impl! {
     trace_mut => |self, visitor| {
         for idx in 0..self.len() {
             let (key, value) = self.get_index_mut(idx).unwrap();
-            visitor.visit::<K>(key)?;
-            visitor.visit::<V>(value)?;
+            visitor.trace::<K>(key)?;
+            visitor.trace::<V>(value)?;
         }
         // NOTE: S: 'static implies S: NullTrace
         Ok(())
     },
     trace_immutable => |self, visitor| {
         for (key, value) in self.iter() {
-            visitor.visit_immutable::<K>(key)?;
-            visitor.visit_immutable::<V>(value)?;
+            visitor.trace_immutable::<K>(key)?;
+            visitor.trace_immutable::<V>(value)?;
         }
         // NOTE: S: 'static implies S: NullTrace
         Ok(())
@@ -50,9 +50,9 @@ unsafe_gc_impl! {
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
     collector_id => *,
-    visit => |self, visitor| {
+    trace_template => |self, visitor| {
         for val in self.iter() {
-            visitor.visit_immutable::<T>(val)?;
+            visitor.trace_immutable::<T>(val)?;
         }
         Ok(())
     },
