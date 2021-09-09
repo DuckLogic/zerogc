@@ -56,6 +56,7 @@ use core::ptr::{NonNull, Pointee, DynMetadata};
 use core::marker::{PhantomData, Unsize};
 use core::hash::{Hash, Hasher};
 use core::fmt::{self, Debug, Formatter};
+use core::cmp::Ordering;
 
 use zerogc_derive::unsafe_gc_impl;
 pub use zerogc_derive::{Trace, NullTrace};
@@ -835,12 +836,38 @@ impl<'gc, T: GcSafe<'gc, Id> + PartialEq + 'gc, Id: CollectorId> PartialEq for G
         // NOTE: We compare by value, not identity
         self.value() == other.value()
     }
+    #[inline]
+    fn ne(&self, other: &Self) -> bool {
+        self.value() != other.value()
+    }
 }
 impl<'gc, T: GcSafe<'gc, Id> + Eq + 'gc, Id: CollectorId> Eq for Gc<'gc, T, Id> {}
 impl<'gc, T: GcSafe<'gc, Id> + PartialEq + 'gc, Id: CollectorId> PartialEq<T> for Gc<'gc, T, Id> {
     #[inline]
     fn eq(&self, other: &T) -> bool {
         self.value() == other
+    }
+    #[inline]
+    fn ne(&self, other: &T) -> bool {
+        self.value() != other
+    }
+}
+impl<'gc, T: GcSafe<'gc, Id> + PartialOrd + 'gc, Id: CollectorId> PartialOrd for Gc<'gc, T, Id> {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.value().partial_cmp(other.value())
+    }
+}
+impl<'gc, T: GcSafe<'gc, Id> + PartialOrd + 'gc, Id: CollectorId> PartialOrd<T> for Gc<'gc, T, Id> {
+    #[inline]
+    fn partial_cmp(&self, other: &T) -> Option<Ordering> {
+        self.value().partial_cmp(other)
+    }
+}
+impl<'gc, T: GcSafe<'gc, Id> + Ord + 'gc, Id: CollectorId> Ord for Gc<'gc, T, Id> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.value().cmp(other)
     }
 }
 impl<'gc, T: GcSafe<'gc, Id> + Debug + 'gc, Id: CollectorId> Debug for Gc<'gc, T, Id> {
