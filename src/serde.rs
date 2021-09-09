@@ -269,7 +269,7 @@ macro_rules! impl_for_set {
 impl_for_map!(HashMap<K, V, S> where K: TraceImmutable, S: 'static);
 impl_for_set!(HashSet<T, S> where T: TraceImmutable, S: 'static);
 #[cfg(feature = "indexmap")]
-impl_for_map!(IndexMap<K, V, S> where K: TraceImmutable, S: 'static);
+impl_for_map!(IndexMap<K, V, S> where K: GcSafe<'gc, Id>, S: 'static);
 #[cfg(feature = "indexmap")]
 impl_for_set!(IndexSet<T, S> where T: TraceImmutable, S: 'static);
 
