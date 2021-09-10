@@ -272,10 +272,10 @@ unsafe_gc_impl!(
     params => ['gc, T: GcSafe<'gc, Id>, Id: CollectorId],
     bounds => {
         TraceImmutable => never,
-        GcRebrand => { where T: GcRebrand<'new_gc, Id>, <T as GcRebrand<'new_gc, Id>>::Branded: Sized + GcSafe<'new_gc, Id> },
+        GcRebrand => { where T: GcRebrand<Id>, for<'new_gc> <T as GcRebrand<Id>>::Branded<'new_gc>: Sized + GcSafe<'new_gc, Id> },
     },
     null_trace => never,
-    branded_type => GcArray<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,
+    branded_type => GcArray<'new_gc, <T as GcRebrand<Id>>::Branded<'new_gc>, Id>,
     NEEDS_TRACE => true,
     NEEDS_DROP => false,
     trace_mut => |self, visitor| {

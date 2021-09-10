@@ -469,7 +469,7 @@ impl MacroInput {
                     return Ok(None); // They are requesting we dont implement it at all
                 },
                 None => {
-                    (true, vec![parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>)])
+                    (true, vec![parse_quote!(#zerogc_crate::GcRebrand<#id_type>)])
                 }
             };
             // generate default bounds
@@ -485,9 +485,9 @@ impl MacroInput {
                     bounds.extend(default_bounds.iter().cloned());
                     generics.make_where_clause()
                         .predicates.push(WherePredicate::Type(PredicateType {
-                        lifetimes: None,
+                        lifetimes: Some(parse_quote!(for<'new_gc>)),
                         bounded_ty: self.branded_type.clone().unwrap_or_else(|| {
-                            parse_quote!(<#type_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded)
+                            parse_quote!(<#type_name as #zerogc_crate::GcRebrand<Id>>::Branded<'new_gc>)
                         }),
                         colon_token: Default::default(),
                         bounds: bounds.clone(),
@@ -497,15 +497,15 @@ impl MacroInput {
                         lifetimes: None,
                         bounded_ty: parse_quote!(#type_name),
                         colon_token: Default::default(),
-                        bounds
-                    }))
+                            bounds
+                        }))
+                    }
                 }
-            }
-            if generate_implicit {
-                /*
-                 * If we don't have explicit specification,
-                 * extend the with the trace clauses
-                 *
+                if generate_implicit {
+                    /*
+                     * If we don't have explicit specification,
+                     * extend the with the trace clauses
+                     *
                  * TODO: Do we need to apply to the `Branded`/`Erased` types
                  */
                 generics.make_where_clause().predicates
@@ -515,17 +515,16 @@ impl MacroInput {
                     if let GenericParam::Type(ref tp) = param {
                         let param_name = &tp.ident;
                         generics.make_where_clause().predicates
-                            .push(parse_quote!(<#param_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded: Sized))
+                            .push(parse_quote!(for<'new_gc> <#param_name as #zerogc_crate::GcRebrand<Id>>::Branded<'new_gc>: Sized))
                     }
                 }
             }
-            generics.params.push(parse_quote!('new_gc));
             crate::sort_params(&mut generics);
             let (impl_generics, _, where_clause) = generics.split_for_impl();
-            let target_trait = quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>);
+            let target_trait = quote!(#zerogc_crate::GcRebrand<#id_type>);
             fn rewrite_brand_trait(
                 target: &Type, trait_name: &str, target_params: &HashSet<Ident>,
-                target_trait: TokenStream, associated_type: Ident
+                target_trait: TokenStream, associated_type: Path
             ) -> Result<Type, Error> {
                 rewrite_type(target, trait_name, &mut |target_type| {
                     let ident = match target_type {
@@ -552,13 +551,13 @@ impl MacroInput {
                 rewrite_brand_trait(
                     &self.target_type, "GcRebrand",
                     &target_params,
-                    parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>),
-                    parse_quote!(Branded)
+                    parse_quote!(#zerogc_crate::GcRebrand<#id_type>),
+                    parse_quote!(Branded<'new_gc>)
                 )
             }, Ok)?;
             Ok(Some(quote! {
                 unsafe impl #impl_generics #target_trait for #target_type #where_clause {
-                    type Branded = #branded;
+                    type Branded<'new_gc> = #branded;
                 }
             }))
         })

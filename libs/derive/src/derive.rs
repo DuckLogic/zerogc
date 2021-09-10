@@ -712,13 +712,9 @@ impl TraceDeriveInput {
         if matches!(kind, TraceDeriveKind::NullTrace) {
             let mut generics = self.generics.original.clone();
             generics.params.push(parse_quote!(Id: zerogc::CollectorId));
-            generics.params.push(parse_quote!('new_gc));
             for regular in self.generics.regular_type_params() {
                 let regular = &regular.ident;
                 generics.make_where_clause().predicates.push(parse_quote!(#regular: zerogc::NullTrace));
-            }
-            for ignored in &self.generics.ignored_lifetimes {
-                generics.make_where_clause().predicates.push(parse_quote!(#ignored: 'new_gc))
             }
             generics.make_where_clause().predicates.push(parse_quote!(Self: zerogc::GcSafe<'new_gc, Id>));
             if let Some(ref gc_lt) = self.gc_lifetime() {
@@ -727,20 +723,18 @@ impl TraceDeriveInput {
             let (_, ty_generics, _) = self.generics.original.split_for_impl();
             let (impl_generics, _, where_clause) = generics.split_for_impl();
             return Ok(quote! {
-                unsafe impl #impl_generics zerogc::GcRebrand<'new_gc, Id> for #target_type #ty_generics #where_clause {
-                    type Branded = Self;
+                unsafe impl #impl_generics zerogc::GcRebrand<Id> for #target_type #ty_generics #where_clause {
+                    type Branded<'new_gc> = Self;
                 }
             });
         }
         let mut generics = self.generics.original.clone();
         let (old_gc_lt, new_gc_lt): (syn::Lifetime, syn::Lifetime) = match self.gc_lifetime() {
             Some(lt) => {
-                generics.params.push(parse_quote!('new_gc));
                 (lt.clone(), parse_quote!('new_gc))
             },
             None => {
                 generics.params.push(parse_quote!('gc));
-                generics.params.push(parse_quote!('new_gc));
                 (parse_quote!('gc), parse_quote!('new_gc))
             }
         };
@@ -780,7 +774,7 @@ impl TraceDeriveInput {
         for param in &self.generics.type_params {
             let name = &param.ident;
             let target: Path = if !self.generics.is_ignored(name) {
-                generics.make_where_clause().predicates.push(parse_quote!(#name: zerogc::GcRebrand<#new_lt, #id>));
+                generics.make_where_clause().predicates.push(parse_quote!(#name: zerogc::GcRebrand<#id>));
                 parse_quote!(#name::Branded)
             } else {
                 Path::from(name.clone())
@@ -796,7 +790,6 @@ impl TraceDeriveInput {
             generics.make_where_clause().predicates.push(parse_quote!(#ignored: 'new_gc));
         }
         let target_type = &self.ident;
-
         let rewritten_path: Path = {
             let mut params = self.generics.original.params.iter().map(|decl| {
                 // decl -> use
@@ -833,13 +826,13 @@ impl TraceDeriveInput {
         for param in self.generics.regular_type_params() {
             let name = &param.ident;
             if explicitly_unsized.contains(name) { continue }
-            generics.make_where_clause().predicates.push(parse_quote!(#name::Branded: Sized));
+            generics.make_where_clause().predicates.push(parse_quote!(for<'new_gc> #name::Branded<'new_gc>: Sized));
         }
         let ty_generics = self.generics.original.split_for_impl().1;
         let (impl_generics, _, where_clause) = generics.split_for_impl();
         Ok(quote! {
-            unsafe impl #impl_generics zerogc::GcRebrand<#new_lt, #id> for #target_type #ty_generics #where_clause {
-                type Branded = #rewritten_path;
+            unsafe impl #impl_generics zerogc::GcRebrand<#id> for #target_type #ty_generics #where_clause {
+                type Branded<'new_gc> = #rewritten_path;
             }
         })
     }
@@ -1227,7 +1220,7 @@ impl<'a> syn::fold::Fold for RebrandFold<'a> {
         } else {
             let new_lt = self.new_lt;
             let id = self.id;
-            parse_quote!(<#orig as zerogc::GcRebrand<#new_lt, #id>>::Branded)
+            parse_quote!(<#orig as zerogc::GcRebrand<#id>>::Branded<#new_lt>)
         }
     }
 }

@@ -286,11 +286,11 @@ unsafe_gc_impl!(
     bounds => {
         TraceImmutable => never,
         GcRebrand => {
-            where T: GcRebrand<'new_gc, Id>,
-                <T as GcRebrand<'new_gc, Id>>::Branded: Sized
+            where T: GcRebrand<Id>,
+                for<'new_gc> T::Branded<'new_gc>: Sized
         },
     },
-    branded_type => GcRawVec<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,
+    branded_type => GcRawVec<'new_gc, <T as GcRebrand<Id>>::Branded<'new_gc>, Id>,
     null_trace => never,
     NEEDS_TRACE => true,
     NEEDS_DROP => false, // GcVecRepr is responsible for Drop

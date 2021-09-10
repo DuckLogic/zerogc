@@ -250,10 +250,10 @@ pub unsafe trait GcSystem {
 /// This type-system hackery is needed because
 /// we need to place bounds on `T as GcBrand`
 // TODO: Remove when we get more powerful types
-pub unsafe trait GcHandleSystem<'gc, T: GcSafe<'gc, Self::Id> + ?Sized + 'gc>: GcSystem
-    where T: GcRebrand<'static, Self::Id> {
+pub unsafe trait GcHandleSystem<'gc, T: GcSafe<'gc, Self::Id> + ?Sized>: GcSystem
+    where T: GcRebrand<Self::Id> {
     /// The type of handles to this object.
-    type Handle: GcHandle<<T as GcRebrand<'static, Self::Id>>::Branded, System=Self, Id=Self::Id>;
+    type Handle: GcHandle<<T as GcRebrand<Self::Id>>::Branded<'static>, System=Self, Id=Self::Id>;
 
     /// Create a handle to the specified GC pointer,
     /// which can be used without a context
@@ -395,8 +395,8 @@ pub unsafe trait GcContext: Sized {
     ///
     /// It should only be used as part of the [safepoint!] macro.
     #[inline(always)]
-    unsafe fn rebrand_static<'a, T>(&self, value: T) -> T::Branded
-        where T: GcRebrand<'a, Self::Id>, T::Branded: Sized {
+    unsafe fn rebrand_static<T>(&self, value: T) -> T::Branded<'static>
+        where T: GcRebrand<Self::Id>, T::Branded<'static>: Sized {
         let branded = mem::transmute_copy(&value);
         mem::forget(value);
         branded
@@ -411,8 +411,8 @@ pub unsafe trait GcContext: Sized {
     ///
     /// It should only be used as part of the [safepoint!] macro.
     #[inline(always)]
-    unsafe fn rebrand_self<'gc, T>(&'gc self, value: T) -> T::Branded
-        where T: GcRebrand<'gc, Self::Id>, T::Branded: Sized {
+    unsafe fn rebrand_self<'gc, T>(&'gc self, value: T) -> T::Branded<'gc>
+        where T: GcRebrand<Self::Id>, T::Branded<'gc>: Sized {
         let branded = mem::transmute_copy(&value);
         mem::forget(value);
         branded
@@ -695,20 +695,51 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
 ///
 /// Unsafe code can rely on a pointer always dereferencing to the same value in between
 /// safepoints. This is true even for copying/moving collectors.
-#[repr(transparent)]
-pub struct Gc<'gc, T: ?Sized + 'gc, Id: CollectorId> {
-    value: NonNull<T>,
-    /// Marker struct used to statically identify the collector's type
+///
+/// ## Lifetime
+/// The borrow does *not* refer to the value `&'gc T`.
+/// Instead, it refers to the *system* `&'gc Id::System`
+/// 
+/// This is necessary because `T` may have borrowed interior data
+/// with a shorter lifetime `'a < 'gc`, making `&'gc T` invalid
+/// (because that would imply 'gc: 'a, which is false).
+///
+/// This ownership can be thought of in terms of the following (simpler) system.
+/// ```no_run
+/// # trait GcSafe{}
+/// struct GcSystem {
+///     values: Vec<dyn GcSafe>
+/// }
+/// struct Gc<'gc, T: GcSafe> {
+///     index: usize,
+///     marker: PhantomData<T>,
+///     system: &'gc GcSystem
+/// }
+/// ```
+///
+/// In this system, safepoints can be thought of mutations
+/// that remove dead values from the `Vec`.
+///
+/// This ownership equivalency is also the justification for why
+/// the `'gc` lifetime can be [covariant](https://doc.rust-lang.org/nomicon/subtyping.html#variance)
+///
+/// The only difference is that the real `Gc` structure
+/// uses pointers instead of indices.
+ #[repr(transparent)]
+pub struct Gc<'gc, T: ?Sized, Id: CollectorId> {
+    /// The pointer to the garbage collected value.
     ///
-    /// The runtime instance of this value can be computed from the pointer itself: `NonNull<T>`
-    collector_id: PhantomData<Id>,
-    /*
-     * TODO: I think this lifetime variance is safe
-     * Better add some tests and an explanation.
-     */
-    marker: PhantomData<&'gc T>,
+    /// NOTE: The logical lifetime here is **not** `&'gc T`
+    /// See the comments on 'Lifetime' for details.
+    value: NonNull<T>,
+    /// Marker struct used to statically identify the collector's type,
+    /// and indicate that we reference 
+    ///
+    /// The runtime instance of this value can be
+    /// computed from the pointer itself: `NonNull<T>` -> `&CollectorId`
+    collector_id: PhantomData<&'gc Id::System>,
 }
-impl<'gc, T: GcSafe<'gc, Id> + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
     /// Create a GC pointer from a raw pointer
     ///
     /// ## Safety
@@ -716,15 +747,13 @@ impl<'gc, T: GcSafe<'gc, Id> + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
     /// and doesn't correspond to the appropriate id.
     #[inline]
     pub unsafe fn from_raw(value: NonNull<T>) -> Self {
-        Gc { collector_id: PhantomData, value, marker: PhantomData }
+        Gc { collector_id: PhantomData, value }
     }
-
 
     /// Create a handle to this object, which can be used without a context
     #[inline]
     pub fn create_handle<'a>(&self) -> <Id::System as GcHandleSystem<'gc, T>>::Handle
-        where Id::System: GcHandleSystem<'gc, T>,
-              T: GcRebrand<'static, Id> + 'a {
+        where Id::System: GcHandleSystem<'gc, T> {
         <Id::System as GcHandleSystem<'gc, T>>::create_handle(*self)
     }
 
@@ -741,9 +770,7 @@ impl<'gc, T: GcSafe<'gc, Id> + ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
         unsafe { self.collector_id().assume_valid_system() }
     }
 }
-// NOTE: Relax `T: GcSafe` bound
-impl<'gc, T: ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
-
+impl<'gc, T: ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
     /// The value of the underlying pointer
     #[inline(always)]
     pub const fn value(&self) -> &'gc T {
@@ -774,10 +801,10 @@ impl<'gc, T: ?Sized + 'gc, Id: CollectorId> Gc<'gc, T, Id> {
 unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> TrustedDrop for Gc<'gc, T, Id> {}
 unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> GcSafe<'gc, Id> for Gc<'gc, T, Id> {}
 /// Rebrand
-unsafe impl<'gc, 'new_gc, T, Id> GcRebrand<'new_gc, Id> for Gc<'gc, T, Id>
-    where T: GcSafe<'gc, Id> + ?Sized + GcRebrand<'new_gc, Id>,
+unsafe impl<'gc, T, Id> GcRebrand<Id> for Gc<'gc, T, Id>
+    where T: GcSafe<'gc, Id> + ?Sized,
           Id: CollectorId, Self: Trace {
-    type Branded = Gc<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>;
+    type Branded<'new_gc> = Gc<'new_gc, <T as GcRebrand<Id>>::Branded<'new_gc>, Id>;
 }
 unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> Trace for Gc<'gc, T, Id> {
     // We always need tracing....
@@ -800,12 +827,12 @@ unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> Trace for Gc<'gc,
         visitor.trace_gc(gc)
     }
 }
-impl<'gc, T: GcSafe<'gc, Id> + ?Sized + 'gc, Id: CollectorId> const Deref for Gc<'gc, T, Id> {
-    type Target = &'gc T;
+impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> const Deref for Gc<'gc, T, Id> {
+    type Target = T;
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
-        unsafe { &*(&self.value as *const NonNull<T> as *const &'gc T) }
+        self.value()
     }
 }
 unsafe impl<'gc, O, V, Id> GcDirectBarrier<'gc, Gc<'gc, O, Id>> for Gc<'gc, V,Id>
@@ -953,8 +980,8 @@ pub unsafe trait GcHandle<T: GcSafe<'static, Self::Id> + ?Sized>: Clone + NullTr
 /// because Rust doesn't have Generic Associated Types
 ///
 /// TODO: Remove when we get more powerful types
-pub unsafe trait GcBindHandle<'new_gc, T: GcSafe<'static, Self::Id> + ?Sized>: GcHandle<T>
-    where T: GcRebrand<'new_gc, Self::Id>, {
+pub unsafe trait GcBindHandle<T: GcSafe<'static, Self::Id> + ?Sized>: GcHandle<T>
+    where T: GcRebrand<Self::Id>, {
     /// Associate this handle with the specified context,
     /// allowing its underlying object to be accessed
     /// as long as the context is valid.
@@ -963,9 +990,9 @@ pub unsafe trait GcBindHandle<'new_gc, T: GcSafe<'static, Self::Id> + ?Sized>: G
     /// other object that would be allocated from the context.
     /// It'll be properly collected and can even be used as a root
     /// at the next safepoint.
-    fn bind_to(&self, context: &'new_gc <Self::System as GcSystem>::Context) -> Gc<
+    fn bind_to<'new_gc>(&self, context: &'new_gc <Self::System as GcSystem>::Context) -> Gc<
         'new_gc,
-        <T as GcRebrand<'new_gc, Self::Id>>::Branded,
+        <T as GcRebrand<Self::Id>>::Branded<'new_gc>,
         Self::Id
     >;
 }
@@ -1049,10 +1076,33 @@ pub unsafe trait TrustedDrop: Trace {}
 ///
 /// If a type is `NullTrace, it should implement `GcSafe` for all possible collectors.
 /// However, if a type `NEEDS_TRACE`, it will usually only implement GcSafe for the specific
-/// [CollectorId]s it hppappens to contain (although this is not guarenteed).
+/// [CollectorId]s it happens to contain (although this is not guarenteed).
 ///
+/// ## Mixing with other lifetimes
+/// Note that `T: GcSafe<'gc, T>` does *not* necessarily imply `T: 'gc`.
+/// This allows a garbage collected lifetime to contain shorter lifetimes
+///
+/// For example,
+/// ```
+/// # use zerogc::epsilon::{Gc, GcSystem};
+/// #[derive(Trace)]
+/// #[zerogc(ignore_lifetime("'a"))]
+/// struct TempLifetime<'gc, 'a> {
+///     temp: &'a i32,
+///     gc: Gc<'gc, i32>
+/// }
+/// fn alloc_ref_temp<'gc>(ctx: &'gc GcSystem, long_lived: Gc<'gc, i32>) {
+///     let temp = 5; // Lives for 'a (shorter than 'gc)
+///     let temp_ref = ctx.alloc(TempLifetime {
+///         temp: &temp, gc: long_lived
+///     });
+///     assert!(&temp as *const _, &temp_ref.temp as *const _)
+/// }
+/// ```
+///
+/// ## Mixing collectors
 /// The `Id` parameter allows mixing and matching pointers from different collectors,
-/// each with their own `gc lifetime.
+/// each with their own 'gc lifetime.
 /// For example,
 /// ```
 /// # use zerogc::{Gc, CollectorId, GcSafe};
@@ -1075,9 +1125,9 @@ pub unsafe trait TrustedDrop: Trace {}
 ///
 /// ## Safety
 /// In addition to the guarantees of [Trace] and [TrustedDrop],
-/// implementing this type requires that all [Gc] pointers of the specified `Id` live for `'gc'
-/// (if there are any at all).
-pub unsafe trait GcSafe<'gc, Id: CollectorId>: Trace + TrustedDrop + 'gc {
+/// implementing this type requires that all [Gc] pointers of
+/// the specified `Id` have the `'gc` lifetime (if there are any at all).
+pub unsafe trait GcSafe<'gc, Id: CollectorId>: Trace + TrustedDrop + GcRebrand<Id> {
     /// Assert this type is GC safe
     ///
     /// Only used by procedural derive
@@ -1143,29 +1193,33 @@ unsafe_gc_impl! {
         Trace => always,
         TraceImmutable => always,
         TrustedDrop => always,
-        GcSafe => { where T: 'gc },
-        GcRebrand => { where T: 'new_gc },
+        GcSafe => always,
+        GcRebrand => always,
     },
     null_trace => always,
-    branded_type => AssumeNotTraced<T>,
+    branded_type => Self,
     NEEDS_TRACE => false,
     NEEDS_DROP => core::mem::needs_drop::<T>(),
     trace_template => |self, visitor| { /* nop */ Ok(()) }
 }
 
-/// Changes all references to garbage collected
-/// objects to match a specific lifetime.
+/// Allows changing the lifetime of all [`Gc`] references.
 ///
-/// This indicates that its safe to transmute to the new `Branded` type
-/// and all that will change is the lifetimes.
-// TODO: Can we support lifetimes that are smaller than 'new_gc
-pub unsafe trait GcRebrand<'new_gc, Id: CollectorId>: Trace {
+/// Any other lifetimes should be unaffected by the 'branding'.
+/// Since we control the only lifetime,
+/// we don't have to worry about interior references.
+///
+/// ## Safety
+/// Assuming the `'new_gc` lifetime is correct,
+/// It must be safe to transmute back and forth to `Self::Branded`,
+/// switching all garbage collected references from `Gc<'old_gc, T>` to `Gc<'new_gc, T>`
+pub unsafe trait GcRebrand<Id: CollectorId>: Trace {
     /// This type with all garbage collected lifetimes
     /// changed to `'new_gc`
     ///
     /// This must have the same in-memory repr as `Self`,
     /// so that it's safe to transmute.
-    type Branded: GcSafe<'new_gc, Id> + ?Sized;
+    type Branded<'new_gc>: GcSafe<'new_gc, Id> + ?Sized;
 
     /// Assert this type can be rebranded
     ///

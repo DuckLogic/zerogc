@@ -22,9 +22,9 @@ unsafe_gc_impl!(
     NEEDS_TRACE => <T as Trace>::NEEDS_TRACE,
     NEEDS_DROP => <T as Trace>::NEEDS_DROP,
     bounds => {
-        GcRebrand => { where T: GcRebrand<'new_gc, Id>, T::Branded: Sized }, 
+        GcRebrand => { where T: GcRebrand<Id>, for<'new_gc> T::Branded<'new_gc>: Sized }, 
     },
-    branded_type => ArrayVec<T::Branded, SIZE>,
+    branded_type => ArrayVec<T::Branded<'new_gc>, SIZE>,
     trace_template => |self, visitor| {
         for val in self.#iter() {
             visitor.#trace_func(val)?;
