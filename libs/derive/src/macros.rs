@@ -282,7 +282,7 @@ impl MacroInput {
             let where_clause = if let Some(ref clause) = self.bounds.visit_inside_gc {
                 clause.clone()
             } else {
-                parse_quote!(where Visitor: #zerogc_crate::GcVisitor, ActualId: #zerogc_crate::CollectorId, Self: #zerogc_crate::GcSafe<'actual_gc, ActualId> + 'actual_gc)
+                parse_quote!(where Visitor: #zerogc_crate::GcVisitor, ActualId: #zerogc_crate::CollectorId, Self: #zerogc_crate::GcSafe<'actual_gc, ActualId>)
             };
             Some(quote! {
                 #[inline]
@@ -469,7 +469,7 @@ impl MacroInput {
                     return Ok(None); // They are requesting we dont implement it at all
                 },
                 None => {
-                    (true, vec![parse_quote!(#zerogc_crate::GcRebrand<#id_type>)])
+                    (true, vec![parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>)])
                 }
             };
             // generate default bounds
@@ -485,9 +485,9 @@ impl MacroInput {
                     bounds.extend(default_bounds.iter().cloned());
                     generics.make_where_clause()
                         .predicates.push(WherePredicate::Type(PredicateType {
-                        lifetimes: Some(parse_quote!(for<'new_gc>)),
+                        lifetimes: None,
                         bounded_ty: self.branded_type.clone().unwrap_or_else(|| {
-                            parse_quote!(<#type_name as #zerogc_crate::GcRebrand<Id>>::Branded<'new_gc>)
+                            parse_quote!(<#type_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded)
                         }),
                         colon_token: Default::default(),
                         bounds: bounds.clone(),
@@ -497,15 +497,15 @@ impl MacroInput {
                         lifetimes: None,
                         bounded_ty: parse_quote!(#type_name),
                         colon_token: Default::default(),
-                            bounds
-                        }))
-                    }
+                        bounds
+                    }))
                 }
-                if generate_implicit {
-                    /*
-                     * If we don't have explicit specification,
-                     * extend the with the trace clauses
-                     *
+            }
+            if generate_implicit {
+                /*
+                 * If we don't have explicit specification,
+                 * extend the with the trace clauses
+                 *
                  * TODO: Do we need to apply to the `Branded`/`Erased` types
                  */
                 generics.make_where_clause().predicates
@@ -515,16 +515,17 @@ impl MacroInput {
                     if let GenericParam::Type(ref tp) = param {
                         let param_name = &tp.ident;
                         generics.make_where_clause().predicates
-                            .push(parse_quote!(for<'new_gc> <#param_name as #zerogc_crate::GcRebrand<Id>>::Branded<'new_gc>: Sized))
+                            .push(parse_quote!(<#param_name as #zerogc_crate::GcRebrand<'new_gc, Id>>::Branded: Sized))
                     }
                 }
             }
+            generics.params.push(parse_quote!('new_gc));
             crate::sort_params(&mut generics);
             let (impl_generics, _, where_clause) = generics.split_for_impl();
-            let target_trait = quote!(#zerogc_crate::GcRebrand<#id_type>);
+            let target_trait = quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>);
             fn rewrite_brand_trait(
                 target: &Type, trait_name: &str, target_params: &HashSet<Ident>,
-                target_trait: TokenStream, associated_type: Path
+                target_trait: TokenStream, associated_type: Ident
             ) -> Result<Type, Error> {
                 rewrite_type(target, trait_name, &mut |target_type| {
                     let ident = match target_type {
@@ -551,13 +552,13 @@ impl MacroInput {
                 rewrite_brand_trait(
                     &self.target_type, "GcRebrand",
                     &target_params,
-                    parse_quote!(#zerogc_crate::GcRebrand<#id_type>),
-                    parse_quote!(Branded<'new_gc>)
+                    parse_quote!(#zerogc_crate::GcRebrand<'new_gc, #id_type>),
+                    parse_quote!(Branded)
                 )
             }, Ok)?;
             Ok(Some(quote! {
                 unsafe impl #impl_generics #target_trait for #target_type #where_clause {
-                    type Branded<'new_gc> = #branded;
+                    type Branded = #branded;
                 }
             }))
         })

@@ -275,8 +275,7 @@ unsafe impl GcSystem for EpsilonSystem {
 }
 unsafe impl GcSimpleAlloc for EpsilonContext {
     #[inline]
-    unsafe fn alloc_uninit<'gc, T>(&'gc self) -> (Self::Id, *mut T) where T: GcSafe<'gc, EpsilonCollectorId> + 'gc {
-        let id = self.id();
+    unsafe fn alloc_uninit<'gc, T>(&'gc self) -> *mut T where T: GcSafe<'gc, EpsilonCollectorId> {
         let tp = self::layout::TypeInfo::of::<T>();
         let needs_header = self::alloc::Default::NEEDS_EXPLICIT_FREE
             || !tp.may_ignore();
@@ -294,23 +293,22 @@ unsafe impl GcSimpleAlloc for EpsilonContext {
         } else {
             self.system().state().alloc.alloc_layout(Layout::new::<T>()).as_ptr()
         };
-        (id, ptr.cast())
+        ptr.cast()
     }
 
     #[inline]
     fn alloc<'gc, T>(&'gc self, value: T) -> crate::Gc<'gc, T, Self::Id>
-        where T: GcSafe<'gc, Self::Id> + 'gc {
+        where T: GcSafe<'gc, Self::Id> {
         unsafe {
-            let (_id, ptr) = self.alloc_uninit::<T>();
+            let ptr = self.alloc_uninit::<T>();
             ptr.write(value);
             Gc::from_raw(NonNull::new_unchecked(ptr))
         }
     }
 
     #[inline]
-    unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> (Self::Id, *mut T)
-        where T: GcSafe<'gc, Self::Id> + 'gc {
-        let id = self.id();
+    unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> *mut T
+        where T: GcSafe<'gc, Self::Id> {
         let type_info = self::layout::TypeInfo::of_array::<T>();
         let (overall_layout, offset) = Layout::new::<self::layout::EpsilonArrayHeader>()
             .extend(Layout::array::<T>(len).unwrap())
@@ -325,12 +323,12 @@ unsafe impl GcSimpleAlloc for EpsilonContext {
             len
         });
         self.system().state().push_state(NonNull::from(&header.as_ref().common_header));
-        (id, mem.as_ptr().add(offset).cast())
+        mem.as_ptr().add(offset).cast()
     }
 
     #[inline]
     fn alloc_vec<'gc, T>(&'gc self) -> crate::vec::GcVec<'gc, T, Self>
-        where T: GcSafe<'gc, Self::Id> + 'gc {
+        where T: GcSafe<'gc, Self::Id> {
         let ptr = self.system().state().empty_vec.get_or_init(|| unsafe {
             NonNull::new_unchecked(self.alloc_vec_with_capacity::<'gc, ()>(0).as_repr().as_raw_ptr())
         }).as_ptr();
@@ -342,7 +340,7 @@ unsafe impl GcSimpleAlloc for EpsilonContext {
 
     #[inline]
     fn alloc_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> crate::vec::GcVec<'gc, T, Self>
-        where T: GcSafe<'gc, Self::Id> + 'gc {
+        where T: GcSafe<'gc, Self::Id> {
         if capacity == 0 {
             if let Some(&empty_ptr) = self.system().state().empty_vec.get() {
                 return crate::vec::GcVec {
@@ -410,7 +408,7 @@ unsafe impl TraceImmutable for EpsilonCollectorId {
 unsafe impl NullTrace for EpsilonCollectorId {}
 unsafe impl const ConstCollectorId for EpsilonCollectorId {
     #[inline]
-    fn resolve_array_len_const<'gc, T: 'gc>(repr: &Self::ArrayRepr<'gc, T>) -> usize {
+    fn resolve_array_len_const<'gc, T>(repr: &Self::ArrayRepr<'gc, T>) -> usize {
         repr.len()
     }
 }
@@ -419,22 +417,22 @@ unsafe impl CollectorId for EpsilonCollectorId {
     type RawVecRepr<'gc> = self::layout::EpsilonVecRepr;
     /// We use fat-pointers for arrays,
     /// so that we can transmute from `&'static [T]` -> `GcArray`
-    type ArrayRepr<'gc, T: 'gc> = zerogc::array::repr::FatArrayRepr<'gc, T, Self>;
+    type ArrayRepr<'gc, T> = zerogc::array::repr::FatArrayRepr<'gc, T, Self>;
 
     #[inline]
-    fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: ?Sized + 'gc, 'gc: 'a {
+    fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: ?Sized, 'gc: 'a {
         const ID: EpsilonCollectorId = EpsilonCollectorId { _priv: () };
         &ID
     }
 
     #[inline]
-    fn resolve_array_id<'a, 'gc, T>(_array: &'a Self::ArrayRepr<'gc, T>) -> &'a Self where T: 'gc, 'gc: 'a {
+    fn resolve_array_id<'a, 'gc, T>(_array: &'a Self::ArrayRepr<'gc, T>) -> &'a Self where 'gc: 'a {
         const ID: EpsilonCollectorId = EpsilonCollectorId { _priv: () };
         &ID
     }
 
     #[inline]
-    fn resolve_array_len<'gc, T: 'gc>(repr: &Self::ArrayRepr<'gc, T>) -> usize {
+    fn resolve_array_len<'gc, T>(repr: &Self::ArrayRepr<'gc, T>) -> usize {
         repr.len()
     }
 
@@ -444,7 +442,7 @@ unsafe impl CollectorId for EpsilonCollectorId {
         _owner: &Gc<'gc, T>,
         _value: &Gc<'gc, V>,
         _field_offset: usize
-    ) where T: GcSafe<'gc, Self> + ?Sized + 'gc, V: GcSafe<'gc, Self> + ?Sized + 'gc {}
+    ) where T: GcSafe<'gc, Self> + ?Sized, V: GcSafe<'gc, Self> + ?Sized {}
 
     unsafe fn assume_valid_system(&self) -> &Self::System {
         /*

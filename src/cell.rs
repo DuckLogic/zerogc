@@ -85,9 +85,9 @@ unsafe_gc_impl!(
         Trace => { where T: Trace + Copy },
         // NOTE: TraceImmutable requires a 'NullTrace' for interior mutability
         TraceImmutable => { where T: NullTrace + Copy },
-        GcRebrand => { where T: Trace + Copy + GcRebrand<Id>, Id: CollectorId, for<'new_gc> T::Branded<'new_gc>: Copy + Trace }
+        GcRebrand => { where T: Trace + Copy + GcRebrand<'new_gc, Id>, Id: CollectorId,T::Branded: Copy + Trace }
     },
-    branded_type => GcCell<T::Branded<'new_gc>>,
+    branded_type => GcCell<T::Branded>,
     null_trace => { where T: Copy + NullTrace },
     trace_mut => |self, visitor| {
         /*

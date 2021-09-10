@@ -101,7 +101,7 @@ macro_rules! impl_trace_for_nulltrace {
                 gc: &mut $crate::Gc<'actual_gc, Self, ActualId>,
                 visitor: &mut Visitor
             ) -> Result<(), Visitor::Err> where Visitor: zerogc::GcVisitor,
-                ActualId: zerogc::CollectorId, Self: zerogc::GcSafe<'actual_gc, ActualId> + 'actual_gc {
+                ActualId: zerogc::CollectorId, Self: zerogc::GcSafe<'actual_gc, ActualId> {
                 visitor.trace_gc(gc)
             }
         }

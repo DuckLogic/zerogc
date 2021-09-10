@@ -12,9 +12,9 @@ unsafe_gc_impl! {
         TraceImmutable => { where K: TraceImmutable, V: TraceImmutable, S: 'static },
         TrustedDrop => { where K: TrustedDrop, V: TrustedDrop, S: 'static },
         GcSafe => { where K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, S: 'static },
-        GcRebrand => { where K: GcRebrand<Id>, V: GcRebrand<Id> }
+        GcRebrand => { where K: GcRebrand<'new_gc, Id>, V: GcRebrand<'new_gc, Id>, K::Branded: Sized, V::Branded: Sized }
     },
-    branded_type => IndexMap<K::Branded<'new_gc>, V::Branded<'new_gc>, S>,
+    branded_type => IndexMap<K::Branded, V::Branded, S>,
     null_trace => { where K: NullTrace, V: NullTrace },
     NEEDS_TRACE => K::NEEDS_TRACE || V::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
@@ -48,9 +48,9 @@ unsafe_gc_impl! {
         TraceImmutable => { where T: TraceImmutable, S: 'static },
         TrustedDrop => { where T: TrustedDrop, S: 'static },
         GcSafe => { where T: GcSafe<'gc, Id>, S: 'static },
-        GcRebrand => { where T: GcRebrand<Id>, S: 'static },
+        GcRebrand => { where T: GcRebrand<'new_gc, Id>, S: 'static, T::Branded: Sized + TraceImmutable },
     },
-    branded_type => IndexSet<T::Branded<'new_gc>, S>,
+    branded_type => IndexSet<T::Branded, S>,
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => true, // Internal memory
     collector_id => *,

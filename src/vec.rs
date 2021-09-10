@@ -149,9 +149,9 @@ pub struct InsufficientCapacityError;
 /// To avoid undefined behavior, there can only be a single reference
 /// to a [RawGcVec], despite [Gc] implementing `Copy`.
 #[repr(transparent)]
-pub struct GcRawVec<'gc, T: GcSafe<'gc, Id> + 'gc, Id: CollectorId> {
+pub struct GcRawVec<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
     repr: Gc<'gc, Id::RawVecRepr<'gc>, Id>,
-    marker: PhantomData<&'gc [T]>
+    marker: PhantomData<Gc<'gc, T, Id>>,
 }
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcRawVec<'gc, T, Id> {
     /// Create a [RawGcVec] from the specified repr
@@ -286,11 +286,11 @@ unsafe_gc_impl!(
     bounds => {
         TraceImmutable => never,
         GcRebrand => {
-            where T: GcRebrand<Id>,
-                for<'new_gc> T::Branded<'new_gc>: Sized
+            where T: GcRebrand<'new_gc, Id>,
+                <T as GcRebrand<'new_gc, Id>>::Branded: Sized
         },
     },
-    branded_type => GcRawVec<'new_gc, <T as GcRebrand<Id>>::Branded<'new_gc>, Id>,
+    branded_type => GcRawVec<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>,
     null_trace => never,
     NEEDS_TRACE => true,
     NEEDS_DROP => false, // GcVecRepr is responsible for Drop

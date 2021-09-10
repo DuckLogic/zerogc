@@ -44,9 +44,9 @@ macro_rules! trace_tuple_impl {
             NEEDS_TRACE => $($param::NEEDS_TRACE || )* false,
             NEEDS_DROP => $($param::NEEDS_DROP || )* false,
             bounds => {
-                GcRebrand => { where $($param: GcRebrand<Id>,)* $(for<'new_gc> $param::Branded<'new_gc>: Sized),* },
+                GcRebrand => { where $($param: GcRebrand<'new_gc, Id>,)* $($param::Branded: Sized),* },
             },
-            branded_type => ( $(<$param as GcRebrand<Id>>::Branded<'new_gc>,)* ),
+            branded_type => ( $(<$param as GcRebrand<'new_gc, Id>>::Branded,)* ),
             trace_template => |self, visitor| {
                 ##[allow(non_snake_case)]
                 let ($(ref #mutability $param,)*) = *self;
@@ -204,11 +204,11 @@ unsafe_gc_impl! {
     params => [T, const SIZE: usize],
     null_trace => { where T: NullTrace },
     bounds => {
-        GcRebrand => { where T: GcRebrand<Id>, for<'new_gc> T::Branded<'new_gc>: Sized },
+        GcRebrand => { where T: GcRebrand<'new_gc, Id>, T::Branded: Sized },
     },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => T::NEEDS_DROP,
-    branded_type => [<T as GcRebrand<Id>>::Branded<'new_gc>; SIZE],
+    branded_type => [<T as GcRebrand<'new_gc, Id>>::Branded; SIZE],
     collector_id => *,
     trace_template => |self, visitor| {
         visitor.#trace_func(#b*self as #b [T])
@@ -229,9 +229,19 @@ unsafe_gc_impl! {
         TraceImmutable => { where T: TraceImmutable },
         TrustedDrop => { where T: TraceImmutable /* NOTE: We are Copy, so dont' have any drop to trust */ },
         GcSafe => { where T: TraceImmutable + GcSafe<'gc, Id> },
-        GcRebrand => { where T: TraceImmutable + GcRebrand<Id>, for<'new_gc> T::Branded<'new_gc>: 'a },
+        /*
+         * TODO: Right now we require `NullTrace`. Can we weaken this?
+         *
+         * This is unfortunately required by our bounds, since we don't know
+         * that `T::Branded` lives for &'a making `&'a T::Branded` invalid
+         * as far as the compiler is concerned.
+         *
+         * Therefore the only solution is to preserve `&'a T` as-is,
+         * which is only safe if `T: NullTrace`
+         */
+        GcRebrand => { where T: NullTrace + GcSafe<'new_gc, Id> },
     },
-    branded_type => &'a T::Branded<'new_gc>,
+    branded_type => &'a T,
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => false, // We never need to be dropped
@@ -246,8 +256,7 @@ unsafe_gc_impl!(
     target => Cell<T>,
     params => [T: NullTrace],
     bounds => {
-        GcRebrand => { where T: NullTrace + GcRebrand<Id>,
-            for<'new_gc> T::Branded<'new_gc>: NullTrace },
+        GcRebrand => { where T: NullTrace + GcSafe<'new_gc, Id> },
     },
     branded_type => Self,
     null_trace => always,
@@ -261,7 +270,9 @@ unsafe_gc_impl!(
 unsafe_gc_impl!(
     target => RefCell<T>,
     params => [T: NullTrace],
-    bounds => {},
+    bounds => {
+        GcRebrand => { where T: GcSafe<'new_gc, Id> + NullTrace }
+    },
     branded_type => Self,
     null_trace => always,
     NEEDS_TRACE => false,
@@ -281,8 +292,17 @@ unsafe_gc_impl!(
 unsafe_gc_impl! {
     target => &'a mut T,
     params => ['a, T: 'a],
-    bounds => {},
-    branded_type => &'a mut T::Branded<'new_gc>,
+    bounds => {
+        GcSafe => { where T: GcSafe<'gc, Id> },
+        /*
+         * TODO: Right now we require `NullTrace`
+         *
+         * This is the same reasoning as the requirements for `&'a T`.
+         * See their comments for details.....
+         */
+        GcRebrand => { where T: NullTrace + GcSafe<'new_gc, Id>, },
+    },
+    branded_type => &'a mut T,
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
     NEEDS_DROP => false, // Although not `Copy`, mut references don't need to be dropped
@@ -303,7 +323,7 @@ unsafe_gc_impl! {
     bounds => {
         GcRebrand => never,
         visit_inside_gc => where Visitor: crate::GcVisitor, ActualId: crate::CollectorId,
-            [T]: GcSafe<'actual_gc, ActualId> + 'actual_gc
+            [T]: GcSafe<'actual_gc, ActualId>
     },
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
