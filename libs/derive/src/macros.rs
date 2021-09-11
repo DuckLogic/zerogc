@@ -282,7 +282,7 @@ impl MacroInput {
             let where_clause = if let Some(ref clause) = self.bounds.visit_inside_gc {
                 clause.clone()
             } else {
-                parse_quote!(where Visitor: #zerogc_crate::GcVisitor, ActualId: #zerogc_crate::CollectorId, Self: #zerogc_crate::GcSafe<'actual_gc, ActualId> + 'actual_gc)
+                parse_quote!(where Visitor: #zerogc_crate::GcVisitor, ActualId: #zerogc_crate::CollectorId, Self: #zerogc_crate::GcSafe<'actual_gc, ActualId>)
             };
             Some(quote! {
                 #[inline]

@@ -112,13 +112,13 @@ impl<'gc, Id: CollectorId> Display for GcString<'gc, Id> {
 /// This is a `#[repr(transparent)]` wrapper around
 /// [GcArrayRepr].
 #[repr(transparent)]
-pub struct GcArray<'gc, T: 'gc, Id: CollectorId> {
+pub struct GcArray<'gc, T, Id: CollectorId> {
     repr: Id::ArrayRepr<'gc, T>
 }
 impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
     /// Convert this array into a slice
     #[inline]
-    pub fn as_slice(&self) -> &'gc [T] {
+    pub fn as_slice<'a>(&self) -> &'a [T] where 'gc: 'a {
         self.repr.as_slice()
     }
     /// Load a raw pointer to the array's value
@@ -159,7 +159,7 @@ impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
 /// Const access to [GcString]
 pub trait ConstArrayAccess<'gc, T> {
     /// The value of the array as a slice
-    fn as_slice_const(&self) -> &'gc [T];
+    fn as_slice_const<'a>(&self) -> &'a [T] where 'gc: 'a;
     /// Load a raw pointer to the array's value
     fn as_raw_ptr_const(&self) -> *mut T;
     /// The length of this array
@@ -168,7 +168,7 @@ pub trait ConstArrayAccess<'gc, T> {
 // Relax T: GcSafe bound
 impl<'gc, T, Id: ~const ConstCollectorId> const ConstArrayAccess<'gc, T> for GcArray<'gc, T, Id> {
     #[inline]
-    fn as_slice_const(&self) -> &'gc [T] {
+    fn as_slice_const<'a>(&self) -> &'a [T] where 'gc: 'a {
         /*
          * TODO: This is horrible, but currently nessicarry
          * to do this in a const-fn context.
@@ -178,7 +178,7 @@ impl<'gc, T, Id: ~const ConstCollectorId> const ConstArrayAccess<'gc, T> for GcA
                 unsafe {
                     core::mem::transmute_copy::<
                         Id::ArrayRepr<'gc, T>,
-                        &'gc [T]
+                        &'a [T]
                     >(&self.repr)
                 }
             },

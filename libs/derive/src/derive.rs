@@ -717,9 +717,6 @@ impl TraceDeriveInput {
                 let regular = &regular.ident;
                 generics.make_where_clause().predicates.push(parse_quote!(#regular: zerogc::NullTrace));
             }
-            for ignored in &self.generics.ignored_lifetimes {
-                generics.make_where_clause().predicates.push(parse_quote!(#ignored: 'new_gc))
-            }
             generics.make_where_clause().predicates.push(parse_quote!(Self: zerogc::GcSafe<'new_gc, Id>));
             if let Some(ref gc_lt) = self.gc_lifetime() {
                 return Err(Error::custom("A NullTrace type may not have a 'gc lifetime").with_span(gc_lt))
@@ -791,9 +788,6 @@ impl TraceDeriveInput {
                 }, bound)
             }).collect::<Vec<_>>();
             generics.make_where_clause().predicates.push(parse_quote!(#target: #(#rewritten_bounds)+*));
-        }
-        for ignored in &self.generics.ignored_lifetimes {
-            generics.make_where_clause().predicates.push(parse_quote!(#ignored: 'new_gc));
         }
         let target_type = &self.ident;
 
@@ -925,7 +919,7 @@ impl TraceDeriveInput {
         };
         let visit_inside_gc = if !immutable {
             let where_clause = quote!(where Visitor: zerogc::GcVisitor,
-                ActualId: zerogc::CollectorId, Self: zerogc::GcSafe<'actual_gc, ActualId> + 'actual_gc);
+                ActualId: zerogc::CollectorId, Self: zerogc::GcSafe<'actual_gc, ActualId>);
             Some(quote! {
                 #[inline]
                 unsafe fn trace_inside_gc<'actual_gc, Visitor, ActualId>(gc: &mut zerogc::Gc<'actual_gc, Self, ActualId>, visitor: &mut Visitor) -> Result<(), Visitor::Err>

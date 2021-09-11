@@ -68,7 +68,7 @@ use zerogc_context::utils::{ThreadId, MemorySize};
 use crate::alloc::{SmallArenaList, SmallArena};
 use crate::layout::{StaticGcType, GcType, SimpleVecRepr, DynamicObj, StaticVecType, SimpleMarkData, SimpleMarkDataSnapshot, GcHeader, BigGcObject, HeaderLayout, GcArrayHeader, GcVecHeader, GcTypeLayout};
 
-use zerogc_context::collector::{RawSimpleAlloc, RawCollectorImpl};
+use zerogc_context::collector::{RawSimpleAlloc};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 use zerogc_context::{CollectionManager as AbstractCollectionManager, RawContext as AbstractRawContext, CollectorContext};
 use zerogc::vec::{GcRawVec};
@@ -152,23 +152,23 @@ static GLOBAL_COLLECTOR: AtomicPtr<RawSimpleCollector> = AtomicPtr::new(std::ptr
 
 unsafe impl RawSimpleAlloc for RawSimpleCollector {
     #[inline]
-    unsafe fn alloc_uninit<'gc, T>(context: &'gc SimpleCollectorContext) -> (CollectorId, *mut T) where T: GcSafe<'gc, crate::CollectorId> {
+    unsafe fn alloc_uninit<'gc, T>(context: &'gc SimpleCollectorContext) -> *mut T where T: GcSafe<'gc, crate::CollectorId> {
         let (_header, ptr) = context.collector().heap.allocator.alloc_layout(
             GcHeader::LAYOUT,
             Layout::new::<T>(),
             T::STATIC_TYPE
         );
-        (context.collector().id(), ptr as *mut T)
+        ptr as *mut T
     }
 
-    unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> (CollectorId, *mut T) where T: GcSafe<'gc, crate::CollectorId> {
+    unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> *mut T where T: GcSafe<'gc, crate::CollectorId> {
         let (header, ptr) = context.collector().heap.allocator.alloc_layout(
             GcArrayHeader::LAYOUT,
             Layout::array::<T>(len).unwrap(),
             <[T] as StaticGcType>::STATIC_TYPE
         );
         (*header).len = len;
-        (context.collector().id(), ptr.cast())
+        ptr.cast()
     }
 
     #[inline]

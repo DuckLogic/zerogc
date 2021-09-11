@@ -45,19 +45,31 @@ pub(crate) fn sort_params(generics: &mut Generics) {
         Lifetime,
         Type,
         Const,
-        EndPunct
     }
     let mut pairs = std::mem::take(&mut generics.params).into_pairs()
         .collect::<Vec<_>>();
     use syn::punctuated::Pair;
     pairs.sort_by_key(|pair| {
-        match pair {
-            Pair::Punctuated(syn::GenericParam::Lifetime(_), _) => ParamOrder::Lifetime,
-            Pair::Punctuated(syn::GenericParam::Type(_), _) => ParamOrder::Type,
-            Pair::Punctuated(syn::GenericParam::Const(_), _) => ParamOrder::Const,
-            Pair::End(_) => ParamOrder::EndPunct,
+        match pair.value() {
+            syn::GenericParam::Lifetime(_) => ParamOrder::Lifetime,
+            syn::GenericParam::Type(_) => ParamOrder::Type,
+            syn::GenericParam::Const(_) => ParamOrder::Const,
         }
     });
+    /*
+     * NOTE: The `Pair::End` can only come at the end.
+     * Now that we've sorted, it's possible the old ending
+     * could be in the first position or some other position
+     * before the end.
+     *
+     * If that's the case, then add punctuation to the end.
+     */
+    if let Some(old_ending_index) = pairs.iter().position(|p| p.punct().is_none()) {
+        if old_ending_index != pairs.len() - 1 {
+            let value = pairs.remove(old_ending_index).into_value();
+            pairs.insert(old_ending_index, Pair::Punctuated(value, Default::default()));
+        }
+    }
     generics.params = pairs.into_iter().collect();
 }
 

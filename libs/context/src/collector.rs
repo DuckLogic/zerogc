@@ -85,7 +85,7 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
         owner: &Gc<'gc, O, CollectorId<Self>>,
         value: &Gc<'gc, V, CollectorId<Self>>,
         field_offset: usize
-    ) where O: GcSafe<'gc, CollectorId<Self>> + ?Sized + 'gc, V: GcSafe<'gc, CollectorId<Self>> + ?Sized + 'gc;
+    ) where O: GcSafe<'gc, CollectorId<Self>> + ?Sized, V: GcSafe<'gc, CollectorId<Self>> + ?Sized;
     /// The logger associated with this collector
     fn logger(&self) -> &Logger;
 
@@ -302,21 +302,20 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     type System = CollectorRef<C>;
     type RawVecRepr<'gc> = C::RawVecRepr<'gc>;
     // TODO: What if clients want to customize this?
-    type ArrayRepr<'gc, T: 'gc> = zerogc::array::repr::ThinArrayRepr<'gc, T, Self>;
+    type ArrayRepr<'gc, T> = zerogc::array::repr::ThinArrayRepr<'gc, T, Self>;
 
     #[inline]
-    fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self where T: ?Sized + 'gc, 'gc: 'a {
+    fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self where T: ?Sized, 'gc: 'a {
         C::id_for_gc(gc)
     }
 
     #[inline]
-    fn resolve_array_id<'a, 'gc, T>(gc: &'a Self::ArrayRepr<'gc, T>) -> &'a Self where T: 'gc, 'gc: 'a {
+    fn resolve_array_id<'a, 'gc, T>(gc: &'a Self::ArrayRepr<'gc, T>) -> &'a Self where 'gc: 'a {
         C::id_for_array(gc)
     }
 
     #[inline]
-    fn resolve_array_len<'gc, T>(repr: &ThinArrayRepr<'gc, T, Self>) -> usize
-        where T: 'gc {
+    fn resolve_array_len<'gc, T>(repr: &ThinArrayRepr<'gc, T, Self>) -> usize {
         C::resolve_array_len(repr)
     }
 
@@ -325,7 +324,7 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
         owner: &Gc<'gc, O, Self>,
         value: &Gc<'gc, V, Self>,
         field_offset: usize
-    ) where O: GcSafe<'gc, Self> + ?Sized + 'gc, V: GcSafe<'gc, Self> + ?Sized + 'gc {
+    ) where O: GcSafe<'gc, Self> + ?Sized, V: GcSafe<'gc, Self> + ?Sized {
         C::gc_write_barrier(owner, value, field_offset)
     }
 
@@ -341,7 +340,7 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
 }
 unsafe impl<C: ~const ConstRawCollectorImpl> const zerogc::internals::ConstCollectorId for CollectorId<C> {
     #[inline]
-    fn resolve_array_len_const<'gc, T>(repr: &Self::ArrayRepr<'gc, T>) -> usize where T: 'gc {
+    fn resolve_array_len_const<'gc, T>(repr: &Self::ArrayRepr<'gc, T>) -> usize {
         C::resolve_array_len_const(repr)
     }
 }
@@ -390,8 +389,8 @@ impl<C: RawCollectorImpl> WeakCollectorRef<C> {
 }
 
 pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
-    unsafe fn alloc_uninit<'gc, T: GcSafe<'gc, CollectorId<Self>>>(context: &'gc CollectorContext<Self>) -> (CollectorId<Self>, *mut T);
-    unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> (CollectorId<Self>, *mut T)
+    unsafe fn alloc_uninit<'gc, T: GcSafe<'gc, CollectorId<Self>>>(context: &'gc CollectorContext<Self>) -> *mut T;
+    unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> *mut T
         where T: GcSafe<'gc, CollectorId<Self>>;
     fn alloc_vec<'gc, T>(context: &'gc CollectorContext<Self>) -> GcVec<'gc, T, CollectorContext<Self>>
         where T: GcSafe<'gc, CollectorId<Self>>;
@@ -401,24 +400,24 @@ pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
 unsafe impl<C> GcSimpleAlloc for CollectorContext<C>
     where C: RawSimpleAlloc {
     #[inline]
-    unsafe fn alloc_uninit<'gc, T>(&'gc self) -> (CollectorId<C>, *mut T)
-        where T: GcSafe<'gc, CollectorId<C>> + 'gc {
+    unsafe fn alloc_uninit<'gc, T>(&'gc self) -> *mut T
+        where T: GcSafe<'gc, CollectorId<C>> {
         C::alloc_uninit(self)
     }
 
     #[inline]
-    unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> (Self::Id, *mut T)
-        where T: GcSafe<'gc, CollectorId<C>> + 'gc {
+    unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> *mut T
+        where T: GcSafe<'gc, CollectorId<C>> {
         C::alloc_uninit_slice(self, len)
     }
 
     #[inline]
-    fn alloc_vec<'gc, T>(&'gc self) -> GcVec<'gc, T, Self> where T: GcSafe<'gc, CollectorId<C>> + 'gc {
+    fn alloc_vec<'gc, T>(&'gc self) -> GcVec<'gc, T, Self> where T: GcSafe<'gc, CollectorId<C>> {
         C::alloc_vec(self)
     }
 
     #[inline]
-    fn alloc_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> GcVec<'gc, T, Self> where T: GcSafe<'gc, CollectorId<C>> + 'gc {
+    fn alloc_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> GcVec<'gc, T, Self> where T: GcSafe<'gc, CollectorId<C>> {
         C::alloc_vec_with_capacity(self, capacity)
     }
 }

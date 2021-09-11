@@ -54,7 +54,7 @@ pub unsafe trait GcArrayRepr<'gc, T>: Copy + sealed::Sealed {
     /// The combination of pointer + length must be valid. 
     unsafe fn from_raw_parts(ptr: NonNull<T>, len: usize) -> Self;
     /// Convert the value to a slice
-    fn as_slice(&self) -> &'gc [T];
+    fn as_slice<'a>(&self) -> &'a [T] where 'gc: 'a;
     /// Get a raw pointer to this array's elements.
     fn as_raw_ptr(&self) -> *mut T;
     /// Get the length of this value
@@ -67,7 +67,7 @@ pub unsafe trait GcArrayRepr<'gc, T>: Copy + sealed::Sealed {
 /// This type is guaranteed to be compatible with `&[T]`.
 /// Transmuting back and forth is safe.
 #[repr(transparent)]
-pub struct FatArrayRepr<'gc, T: 'gc, Id: CollectorId> {
+pub struct FatArrayRepr<'gc, T, Id: CollectorId> {
     slice: NonNull<[T]>,
     marker: PhantomData<Gc<'gc, [T], Id>>
 }
@@ -104,7 +104,7 @@ unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for FatArrayRepr<'gc, T
     }
 
     #[inline]
-    fn as_slice(&self) -> &'gc [T] {
+    fn as_slice<'a>(&self) -> &'a [T] where 'gc: 'a {
         unsafe { &*self.slice.as_ptr() }
     }
 
@@ -127,7 +127,7 @@ unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for FatArrayRepr<'gc, T
 /// and can be transmuted back and forth
 /// (assuming the appropriate invariants are met).
 #[repr(transparent)]
-pub struct ThinArrayRepr<'gc, T: 'gc, Id: CollectorId> {
+pub struct ThinArrayRepr<'gc, T, Id: CollectorId> {
     elements: NonNull<T>,
     marker: PhantomData<Gc<'gc, [T], Id>>    
 }
@@ -152,7 +152,7 @@ unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for ThinArrayRepr<'gc, 
         res
     }
     #[inline]
-    fn as_slice(&self) -> &'gc [T] {
+    fn as_slice<'a>(&self) -> &'a [T] where 'gc: 'a {
         unsafe { core::slice::from_raw_parts(
             self.elements.as_ptr(),
             self.len()

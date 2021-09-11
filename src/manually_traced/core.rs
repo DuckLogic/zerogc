@@ -186,8 +186,8 @@ unsafe_gc_impl! {
         Trace => always,
         TraceImmutable => always,
         TrustedDrop => always,
-        GcSafe => { where T: 'gc },
-        GcRebrand => { where T: 'new_gc },
+        GcSafe => always,
+        GcRebrand => always,
     },
     branded_type => Self,
     null_trace => always,
@@ -228,9 +228,9 @@ unsafe_gc_impl! {
         Trace => { where T: TraceImmutable },
         TraceImmutable => { where T: TraceImmutable },
         TrustedDrop => { where T: TraceImmutable /* NOTE: We are Copy, so dont' have any drop to trust */ },
-        GcSafe => { where 'a: 'gc, T: TraceImmutable + GcSafe<'gc, Id> },
+        GcSafe => { where T: TraceImmutable + GcSafe<'gc, Id> },
         /*
-         * TODO: Right now we require `NullTrace`
+         * TODO: Right now we require `NullTrace`. Can we weaken this?
          *
          * This is unfortunately required by our bounds, since we don't know
          * that `T::Branded` lives for &'a making `&'a T::Branded` invalid
@@ -239,7 +239,7 @@ unsafe_gc_impl! {
          * Therefore the only solution is to preserve `&'a T` as-is,
          * which is only safe if `T: NullTrace`
          */
-        GcRebrand => { where T: NullTrace + GcSafe<'new_gc, Id>, 'a: 'new_gc },
+        GcRebrand => { where T: NullTrace + GcSafe<'new_gc, Id> },
     },
     branded_type => &'a T,
     null_trace => { where T: NullTrace },
@@ -256,7 +256,7 @@ unsafe_gc_impl!(
     target => Cell<T>,
     params => [T: NullTrace],
     bounds => {
-        GcRebrand => { where T: NullTrace + GcSafe<'new_gc, Id>, T: 'new_gc },
+        GcRebrand => { where T: NullTrace + GcSafe<'new_gc, Id> },
     },
     branded_type => Self,
     null_trace => always,
@@ -271,7 +271,7 @@ unsafe_gc_impl!(
     target => RefCell<T>,
     params => [T: NullTrace],
     bounds => {
-        GcRebrand => { where T: GcSafe<'new_gc, Id> + NullTrace, T: 'new_gc },
+        GcRebrand => { where T: GcSafe<'new_gc, Id> + NullTrace }
     },
     branded_type => Self,
     null_trace => always,
@@ -293,14 +293,14 @@ unsafe_gc_impl! {
     target => &'a mut T,
     params => ['a, T: 'a],
     bounds => {
-        GcSafe => { where 'a: 'gc, T: GcSafe<'gc, Id> },
+        GcSafe => { where T: GcSafe<'gc, Id> },
         /*
          * TODO: Right now we require `NullTrace`
          *
          * This is the same reasoning as the requirements for `&'a T`.
          * See their comments for details.....
          */
-        GcRebrand => { where T: NullTrace + GcSafe<'new_gc, Id>, 'a: 'new_gc },
+        GcRebrand => { where T: NullTrace + GcSafe<'new_gc, Id>, },
     },
     branded_type => &'a mut T,
     null_trace => { where T: NullTrace },
@@ -323,7 +323,7 @@ unsafe_gc_impl! {
     bounds => {
         GcRebrand => never,
         visit_inside_gc => where Visitor: crate::GcVisitor, ActualId: crate::CollectorId,
-            [T]: GcSafe<'actual_gc, ActualId> + 'actual_gc
+            [T]: GcSafe<'actual_gc, ActualId>
     },
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,

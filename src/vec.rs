@@ -149,9 +149,9 @@ pub struct InsufficientCapacityError;
 /// To avoid undefined behavior, there can only be a single reference
 /// to a [RawGcVec], despite [Gc] implementing `Copy`.
 #[repr(transparent)]
-pub struct GcRawVec<'gc, T: GcSafe<'gc, Id> + 'gc, Id: CollectorId> {
+pub struct GcRawVec<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
     repr: Gc<'gc, Id::RawVecRepr<'gc>, Id>,
-    marker: PhantomData<&'gc [T]>
+    marker: PhantomData<Gc<'gc, T, Id>>,
 }
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcRawVec<'gc, T, Id> {
     /// Create a [RawGcVec] from the specified repr
