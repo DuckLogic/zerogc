@@ -138,3 +138,5 @@ mod indexmap;
 mod parking_lot;
 #[cfg(feature = "arrayvec")]
 mod arrayvec;
+#[cfg(feature = "anyhow")]
+mod anyhow;
