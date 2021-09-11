@@ -1104,7 +1104,7 @@ pub unsafe trait TrustedDrop: Trace {}
 /// The `Id` parameter allows mixing and matching pointers from different collectors,
 /// each with their own 'gc lifetime.
 /// For example,
-/// ```
+/// ```ignore // TODO: Support this. See issue #33
 /// # use zerogc::{Gc, CollectorId, GcSafe};
 /// # use zerogc_derive::Trace;
 /// # type JsGcId = zerogc::epsilon::EpsilonCollectorId;
