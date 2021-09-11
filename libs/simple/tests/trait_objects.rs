@@ -20,7 +20,7 @@ trait Foo<'gc>: DynTrace<'gc, SimpleCollectorId> {
 }
 trait_object_trace!(
     impl<'gc,> Trace for dyn Foo<'gc>;
-    Branded<'new_gc> => dyn Foo<'new_gc>,
+    Branded<'new_gc> => (dyn Foo<'new_gc> + 'new_gc),
     collector_id => SimpleCollectorId,
     gc_lifetime => 'gc
 );
@@ -29,7 +29,7 @@ fn foo<'gc, T: ?Sized + Trace + Foo<'gc>>(t: &T) -> i32 {
     assert_eq!(t.method(), 12);
     t.method() * 2
 }
-fn bar<'gc>(gc: Gc<'gc, dyn Foo + 'gc>) -> i32 {
+fn bar<'gc>(gc: Gc<'gc, dyn Foo<'gc> + 'gc>) -> i32 {
     foo(gc.value())
 }
 #[derive(Trace)]
@@ -40,11 +40,11 @@ struct Bar<'gc> {
 }
 impl<'gc> Foo<'gc> for Bar<'gc> {
     fn method(&self) -> i32 {
-       **self.val
+       *self.val
     }
     fn validate(&self) {
-        assert_eq!(**self.val, 12);
-        assert_eq!(**self.inner.unwrap().val, 4);
+        assert_eq!(*self.val, 12);
+        assert_eq!(*self.inner.unwrap().val, 4);
     }
 }
 impl<'gc> Drop for Bar<'gc> {

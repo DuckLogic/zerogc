@@ -23,11 +23,19 @@ zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.5" }
 # Used for the "epsilon" no-op collector
 bumpalo = { version = "3", optional = true }
 
+[[test]]
+name = "errors"
+required-features = ["errors"]
+
+
 [dev-dependencies]
 serde_json = "1"
 # Used to test custom hash function
 # support for IndexMap
 fnv = "1"
+# Used to test the 'error' type
+anyhow = "1"
+thiserror = "1"
 
 [workspace]
 members = ["libs/simple", "libs/derive", "libs/context"]
@@ -43,6 +51,9 @@ std = ["alloc"]
 #
 # This implements `Trace` for `Box` and collections like `Vec`
 alloc = []
+# Support a 'GcError' type that implements 'std::error::Error'
+# by wrapping a 'GcHandle'
+errors = []
 # Serde support
 serde1 = ["serde", "zerogc-derive/__serde-internal", "arrayvec/serde", "indexmap/serde-1"]
 # Support the "epsilon" no-op collector

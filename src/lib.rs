@@ -17,6 +17,7 @@
     const_slice_from_raw_parts,
     const_transmute_copy,
 )]
+#![cfg_attr(feature="error", backtrace)]
 #![feature(maybe_uninit_slice)]
 #![feature(new_uninit)]
 #![deny(missing_docs)]
@@ -469,6 +470,20 @@ pub unsafe trait GcSimpleAlloc: GcContext {
         unsafe { array::GcString::from_utf8_unchecked(bytes) }
     }
 
+    /// Wrap the specified error in a dynamically dispatched [GcError](`self::errors::GcError`)
+    ///
+    /// Uses a [GcHandle] to ensure the result lives for `'static`,
+    /// and thus can implement `std::error::Error` and conversion into `anyhow::Error`.
+    #[cfg(feature = "errors")]
+    #[cold]
+    fn alloc_error<'gc, T>(&'gc self, src: T) -> crate::errors::GcError<Self::Id>
+        where T: crate::errors::GcErrorType<'gc, Self::Id>,
+            <T as GcRebrand<'static, Self::Id>>::Branded: 'static,
+            Self::Id: HandleCollectorId {
+        crate::errors::GcError::from_gc_allocated(self.alloc(src))
+
+    }
+
     /// Allocate a slice with the specified length,
     /// whose memory is uninitialized
     ///
@@ -904,23 +919,23 @@ impl<'gc, T: GcSafe<'gc, Id> + Ord, Id: CollectorId> Ord for Gc<'gc, T, Id> {
         self.value().cmp(other)
     }
 }
-impl<'gc, T: GcSafe<'gc, Id> + Debug, Id: CollectorId> Debug for Gc<'gc, T, Id> {
+impl<'gc, T: ?Sized + GcSafe<'gc, Id> + Debug, Id: CollectorId> Debug for Gc<'gc, T, Id> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         if !f.alternate() {
             // Pretend we're a newtype by default
-            f.debug_tuple("Gc").field(self.value()).finish()
+            f.debug_tuple("Gc").field(&self.value()).finish()
         } else {
             // Alternate spec reveals `collector_id`
             f.debug_struct("Gc")
                 .field("collector_id", &self.collector_id)
-                .field("value", self.value())
+                .field("value", &self.value())
                 .finish()
         }
     }
 }
-impl<'gc, T: GcSafe<'gc, Id> + Display, Id: CollectorId> Display for Gc<'gc, T, Id> {
+impl<'gc, T: ?Sized + GcSafe<'gc, Id> + Display, Id: CollectorId> Display for Gc<'gc, T, Id> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        Display::fmt(self.value(), f)
+        Display::fmt(&self.value(), f)
     }
 }
 
