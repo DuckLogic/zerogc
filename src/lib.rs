@@ -55,7 +55,7 @@ use core::ops::{Deref, DerefMut, CoerceUnsized};
 use core::ptr::{NonNull, Pointee, DynMetadata};
 use core::marker::{PhantomData, Unsize};
 use core::hash::{Hash, Hasher};
-use core::fmt::{self, Debug, Formatter};
+use core::fmt::{self, Debug, Formatter, Display};
 use core::cmp::Ordering;
 
 use zerogc_derive::unsafe_gc_impl;
@@ -858,13 +858,13 @@ impl<'gc, T: ?Sized, Id: CollectorId> Clone for Gc<'gc, T, Id> {
     }
 }
 // Delegating impls
-impl<'gc, T: GcSafe<'gc, Id> + Hash + 'gc, Id: CollectorId> Hash for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + Hash, Id: CollectorId> Hash for Gc<'gc, T, Id> {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.value().hash(state)
     }
 }
-impl<'gc, T: GcSafe<'gc, Id> + PartialEq + 'gc, Id: CollectorId> PartialEq for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + PartialEq, Id: CollectorId> PartialEq for Gc<'gc, T, Id> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         // NOTE: We compare by value, not identity
@@ -875,8 +875,8 @@ impl<'gc, T: GcSafe<'gc, Id> + PartialEq + 'gc, Id: CollectorId> PartialEq for G
         self.value() != other.value()
     }
 }
-impl<'gc, T: GcSafe<'gc, Id> + Eq + 'gc, Id: CollectorId> Eq for Gc<'gc, T, Id> {}
-impl<'gc, T: GcSafe<'gc, Id> + PartialEq + 'gc, Id: CollectorId> PartialEq<T> for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + Eq, Id: CollectorId> Eq for Gc<'gc, T, Id> {}
+impl<'gc, T: GcSafe<'gc, Id> + PartialEq, Id: CollectorId> PartialEq<T> for Gc<'gc, T, Id> {
     #[inline]
     fn eq(&self, other: &T) -> bool {
         self.value() == other
@@ -886,25 +886,25 @@ impl<'gc, T: GcSafe<'gc, Id> + PartialEq + 'gc, Id: CollectorId> PartialEq<T> fo
         self.value() != other
     }
 }
-impl<'gc, T: GcSafe<'gc, Id> + PartialOrd + 'gc, Id: CollectorId> PartialOrd for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + PartialOrd, Id: CollectorId> PartialOrd for Gc<'gc, T, Id> {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.value().partial_cmp(other.value())
     }
 }
-impl<'gc, T: GcSafe<'gc, Id> + PartialOrd + 'gc, Id: CollectorId> PartialOrd<T> for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + PartialOrd, Id: CollectorId> PartialOrd<T> for Gc<'gc, T, Id> {
     #[inline]
     fn partial_cmp(&self, other: &T) -> Option<Ordering> {
         self.value().partial_cmp(other)
     }
 }
-impl<'gc, T: GcSafe<'gc, Id> + Ord + 'gc, Id: CollectorId> Ord for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + Ord, Id: CollectorId> Ord for Gc<'gc, T, Id> {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         self.value().cmp(other)
     }
 }
-impl<'gc, T: GcSafe<'gc, Id> + Debug + 'gc, Id: CollectorId> Debug for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + Debug, Id: CollectorId> Debug for Gc<'gc, T, Id> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         if !f.alternate() {
             // Pretend we're a newtype by default
@@ -916,6 +916,11 @@ impl<'gc, T: GcSafe<'gc, Id> + Debug + 'gc, Id: CollectorId> Debug for Gc<'gc, T
                 .field("value", self.value())
                 .finish()
         }
+    }
+}
+impl<'gc, T: GcSafe<'gc, Id> + Display, Id: CollectorId> Display for Gc<'gc, T, Id> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Display::fmt(self.value(), f)
     }
 }
 
