@@ -10,6 +10,7 @@
 
 mod layout;
 mod alloc;
+mod handle;
 
 use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, TrustedDrop, internals::ConstCollectorId};
 use std::ptr::NonNull;
@@ -31,7 +32,7 @@ use self::alloc::{EpsilonAlloc};
 ///
 /// TODO: Rename??
 #[inline]
-pub const fn gc<'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'gc>(ptr: &'gc T) -> Gc<'gc, T> {
+pub const fn gc<'gc, T: ?Sized + GcSafe<'gc, EpsilonCollectorId> + 'gc>(ptr: &'gc T) -> Gc<'gc, T> {
     /*
      * SAFETY: Epsilon never collects unless explicitly added to
      * the linked list of allocated objects.
