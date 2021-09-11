@@ -1,15 +1,16 @@
 //! Implementation of [::zerogc::GcHandle]
 //!
 //! Inspired by [Mono's Lock free Gc Handles](https://www.mono-project.com/news/2016/08/16/lock-free-gc-handles/)
-use core::ptr::{self, NonNull};
+use core::ptr::{self, NonNull, Pointee};
+use core::mem;
 use core::marker::PhantomData;
 use core::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use zerogc::{Trace, GcSafe, GcRebrand, GcVisitor, NullTrace, TraceImmutable, GcHandleSystem, GcBindHandle};
-use crate::{Gc, WeakCollectorRef, CollectorId, CollectorContext, CollectorRef, CollectionManager};
+use zerogc::{GcRebrand, GcSafe, GcVisitor, HandleCollectorId, NullTrace, Trace, TraceImmutable, TrustedDrop};
+use crate::{Gc, WeakCollectorRef, CollectorId, CollectorRef, CollectionManager};
 use crate::collector::RawCollectorImpl;
 
 const INITIAL_HANDLE_CAPACITY: usize = 64;
@@ -20,6 +21,10 @@ pub unsafe trait RawHandleImpl: RawCollectorImpl {
     type TypeInfo: Sized;
 
     fn type_info_of<'gc, T: GcSafe<'gc, CollectorId<Self>>>() -> &'static Self::TypeInfo;
+
+    fn resolve_type_info<'gc, T: ?Sized + GcSafe<'gc, CollectorId<Self>>>(
+        gc: Gc<'gc, T, CollectorId<Self>>
+    ) -> &'static Self::TypeInfo;
 
     fn handle_list(&self) -> &GcHandleList<Self>;
 }
@@ -397,24 +402,41 @@ impl<C: RawHandleImpl> GcRawHandle<C> {
         trace(value, type_info)
     }
 }
-pub struct GcHandle<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> {
+pub struct GcHandle<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> {
     inner: NonNull<GcRawHandle<C>>,
     collector: WeakCollectorRef<C>,
+    /// The pointer metadata for the type.
+    ///
+    /// Assumed to be immutable
+    /// and not change 
+    /// SAFETY:
+    /// 1. slices - Length never changes
+    /// 2. dyn pointers - Never needs 
+    metadata: <T as Pointee>::Metadata,
     marker: PhantomData<*mut T>
 }
-impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> GcHandle<T, C> {
+impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> GcHandle<T, C> {
     #[inline]
     pub(crate) unsafe fn new(
         inner: NonNull<GcRawHandle<C>>,
-        collector: WeakCollectorRef<C>
+        collector: WeakCollectorRef<C>,
+        metadata: <T as Pointee>::Metadata
     ) -> Self {
         GcHandle {
-            inner, collector,
+            inner, collector, metadata,
             marker: PhantomData
         }
     }
+    #[inline]
+    unsafe fn assume_valid(&self) -> *mut T {
+        ptr::from_raw_parts_mut(
+            self.inner.as_ref().value
+                .load(Ordering::Acquire) as *mut (),
+            self.metadata
+        )
+    }
 }
-unsafe impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C> {
+unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> ::zerogc::GcHandle<T> for GcHandle<T, C> {
     type System = CollectorRef<C>;
     type Id = CollectorId<C>;
 
@@ -430,19 +452,17 @@ unsafe impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> ::zerogc::GcHa
              * since that could starve writers (collectors).
              */
             C::Manager::prevent_collection(collector.as_ref(), || {
-                let value = self.inner.as_ref().value
-                    .load(Ordering::Acquire) as *mut T;
+                let value = self.assume_valid();
                 func(&*value)
             })
         })
     }
-}
-unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
-    where T: GcSafe<'static, CollectorId<C>>, T: GcRebrand<'new_gc, CollectorId<C>>, T::Branded: Sized,
-          T::Branded: GcSafe<'new_gc, CollectorId<C>>,
-          C: RawHandleImpl {
     #[inline]
-    fn bind_to(&self, context: &'new_gc CollectorContext<C>) -> Gc<'new_gc, T::Branded, CollectorId<C>> {
+    fn bind_to<'new_gc>(
+        &self,
+        context: &'new_gc <Self::System as zerogc::GcSystem>::Context
+    ) -> Gc<'new_gc, <T as GcRebrand<'new_gc, Self::Id>>::Branded, Self::Id>
+        where T: GcRebrand<'new_gc, Self::Id> {
         /*
          * We can safely assume the object will
          * be as valid as long as the context.
@@ -464,15 +484,20 @@ unsafe impl<'new_gc, T, C> GcBindHandle<'new_gc, T> for GcHandle<T, C>
                 "Collectors mismatch"
             );
             let inner = self.inner.as_ref();
-            let value = inner.value.load(Ordering::Acquire)
-                as *mut T as *mut T::Branded;
+            /*
+             * NOTE: Can't use regular pointer-cast
+             * because of potentially mismatched vtables.
+             */
+            let value = crate::utils::transmute_mismatched::<
+                *mut T,
+                *mut T::Branded
+            >(self.assume_valid());
             debug_assert!(!value.is_null());
             Gc::from_raw(NonNull::new_unchecked(value))
         }
     }
-
 }
-unsafe impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Trace for GcHandle<T, C> {
+unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Trace for GcHandle<T, C> {
     /// See docs on reachability
     const NEEDS_TRACE: bool = false;
     const NEEDS_DROP: bool = true;
@@ -489,15 +514,18 @@ unsafe impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Trace for GcHa
         visitor.trace_gc(gc)
     }
 }
-unsafe impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> TraceImmutable for GcHandle<T, C> {
+unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> TraceImmutable for GcHandle<T, C> {
     #[inline(always)]
     fn trace_immutable<V>(&self, _visitor: &mut V) -> Result<(), V::Err>
         where V: GcVisitor {
         Ok(())
     }
 }
-unsafe impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> NullTrace for GcHandle<T, C> {}
-impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Clone for GcHandle<T, C> {
+unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> NullTrace for GcHandle<T, C> {}
+unsafe impl<'gc, T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl>
+    GcSafe<'gc, CollectorId<C>> for GcHandle<T, C> {}
+unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> TrustedDrop for GcHandle<T, C> {}
+impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Clone for GcHandle<T, C> {
     fn clone(&self) -> Self {
         // NOTE: Dead collector -> invalid handle
         let collector = self.collector
@@ -536,11 +564,12 @@ impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Clone for GcHandle<T,
         }
         GcHandle {
             inner: self.inner,
+            metadata: self.metadata,
             collector, marker: PhantomData
         }
     }
 }
-impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Drop for GcHandle<T, C> {
+impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Drop for GcHandle<T, C> {
     fn drop(&mut self) {
         self.collector.try_ensure_valid(|id| {
             let collector = match id {
@@ -594,24 +623,23 @@ impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Drop for GcHandle<T, 
 /// This is the same reason that `Arc<T>: Send` requires `T: Sync`
 ///
 /// Requires that the collector is thread-safe.
-unsafe impl<T: GcSafe<'static, CollectorId<C>> + Sync, C: RawHandleImpl + Sync> Send for GcHandle<T, C> {}
+unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>> + Sync, C: RawHandleImpl + Sync> Send for GcHandle<T, C> {}
 
 /// If the underlying type is Sync,
 /// it's safe to share garbage collected references between threads.
 ///
 /// Requires that the collector is thread-safe.
-unsafe impl<T: GcSafe<'static, CollectorId<C>> + Sync, C: RawHandleImpl + Sync> Sync for GcHandle<T, C> {}
+unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>> + Sync, C: RawHandleImpl + Sync> Sync for GcHandle<T, C> {}
 
 /// We support handles
-unsafe impl<'gc, T, C> GcHandleSystem<'gc, T> for CollectorRef<C>
-    where C: RawHandleImpl,
-          T: GcSafe<'gc, CollectorId<C>>,
-          T: GcRebrand<'static, CollectorId<C>>,
-          T::Branded: GcSafe<'static, CollectorId<C>> + Sized {
-    type Handle = GcHandle<T::Branded, C>;
+unsafe impl<C> HandleCollectorId for CollectorId<C>
+    where C: RawHandleImpl {
+    type Handle<T: GcSafe<'static, Self> + ?Sized> = GcHandle<T, C>;
+
 
     #[inline]
-    fn create_handle(gc: Gc<'gc, T, CollectorId<C>>) -> Self::Handle {
+    fn create_handle<'gc, T>(gc: Gc<'gc, T, CollectorId<C>>) -> Self::Handle<T::Branded> 
+        where T: ?Sized + GcSafe<'gc, Self> + GcRebrand<'static, Self>, T::Branded: GcSafe<'static, Self> {
         unsafe {
             let collector = gc.collector_id();
             let value = gc.as_raw_ptr();
@@ -623,14 +651,18 @@ unsafe impl<'gc, T, C> GcHandleSystem<'gc, T> for CollectorRef<C>
              * the handle!!!
              */
             raw.type_info.store(
-                C::type_info_of::<T>()
+                C::resolve_type_info(gc)
                     as *const C::TypeInfo
                     as *mut C::TypeInfo,
                 Ordering::Release
             );
             raw.refcnt.store(1, Ordering::Release);
             let weak_collector = collector.weak_ref();
-            GcHandle::new(NonNull::from(raw), weak_collector)
+            let metadata = crate::utils::transmute_mismatched::<
+                <T as Pointee>::Metadata,
+                <T::Branded as Pointee>::Metadata
+            >(ptr::metadata(value));
+            GcHandle::new(NonNull::from(raw), weak_collector, metadata)
         }
     }
 }

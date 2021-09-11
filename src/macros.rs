@@ -30,7 +30,7 @@
 /// }
 /// impl<'gc> Foo<'gc> for Bar<'gc> {
 ///     fn method(&self) -> i32 {
-///        **self.val
+///        *self.val
 ///     }
 /// }
 /// let val = epsilon::leaked(12);
@@ -68,7 +68,7 @@ macro_rules! trait_object_trace {
                 visitor.trace_trait_object(gc)
             }
         }
-        unsafe impl<$branded_lt, $($($lt,)* $($param:ident,)*)?> $crate::GcRebrand<$branded_lt, $collector_id> for dyn $target $(where $($where_clause)*)? {
+        unsafe impl<$branded_lt, $($($lt,)* $($param:ident,)*)?> $crate::GcRebrand<$branded_lt, $collector_id> for (dyn $target + $gc_lt) $(where $($where_clause)*)? {
             type Branded = $branded;
         }
     }

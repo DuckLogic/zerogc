@@ -4,6 +4,7 @@
     const_fn_trait_bound, // So generics + const fn are unstable, huh?
     generic_associated_types, // Finally!
     const_trait_impl,
+    ptr_metadata
 )]
 #![allow(
     clippy::missing_safety_doc, // Entirely internal code

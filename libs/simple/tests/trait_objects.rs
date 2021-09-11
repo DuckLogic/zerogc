@@ -2,7 +2,6 @@
 use core::cell::Cell;
 
 use zerogc::{Trace, safepoint, DynTrace, trait_object_trace, GcSimpleAlloc};
-use zerogc_derive::Trace;
 
 use zerogc_simple::{SimpleCollector, Gc, CollectorId as SimpleCollectorId, GcConfig};
 use slog::Logger;

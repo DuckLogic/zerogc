@@ -3,7 +3,6 @@
 )]
 use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, epsilon::{self, EpsilonCollectorId}};
 
-use zerogc_derive::{Trace, NullTrace};
 use zerogc::cell::GcCell;
 use std::marker::PhantomData;
 use std::fmt::Debug;

@@ -78,6 +78,8 @@ pub mod epsilon;
 pub mod array;
 pub mod vec;
 pub mod internals;
+#[cfg(feature = "errors")]
+pub mod errors;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.
@@ -182,7 +184,7 @@ macro_rules! __recurse_context {
 /// # // TODO: Can we please get support for non-Sized types like `String`?!?!?!
 /// let root = zerogc::epsilon::leaked(String::from("potato"));
 /// let root = safepoint!(context, root);
-/// assert_eq!(**root, "potato");
+/// assert_eq!(*root, "potato");
 /// ```
 ///
 /// ## Safety
@@ -244,26 +246,6 @@ pub unsafe trait GcSystem {
     type Context: GcContext<Id=Self::Id>;
 }
 
-
-/// A system which supports creating handles to [Gc] references.
-///
-/// This type-system hackery is needed because
-/// we need to place bounds on `T as GcBrand`
-// TODO: Remove when we get more powerful types
-pub unsafe trait GcHandleSystem<'gc, T: GcSafe<'gc, Self::Id> + ?Sized>: GcSystem
-    where T: GcRebrand<'static, Self::Id> {
-    /// The type of handles to this object.
-    type Handle: GcHandle<<T as GcRebrand<'static, Self::Id>>::Branded, System=Self, Id=Self::Id>;
-
-    /// Create a handle to the specified GC pointer,
-    /// which can be used without a context
-    ///
-    /// NOTE: Users should only use from [Gc::create_handle].
-    ///
-    /// The system is implicit in the [Gc]
-    #[doc(hidden)]
-    fn create_handle(gc: Gc<'gc, T, Self::Id>) -> Self::Handle;
-}
 
 /// The context of garbage collection,
 /// which can be frozen at a safepoint.
@@ -614,6 +596,27 @@ impl<C: GcContext> FrozenContext<C> {
 /// A trait alias for [CollectorId]s that support [SimpleGcALloc]
 pub trait SimpleAllocCollectorId = CollectorId where <<Self as CollectorId>::System as GcSystem>::Context: GcSimpleAlloc;
 
+/// A [CollectorId] that supports allocating [GcHandle]s
+///
+/// Not all collectors necessarily support handles.
+pub unsafe trait HandleCollectorId: CollectorId {
+    /// The type of [GcHandle] for this collector.
+    ///
+    /// This is parameterized by the *erased* type,
+    /// not by the original type.
+    type Handle<T>: GcHandle<T, System=Self::System, Id=Self>
+        where T: GcSafe<'static, Self> + ?Sized;
+
+    /// Create a handle to the specified GC pointer,
+    /// which can be used without a context
+    ///
+    /// NOTE: Users should only use from [Gc::create_handle].
+    ///
+    /// The system is implicit in the [Gc]
+    #[doc(hidden)]
+    fn create_handle<'gc, T>(gc: Gc<'gc, T, Self>) -> Self::Handle<T::Branded>
+        where T: GcSafe<'gc, Self> + GcRebrand<'static, Self> + ?Sized;
+}
 
 /// Uniquely identifies the collector in case there are
 /// multiple collectors.
@@ -635,7 +638,7 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
     ///
     /// May be [crate::vec::repr::VecUnsupported] if vectors are unsupported.
     type RawVecRepr<'gc>: crate::vec::repr::GcVecRepr<'gc, Id=Self>;
-    /// The raw reprsentation of `GcArray` pointers
+    /// The raw representation of `GcArray` pointers
     /// in this collector.
     type ArrayRepr<'gc, T>: ~const crate::array::repr::GcArrayRepr<'gc, T, Id=Self>;
 
@@ -707,8 +710,9 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
 /// This ownership can be thought of in terms of the following (simpler) system.
 /// ```no_run
 /// # trait GcSafe{}
+/// # use core::marker::PhantomData;
 /// struct GcSystem {
-///     values: Vec<dyn GcSafe>
+///     values: Vec<Box<dyn GcSafe>>
 /// }
 /// struct Gc<'gc, T: GcSafe> {
 ///     index: usize,
@@ -749,13 +753,15 @@ impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
     pub unsafe fn from_raw(value: NonNull<T>) -> Self {
         Gc { collector_id: PhantomData, value }
     }
-
-    /// Create a handle to this object, which can be used without a context
+    /// Create a [GcHandle] referencing this object,
+    /// allowing it to be used without a context
+    /// and referenced across safepoints.
+    ///
+    /// Requires that the collector [supports handles](`HandleCollectorId`)
     #[inline]
-    pub fn create_handle(&self) -> <Id::System as GcHandleSystem<'gc, T>>::Handle
-        where Id::System: GcHandleSystem<'gc, T>,
-            T: GcRebrand<'static, Id> {
-        <Id::System as GcHandleSystem<'gc, T>>::create_handle(*self)
+    pub fn create_handle(&self) -> Id::Handle<T::Branded>
+        where Id: HandleCollectorId, T: GcRebrand<'static, Id>  {
+        Id::create_handle(*self)
     }
 
     /// Get a reference to the system
@@ -950,7 +956,8 @@ unsafe impl<'gc, T, Id> Sync for Gc<'gc, T, Id>
 /*
  * TODO: Should we drop the Clone requirement?
  */
-pub unsafe trait GcHandle<T: GcSafe<'static, Self::Id> + ?Sized>: Clone + NullTrace {
+pub unsafe trait GcHandle<T: GcSafe<'static, Self::Id> + ?Sized>: Sized + Clone + NullTrace
+     + for<'gc> GcSafe<'gc, Self::Id> {
     /// The type of the system used with this handle
     type System: GcSystem<Id=Self::Id>;
     /// The type of [CollectorId] used with this sytem
@@ -973,16 +980,7 @@ pub unsafe trait GcHandle<T: GcSafe<'static, Self::Id> + ?Sized>: Clone + NullTr
      * How much does it limit flexibility?
      */
     fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R;
-}
-/// Trait for binding [GcHandle]s to contexts
-/// using [GcBindHandle::bind_to]
-///
-/// This is separate from the [GcHandle] trait
-/// because Rust doesn't have Generic Associated Types
-///
-/// TODO: Remove when we get more powerful types
-pub unsafe trait GcBindHandle<'new_gc, T: GcSafe<'static, Self::Id> + ?Sized>: GcHandle<T>
-    where T: GcRebrand<'new_gc, Self::Id>, {
+
     /// Associate this handle with the specified context,
     /// allowing its underlying object to be accessed
     /// as long as the context is valid.
@@ -991,11 +989,11 @@ pub unsafe trait GcBindHandle<'new_gc, T: GcSafe<'static, Self::Id> + ?Sized>: G
     /// other object that would be allocated from the context.
     /// It'll be properly collected and can even be used as a root
     /// at the next safepoint.
-    fn bind_to(&self, context: &'new_gc <Self::System as GcSystem>::Context) -> Gc<
-        'new_gc,
-        <T as GcRebrand<'new_gc, Self::Id>>::Branded,
-        Self::Id
-    >;
+    fn bind_to<'new_gc>(
+        &self,
+        context: &'new_gc <Self::System as GcSystem>::Context
+    ) -> Gc<'new_gc, <T as GcRebrand<'new_gc, Self::Id>>::Branded, Self::Id>
+        where T: GcRebrand<'new_gc, Self::Id>;
 }
 
 /// Safely trigger a write barrier before
@@ -1085,19 +1083,20 @@ pub unsafe trait TrustedDrop: Trace {}
 ///
 /// For example,
 /// ```
-/// # use zerogc::epsilon::{Gc, GcSystem};
+/// # use zerogc::epsilon::{Gc, EpsilonContext as GcContext, EpsilonCollectorId as CollectorId};
+/// # use zerogc::prelude::*;
 /// #[derive(Trace)]
-/// #[zerogc(ignore_lifetime("'a"))]
+/// #[zerogc(ignore_lifetimes("'a"), collector_ids(CollectorId))]
 /// struct TempLifetime<'gc, 'a> {
 ///     temp: &'a i32,
 ///     gc: Gc<'gc, i32>
 /// }
-/// fn alloc_ref_temp<'gc>(ctx: &'gc GcSystem, long_lived: Gc<'gc, i32>) {
+/// fn alloc_ref_temp<'gc>(ctx: &'gc GcContext, long_lived: Gc<'gc, i32>) {
 ///     let temp = 5; // Lives for 'a (shorter than 'gc)
 ///     let temp_ref = ctx.alloc(TempLifetime {
 ///         temp: &temp, gc: long_lived
 ///     });
-///     assert!(&temp as *const _, &temp_ref.temp as *const _)
+///     assert_eq!(&temp as *const _, temp_ref.temp as *const _)
 /// }
 /// ```
 ///

@@ -230,6 +230,16 @@ unsafe impl RawHandleImpl for RawSimpleCollector {
         <T as StaticGcType>::STATIC_TYPE
     }
 
+    
+    #[inline]
+    fn resolve_type_info<'gc, T: ?Sized + GcSafe<'gc, CollectorId>>(
+        gc: zerogc::Gc<'gc, T, CollectorId>
+    ) -> &'static Self::TypeInfo {
+        unsafe {
+            (*GcHeader::from_value_ptr(gc.as_raw_ptr())).type_info
+        }
+    }
+
     #[inline]
     fn handle_list(&self) -> &GcHandleList<Self> {
         &self.handle_list

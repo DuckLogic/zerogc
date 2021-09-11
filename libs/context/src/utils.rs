@@ -2,6 +2,7 @@
 //!
 //! Also used by some collector implementations.
 use core::fmt::{self, Debug, Formatter, Display};
+use core::mem;
 #[cfg(not(feature = "sync"))]
 use core::cell::Cell;
 
@@ -16,6 +17,24 @@ macro_rules! field_offset {
         };
         OFFSET
     }};
+}
+
+
+/// Transmute between two types,
+/// without verifying that there sizes are the same
+///
+/// ## Safety
+/// This function has undefined behavior if `T` and `U`
+/// have different sizes.
+///
+/// It also has undefined behavior whenever [mem::transmute] has
+/// undefined behavior.
+#[inline]
+pub unsafe fn transmute_mismatched<T, U>(src: T) -> U {
+    // NOTE: This assert has zero cost when monomorphized
+    assert_eq!(mem::size_of::<T>(), mem::size_of::<U>());
+    let d = mem::ManuallyDrop::new(src);
+    mem::transmute_copy::<T, U>(&*d)
 }
 
 #[cfg(feature = "sync")]
