@@ -23,16 +23,17 @@ use crate::prelude::*;
 /// 1. Implement [`std::error::Error`]
 /// 2. Implement [GcSafe]
 /// 3. Implement [`GcRebrand<'static, Id>`](`crate::GcRebrand`)
-/// 4. Have no other lifetimes besides `'gc`
+/// 4. It must be [Sync]
+/// 5. Have no other lifetimes besides `'gc`
 ///
-/// The fourth point is rather subtle.
+/// The fifth point is rather subtle.
 /// Another way of saying it is that `T: 'gc` and `T::Branded: 'static`.
-pub trait GcErrorType<'gc, Id: CollectorId>: StdError + GcSafe<'gc, Id> + 'gc + GcRebrand<'static, Id>
+pub trait GcErrorType<'gc, Id: CollectorId>: StdError + Sync + GcSafe<'gc, Id> + 'gc + GcRebrand<'static, Id>
     + self::sealed::Sealed<Id>
     where <Self as GcRebrand<'static, Id>>::Branded: 'static {}
-impl<'gc, Id: CollectorId, T: StdError + 'gc + GcSafe<'gc, Id> + GcRebrand<'static, Id>> GcErrorType<'gc, Id> for T
+impl<'gc, Id: CollectorId, T: StdError + 'gc + Sync + GcSafe<'gc, Id> + GcRebrand<'static, Id>> GcErrorType<'gc, Id> for T
     where <Self as GcRebrand<'static, Id>>::Branded: 'static {}
-impl<'gc, Id: CollectorId, T: StdError + 'gc + GcSafe<'gc, Id> + GcRebrand<'static, Id>> self::sealed::Sealed<Id> for T
+impl<'gc, Id: CollectorId, T: StdError + 'gc + Sync + GcSafe<'gc, Id> + GcRebrand<'static, Id>> self::sealed::Sealed<Id> for T
     where <Self as GcRebrand<'static, Id>>::Branded: 'static {}
 
 
@@ -44,7 +45,7 @@ impl<'gc, Id: CollectorId, T: StdError + 'gc + GcSafe<'gc, Id> + GcRebrand<'stat
 ///
 /// This is an implementation detail
 #[doc(hidden)]
-pub trait DynGcErrorType<'gc, Id: CollectorId>: StdError + DynTrace<'gc, Id> + self::sealed::Sealed<Id> {}
+pub trait DynGcErrorType<'gc, Id: CollectorId>: Sync + StdError + DynTrace<'gc, Id> + self::sealed::Sealed<Id> {}
 impl<'gc, T: GcErrorType<'gc, Id>, Id: CollectorId> DynGcErrorType<'gc, Id> for T
     where <T as GcRebrand<'static, Id>>::Branded: 'static {}
 

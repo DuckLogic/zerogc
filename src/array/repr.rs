@@ -171,6 +171,23 @@ unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for ThinArrayRepr<'gc, 
     }
 }
 
+/// If the underlying type is `Sync`, it's safe
+/// to share garbage collected references between threads.
+///
+/// The safety of the collector itself depends on whether [CollectorId] is Sync.
+/// If it is, the whole garbage collection implementation should be as well.
+unsafe impl<'gc, T, Id> Sync for ThinArrayRepr<'gc, T, Id>
+    where T: Sync, Id: CollectorId + Sync {}
+unsafe impl<'gc, T, Id> Send for ThinArrayRepr<'gc, T, Id>
+    where T: Sync, Id: CollectorId + Sync {}
+
+
+unsafe impl<'gc, T, Id> Sync for FatArrayRepr<'gc, T, Id>
+    where T: Sync, Id: CollectorId + Sync {}
+unsafe impl<'gc, T, Id> Send for FatArrayRepr<'gc, T, Id>
+    where T: Sync, Id: CollectorId + Sync {}
+
+
 mod sealed {
     pub trait Sealed {}
 }

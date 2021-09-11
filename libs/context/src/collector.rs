@@ -298,6 +298,8 @@ impl<C: RawCollectorImpl> CollectorId<C> {
         WeakCollectorRef { weak: self.ptr.create_weak() }
     }
 }
+unsafe impl<C: SyncCollector> Sync for CollectorId<C> {}
+unsafe impl<C: SyncCollector> Send for CollectorId<C> {}
 unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     type System = CollectorRef<C>;
     type RawVecRepr<'gc> = C::RawVecRepr<'gc>;

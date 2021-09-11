@@ -51,9 +51,18 @@ sync = ["zerogc-context/sync", "parking_lot"]
 # one collector can't be safely mixed with other collectors.
 multiple-collectors = []
 
+[[test]]
+name = "errors"
+required-features = ["sync"]
+
 [dev-dependencies]
 # Used for examples :)
 zerogc-derive = { path = "../derive" }
-# Used for binary_trees parallel examle
+# Used for binary_trees parallel example
 rayon = "1.3"
 slog-term = "2.6"
+# Used to test the 'error' type
+anyhow = "1"
+thiserror = "1"
+zerogc = { path = "../..", features = ["errors"] }
+
