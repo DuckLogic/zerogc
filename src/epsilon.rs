@@ -12,7 +12,7 @@ mod layout;
 mod alloc;
 mod handle;
 
-use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, TrustedDrop, internals::ConstCollectorId};
+use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, Trace, internals::ConstCollectorId};
 use std::ptr::NonNull;
 use std::alloc::Layout;
 use std::rc::Rc;
@@ -384,29 +384,7 @@ unsafe impl GcSimpleAlloc for EpsilonContext {
 pub struct EpsilonCollectorId {
     _priv: ()
 }
-unsafe impl TrustedDrop for EpsilonCollectorId {}
-unsafe impl<'other_gc, OtherId: CollectorId> GcSafe<'other_gc, OtherId> for EpsilonCollectorId {
-    unsafe fn trace_inside_gc<V>(gc: &mut crate::Gc<'other_gc, Self, OtherId>, visitor: &mut V) -> Result<(), V::Err> where V: GcVisitor {
-        visitor.trace_gc(gc)
-    }
-}
-unsafe impl Trace for EpsilonCollectorId {
-    const NEEDS_TRACE: bool = false;
-    const NEEDS_DROP: bool = false;
-
-    #[inline]
-    fn trace<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
-        Ok(())
-    }
-}
-unsafe impl TraceImmutable for EpsilonCollectorId {
-    #[inline]
-    fn trace_immutable<V: GcVisitor>(&self, _visitor: &mut V) -> Result<(), V::Err> {
-        Ok(())
-    }
-}
-
-unsafe impl NullTrace for EpsilonCollectorId {}
+crate::impl_nulltrace_for_static!(EpsilonCollectorId);
 unsafe impl const ConstCollectorId for EpsilonCollectorId {
     #[inline]
     fn resolve_array_len_const<'gc, T>(repr: &Self::ArrayRepr<'gc, T>) -> usize {

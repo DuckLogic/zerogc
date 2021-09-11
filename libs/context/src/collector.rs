@@ -11,7 +11,7 @@ use alloc::sync::Arc;
 use slog::{Logger, o};
 
 use zerogc::array::repr::ThinArrayRepr;
-use zerogc::{Gc, GcSafe, GcSimpleAlloc, GcSystem, GcVisitor, NullTrace, Trace, TraceImmutable, TrustedDrop};
+use zerogc::{Gc, GcSafe, GcSimpleAlloc, GcSystem, Trace};
 
 use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
@@ -346,29 +346,7 @@ unsafe impl<C: ~const ConstRawCollectorImpl> const zerogc::internals::ConstColle
         C::resolve_array_len_const(repr)
     }
 }
-unsafe impl<'gc, OtherId: zerogc::CollectorId, C: RawCollectorImpl> GcSafe<'gc, OtherId> for CollectorId<C> {
-    #[inline]
-    unsafe fn trace_inside_gc<V>(gc: &mut Gc<'gc, Self, OtherId>, visitor: &mut V) -> Result<(), V::Err> where V: GcVisitor {
-        // Fine to stuff inside a pointer. We're a regular 'Sized' type
-        visitor.trace_gc(gc)
-    }
-}
-unsafe impl<C: RawCollectorImpl> Trace for CollectorId<C> {
-    const NEEDS_TRACE: bool = false;
-    const NEEDS_DROP: bool = false;
-    #[inline(always)]
-    fn trace<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
-        Ok(())
-    }
-}
-unsafe impl<C: RawCollectorImpl> TrustedDrop for CollectorId<C> {}
-unsafe impl<C: RawCollectorImpl> TraceImmutable for CollectorId<C> {
-    #[inline(always)]
-    fn trace_immutable<V: GcVisitor>(&self, _visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
-        Ok(())
-    }
-}
-unsafe impl<C: RawCollectorImpl> NullTrace for CollectorId<C> {}
+zerogc::impl_nulltrace_for_static!(CollectorId<C>, params => [C: RawCollectorImpl]);
 
 pub struct WeakCollectorRef<C: RawCollectorImpl> {
     weak: <C::Ptr as CollectorPtr<C>>::Weak,

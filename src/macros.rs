@@ -105,3 +105,34 @@ macro_rules! impl_trace_for_nulltrace {
         }
     }
 }
+
+/// Implement [NullTrace] for a type that lives for `'static`
+///
+/// ## Safety
+/// Because the type is `'static`, it can't possibly
+/// have any `Gc` pointers inside it.
+///
+/// Therefore this macro is safe.
+#[macro_export]
+macro_rules! impl_nulltrace_for_static {
+    ($target:path) => ($crate::impl_nulltrace_for_static!($target, params => []););
+    ($target:path, params => [$($param:tt)*] $(where $($where_tk:tt)*)?) => {
+        zerogc_derive::unsafe_gc_impl!(
+            target => $target,
+            params => [$($param)*],
+            bounds => {
+                GcSafe => { where Self: 'static, $($($where_tk)*)* },
+                Trace => { where Self: 'static, $($($where_tk)*)* },               
+                TraceImmutable => { where Self: 'static, $($($where_tk)*)* },
+                GcRebrand => { where Self: 'static, $($($where_tk)*)* },
+                TrustedDrop => { where Self: 'static, $($($where_tk)*)* }
+            },
+            null_trace => { where Self: 'static, $($($where_tk)*)* },
+            branded_type => Self,
+            NEEDS_TRACE => false,
+            NEEDS_DROP => core::mem::needs_drop::<Self>(),
+            trace_template => |self, visitor| { Ok(()) },
+            collector_id => *,
+        );
+    };
+}
