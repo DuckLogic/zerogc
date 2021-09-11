@@ -2,7 +2,6 @@
 //!
 //! Inspired by [Mono's Lock free Gc Handles](https://www.mono-project.com/news/2016/08/16/lock-free-gc-handles/)
 use core::ptr::{self, NonNull, Pointee};
-use core::mem;
 use core::marker::PhantomData;
 use core::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
 
@@ -483,7 +482,6 @@ unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> ::zer
                 context.collector() as *const C,
                 "Collectors mismatch"
             );
-            let inner = self.inner.as_ref();
             /*
              * NOTE: Can't use regular pointer-cast
              * because of potentially mismatched vtables.
@@ -506,13 +504,6 @@ unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Trace
         where V: zerogc::GcVisitor {
         Ok(())
     }
-
-    #[inline]
-    unsafe fn trace_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
-        where V: GcVisitor, Id: zerogc::CollectorId, Self: GcSafe<'gc, Id> {
-        // Fine to stuff inside a pointer. We're a `Sized` type
-        visitor.trace_gc(gc)
-    }
 }
 unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> TraceImmutable for GcHandle<T, C> {
     #[inline(always)]
@@ -523,7 +514,14 @@ unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Trace
 }
 unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> NullTrace for GcHandle<T, C> {}
 unsafe impl<'gc, T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl>
-    GcSafe<'gc, CollectorId<C>> for GcHandle<T, C> {}
+    GcSafe<'gc, CollectorId<C>> for GcHandle<T, C> {
+    #[inline]
+    unsafe fn trace_inside_gc<V>(gc: &mut Gc<'gc, Self, CollectorId<C>>, visitor: &mut V) -> Result<(), V::Err>
+        where V: GcVisitor {
+        // Fine to stuff inside a pointer. We're a `Sized` type
+        visitor.trace_gc(gc)
+    }
+}
 unsafe impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> TrustedDrop for GcHandle<T, C> {}
 impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> Clone for GcHandle<T, C> {
     fn clone(&self) -> Self {

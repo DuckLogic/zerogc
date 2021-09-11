@@ -462,8 +462,19 @@ impl TraceDeriveInput {
         let ty_generics = self.generics.original.split_for_impl().1;
         let (impl_generics, _, where_clause) = generics.split_for_impl();
         let target_type = &self.ident;
+        let visit_inside_gc = {
+            let where_clause = quote!(where Visitor: zerogc::GcVisitor);
+            quote! {
+                #[inline]
+                unsafe fn trace_inside_gc<Visitor>(gc: &mut zerogc::Gc<#gc_lt, Self, #id>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
+                #where_clause {
+                    visitor.trace_gc(gc)
+                }
+            }
+        };
         Ok(quote! {
             unsafe impl #impl_generics zerogc::GcSafe <#gc_lt, #id> for #target_type #ty_generics #where_clause {
+                #visit_inside_gc
                 fn assert_gc_safe() -> bool {
                     #(<#targets as #requirement>::#assertion();)*
                     true
@@ -917,22 +928,10 @@ impl TraceDeriveInput {
         } else {
             None
         };
-        let visit_inside_gc = if !immutable {
-            let where_clause = quote!(where Visitor: zerogc::GcVisitor,
-                ActualId: zerogc::CollectorId, Self: zerogc::GcSafe<'actual_gc, ActualId>);
-            Some(quote! {
-                #[inline]
-                unsafe fn trace_inside_gc<'actual_gc, Visitor, ActualId>(gc: &mut zerogc::Gc<'actual_gc, Self, ActualId>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
-                #where_clause {
-                    visitor.trace_gc(gc)
-                }
-            })
-        } else { None };
         let mutability = if !immutable { Some(<syn::Token![mut]>::default()) } else { None };
         Ok(quote! {
             unsafe impl #impl_generics #trait_name for #target_type #ty_generics #where_clause {
                 #assoc_constants
-                #visit_inside_gc
                 fn #method_name<TargetVisitor: zerogc::GcVisitor>(&#mutability self, gc_visitor: &mut TargetVisitor) -> Result<(), TargetVisitor::Err> {
                     #trace_impl
                     Ok(())

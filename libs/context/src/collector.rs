@@ -344,19 +344,19 @@ unsafe impl<C: ~const ConstRawCollectorImpl> const zerogc::internals::ConstColle
         C::resolve_array_len_const(repr)
     }
 }
-unsafe impl<'gc, OtherId: zerogc::CollectorId, C: RawCollectorImpl> GcSafe<'gc, OtherId> for CollectorId<C> {}
+unsafe impl<'gc, OtherId: zerogc::CollectorId, C: RawCollectorImpl> GcSafe<'gc, OtherId> for CollectorId<C> {
+    #[inline]
+    unsafe fn trace_inside_gc<V>(gc: &mut Gc<'gc, Self, OtherId>, visitor: &mut V) -> Result<(), V::Err> where V: GcVisitor {
+        // Fine to stuff inside a pointer. We're a regular 'Sized' type
+        visitor.trace_gc(gc)
+    }
+}
 unsafe impl<C: RawCollectorImpl> Trace for CollectorId<C> {
     const NEEDS_TRACE: bool = false;
     const NEEDS_DROP: bool = false;
     #[inline(always)]
     fn trace<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), V::Err> {
         Ok(())
-    }
-
-    #[inline]
-    unsafe fn trace_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err> where V: GcVisitor, Id: zerogc::CollectorId, Self: GcSafe<'gc, Id> {
-        // Fine to stuff inside a pointer. We're a regular 'Sized' type
-        visitor.trace_gc(gc)
     }
 }
 unsafe impl<C: RawCollectorImpl> TrustedDrop for CollectorId<C> {}

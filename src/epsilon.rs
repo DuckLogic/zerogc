@@ -384,7 +384,11 @@ pub struct EpsilonCollectorId {
     _priv: ()
 }
 unsafe impl TrustedDrop for EpsilonCollectorId {}
-unsafe impl<'other_gc, OtherId: CollectorId> GcSafe<'other_gc, OtherId> for EpsilonCollectorId {}
+unsafe impl<'other_gc, OtherId: CollectorId> GcSafe<'other_gc, OtherId> for EpsilonCollectorId {
+    unsafe fn trace_inside_gc<V>(gc: &mut crate::Gc<'other_gc, Self, OtherId>, visitor: &mut V) -> Result<(), V::Err> where V: GcVisitor {
+        visitor.trace_gc(gc)
+    }
+}
 unsafe impl Trace for EpsilonCollectorId {
     const NEEDS_TRACE: bool = false;
     const NEEDS_DROP: bool = false;
@@ -392,10 +396,6 @@ unsafe impl Trace for EpsilonCollectorId {
     #[inline]
     fn trace<V: GcVisitor>(&mut self, _visitor: &mut V) -> Result<(), <V as GcVisitor>::Err> {
         Ok(())
-    }
-
-    unsafe fn trace_inside_gc<'gc, V, Id>(gc: &mut crate::Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err> where V: GcVisitor, Id: CollectorId, Self: GcSafe<'gc, Id> + 'gc {
-        visitor.trace_gc(gc)
     }
 }
 unsafe impl TraceImmutable for EpsilonCollectorId {

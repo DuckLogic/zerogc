@@ -806,7 +806,14 @@ impl<'gc, T: ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
 
 /// Double-indirection is completely safe
 unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> TrustedDrop for Gc<'gc, T, Id> {}
-unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> GcSafe<'gc, Id> for Gc<'gc, T, Id> {}
+unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> GcSafe<'gc, Id> for Gc<'gc, T, Id> {
+    #[inline]
+    unsafe fn trace_inside_gc<V>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
+        where V: GcVisitor {
+        // Double indirection is fine. It's just a `Sized` type
+        visitor.trace_gc(gc)
+    }
+}
 /// Rebrand
 unsafe impl<'gc, 'new_gc, T, Id> GcRebrand<'new_gc, Id> for Gc<'gc, T, Id>
     where T: GcSafe<'gc, Id> + ?Sized + GcRebrand<'new_gc, Id>,
@@ -823,15 +830,8 @@ unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> Trace for Gc<'gc,
     fn trace<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err> {
         unsafe {
             // We're delegating with a valid pointer.
-            <T as Trace>::trace_inside_gc(self, visitor)
+            <T as GcSafe<'gc, Id>>::trace_inside_gc(self, visitor)
         }
-    }
-
-    #[inline]
-    unsafe fn trace_inside_gc<'actual_gc, V, ActualId>(gc: &mut Gc<'actual_gc, Self, ActualId>, visitor: &mut V) -> Result<(), V::Err>
-        where V: GcVisitor, ActualId: CollectorId, Self: GcSafe<'actual_gc, ActualId> {
-        // Double indirection is fine. It's just a `Sized` type
-        visitor.trace_gc(gc)
     }
 }
 impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> const Deref for Gc<'gc, T, Id> {
@@ -1133,6 +1133,20 @@ pub unsafe trait GcSafe<'gc, Id: CollectorId>: Trace + TrustedDrop {
     /// Only used by procedural derive
     #[doc(hidden)]
     fn assert_gc_safe() -> bool where Self: Sized { true }
+    /// Trace this object behind a [Gc] pointer.
+    ///
+    /// This is **required** to delegate to one of the following methods on [GcVisitor]:
+    /// 1. [GcVisitor::trace_gc] - For regular, `Sized` types
+    /// 2. [GcVisitor::trace_array] - For slices and arrays
+    /// 3. [GcVisitor::trace_trait_object] - For trait objects
+    ///
+    /// ## Safety
+    /// This must delegate to the appropriate method on [GcVisitor],
+    /// or undefined behavior will result.
+    ///
+    /// The user is required to supply an appropriate [Gc] pointer.
+    unsafe fn trace_inside_gc<V>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
+        where V: GcVisitor;
 }
 
 /// A [GcSafe] type with all garbage-collected pointers
@@ -1303,20 +1317,6 @@ pub unsafe trait Trace {
     ///   - The mutable `&mut self` is just so copying collectors can relocate GC pointers
     /// - Calling other operations on the garbage collector (including allocations)
     fn trace<V: GcVisitor>(&mut self, visitor: &mut V) -> Result<(), V::Err>;
-    /// Trace this object behind a [Gc] pointer.
-    ///
-    /// This is **required** to delegate to one of the following methods on [GcVisitor]:
-    /// 1. [GcVisitor::trace_gc] - For regular, `Sized` types
-    /// 2. [GcVisitor::trace_array] - For slices and arrays
-    /// 3. [GcVisitor::trace_trait_object] - For trait objects
-    ///
-    /// ## Safety
-    /// This must delegate to the appropriate method on [GcVisitor],
-    /// or undefined behavior will result.
-    ///
-    /// The user is required to supply an appropriate [Gc] pointer.
-    unsafe fn trace_inside_gc<'gc, V, Id>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
-        where V: GcVisitor, Id: CollectorId, Self: GcSafe<'gc, Id>;
 }
 
 /// A type that can be safely traced/relocated

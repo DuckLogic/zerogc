@@ -274,26 +274,6 @@ impl MacroInput {
         } else {
             None
         };
-        let visit_inside_gc = if mutable {
-            let expr = match self.visit_inside_gc {
-                Some(ref expr) => expr.0.body.clone(),
-                None => quote!(visitor.trace_gc(gc))
-            };
-            let where_clause = if let Some(ref clause) = self.bounds.visit_inside_gc {
-                clause.clone()
-            } else {
-                parse_quote!(where Visitor: #zerogc_crate::GcVisitor, ActualId: #zerogc_crate::CollectorId, Self: #zerogc_crate::GcSafe<'actual_gc, ActualId>)
-            };
-            Some(quote! {
-                #[inline]
-                unsafe fn trace_inside_gc<'actual_gc, Visitor, ActualId>(gc: &mut #zerogc_crate::Gc<'actual_gc, Self, ActualId>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
-                    #where_clause {
-                    #expr
-                }
-            })
-        } else {
-            None
-        };
         let mutability = if mutable {
             quote!(mut)
         } else {
@@ -307,7 +287,6 @@ impl MacroInput {
                 fn #trace_method_name<Visitor: #zerogc_crate::GcVisitor + ?Sized>(&#mutability self, visitor: &mut Visitor) -> Result<(), Visitor::Err> {
                     #visit_impl
                 }
-                #visit_inside_gc
             }
         }))
     }
@@ -322,8 +301,28 @@ impl MacroInput {
                 });
             crate::sort_params(&mut generics);
             let (impl_generics, _, where_clause) = generics.split_for_impl();
+            let visit_inside_gc = {
+                let expr = match self.visit_inside_gc {
+                    Some(ref expr) => expr.0.body.clone(),
+                    None => quote!(visitor.trace_gc(gc))
+                };
+                let where_clause = if let Some(ref clause) = self.bounds.visit_inside_gc {
+                    clause.clone()
+                } else {
+                    parse_quote!(where Visitor: #zerogc_crate::GcVisitor)
+                };
+                quote! {
+                    #[inline]
+                    unsafe fn trace_inside_gc<Visitor>(gc: &mut #zerogc_crate::Gc<#gc_lt, Self, #id_type>, visitor: &mut Visitor) -> Result<(), Visitor::Err>
+                        #where_clause {
+                        #expr
+                    }
+                }
+            };
             Ok(Some(quote! {
-                unsafe impl #impl_generics #zerogc_crate::GcSafe<#gc_lt, #id_type> for #target_type #where_clause {}
+                unsafe impl #impl_generics #zerogc_crate::GcSafe<#gc_lt, #id_type> for #target_type #where_clause {
+                    #visit_inside_gc
+                }
             }))
         })
     }

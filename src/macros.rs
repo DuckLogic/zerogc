@@ -95,15 +95,6 @@ macro_rules! impl_trace_for_nulltrace {
                 <Self as $crate::NullTrace>::verify_null_trace();
                 Ok(())
             }
-
-            #[inline]
-            unsafe fn trace_inside_gc<'actual_gc, Visitor, ActualId>(
-                gc: &mut $crate::Gc<'actual_gc, Self, ActualId>,
-                visitor: &mut Visitor
-            ) -> Result<(), Visitor::Err> where Visitor: zerogc::GcVisitor,
-                ActualId: zerogc::CollectorId, Self: zerogc::GcSafe<'actual_gc, ActualId> {
-                visitor.trace_gc(gc)
-            }
         }
         unsafe impl$(<$($lt,)* $($param),*>)? $crate::TraceImmutable for $target $(where $($where_clause)*)? {
             #[inline]

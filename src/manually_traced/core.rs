@@ -322,8 +322,7 @@ unsafe_gc_impl! {
     params => [T],
     bounds => {
         GcRebrand => never,
-        visit_inside_gc => where Visitor: crate::GcVisitor, ActualId: crate::CollectorId,
-            [T]: GcSafe<'actual_gc, ActualId>
+        visit_inside_gc => where Visitor: crate::GcVisitor
     },
     null_trace => { where T: NullTrace },
     NEEDS_TRACE => T::NEEDS_TRACE,
