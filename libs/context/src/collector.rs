@@ -15,8 +15,7 @@ use zerogc::{Gc, GcSafe, GcSimpleAlloc, GcSystem, Trace};
 
 use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
-use zerogc::vec::GcVec;
-use zerogc::vec::repr::GcVecRepr;
+use zerogc::vec::repr::RawGcVec;
 
 
 pub unsafe trait ConstRawCollectorImpl: RawCollectorImpl {
@@ -45,7 +44,7 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     /// The context
     type RawContext: RawContext<Self>;
     /// The raw representation of a vec
-    type RawVecRepr<'gc>: GcVecRepr<'gc, Id=CollectorId<Self>>;
+    type RawVec<'gc, T: GcSafe<'gc, CollectorId<Self>>>: RawGcVec<'gc, T, Id=CollectorId<Self>>;
 
     /// True if this collector is a singleton
     ///
@@ -302,7 +301,7 @@ unsafe impl<C: SyncCollector> Sync for CollectorId<C> {}
 unsafe impl<C: SyncCollector> Send for CollectorId<C> {}
 unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     type System = CollectorRef<C>;
-    type RawVecRepr<'gc> = C::RawVecRepr<'gc>;
+    type RawVec<'gc, T: GcSafe<'gc, Self>> = C::RawVec<'gc, T>;
     // TODO: What if clients want to customize this?
     type ArrayRepr<'gc, T> = zerogc::array::repr::ThinArrayRepr<'gc, T, Self>;
 
@@ -317,7 +316,7 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     }
 
     #[inline]
-    fn resolve_array_len<'gc, T>(repr: &ThinArrayRepr<'gc, T, Self>) -> usize {
+    fn resolve_array_len<T>(repr: &ThinArrayRepr<'_, T, Self>) -> usize {
         C::resolve_array_len(repr)
     }
 
@@ -342,7 +341,7 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
 }
 unsafe impl<C: ~const ConstRawCollectorImpl> const zerogc::internals::ConstCollectorId for CollectorId<C> {
     #[inline]
-    fn resolve_array_len_const<'gc, T>(repr: &Self::ArrayRepr<'gc, T>) -> usize {
+    fn resolve_array_len_const<T>(repr: &Self::ArrayRepr<'_, T>) -> usize {
         C::resolve_array_len_const(repr)
     }
 }
@@ -372,9 +371,7 @@ pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
     unsafe fn alloc_uninit<'gc, T: GcSafe<'gc, CollectorId<Self>>>(context: &'gc CollectorContext<Self>) -> *mut T;
     unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> *mut T
         where T: GcSafe<'gc, CollectorId<Self>>;
-    fn alloc_vec<'gc, T>(context: &'gc CollectorContext<Self>) -> GcVec<'gc, T, CollectorContext<Self>>
-        where T: GcSafe<'gc, CollectorId<Self>>;
-    fn alloc_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> GcVec<'gc, T, CollectorContext<Self>>
+    fn alloc_raw_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> Self::RawVec<'gc, T>
         where T: GcSafe<'gc, CollectorId<Self>>;
 }
 unsafe impl<C> GcSimpleAlloc for CollectorContext<C>
@@ -392,13 +389,8 @@ unsafe impl<C> GcSimpleAlloc for CollectorContext<C>
     }
 
     #[inline]
-    fn alloc_vec<'gc, T>(&'gc self) -> GcVec<'gc, T, Self> where T: GcSafe<'gc, CollectorId<C>> {
-        C::alloc_vec(self)
-    }
-
-    #[inline]
-    fn alloc_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> GcVec<'gc, T, Self> where T: GcSafe<'gc, CollectorId<C>> {
-        C::alloc_vec_with_capacity(self, capacity)
+    fn alloc_raw_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> C::RawVec<'gc, T> where T: GcSafe<'gc, CollectorId<C>> {
+        C::alloc_raw_vec_with_capacity(self, capacity)
     }
 }
 

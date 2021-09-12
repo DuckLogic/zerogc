@@ -10,6 +10,7 @@ readme = "README.md"
 
 [dependencies]
 scopeguard = "1.1"
+inherent = "1"
 # Manually included tracing support for third party libraries
 # Providing support for these important libraries,
 # gives zerogc batteries included support.

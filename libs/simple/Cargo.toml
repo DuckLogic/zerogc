@@ -9,6 +9,7 @@ license = "MIT"
 edition = "2018"
 
 [dependencies]
+inherent = "1"
 zerogc = { path = "../..", version = "0.2.0-alpha.5" }
 once_cell = { version = "1.5", optional = true }
 # Shared impl

@@ -9,6 +9,7 @@
     option_result_unwrap_unchecked, // Only used by the 'serde' implementation...
     // Needed for epsilon collector:
     once_cell, // RFC 2788 (Probably will be accepted)
+    negative_impls, // More elegant than marker types
     alloc_layout_extra,
     const_fn_fn_ptr_basics,
     const_option,
@@ -59,6 +60,7 @@ use core::hash::{Hash, Hasher};
 use core::fmt::{self, Debug, Formatter, Display};
 use core::cmp::Ordering;
 
+use vec::repr::{RawGcVec};
 use zerogc_derive::unsafe_gc_impl;
 pub use zerogc_derive::{Trace, NullTrace};
 
@@ -576,14 +578,28 @@ pub unsafe trait GcSimpleAlloc: GcContext {
             self.alloc_slice_fill_with(len, |_idx| val)
         }
     }
+    /// Create a new [RawGcVec] with the specified capacity
+    /// and an implicit reference to this [GcContext].
+    fn alloc_raw_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> <Self::Id as CollectorId>::RawVec<'gc, T>
+        where T: GcSafe<'gc, Self::Id>;
     /// Create a new [GcVec] with zero initial length,
     /// with an implicit reference to this [GcContext].
-    fn alloc_vec<'gc, T>(&'gc self) -> GcVec<'gc, T, Self>
-        where T: GcSafe<'gc, Self::Id>;
+    #[inline]
+    fn alloc_vec<'gc, T>(&'gc self) -> GcVec<'gc, T, Self::Id>
+        where T: GcSafe<'gc, Self::Id> {
+        unsafe {
+            crate::vec::GcVec::from_raw(self.alloc_raw_vec_with_capacity(0))
+        }
+    }
     /// Allocate a new [GcVec] with the specified capacity
     /// and an implicit reference to this [GcContext]
-    fn alloc_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> GcVec<'gc, T, Self>
-        where T: GcSafe<'gc, Self::Id>;
+    #[inline]
+    fn alloc_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> GcVec<'gc, T, Self::Id>
+        where T: GcSafe<'gc, Self::Id> {
+        unsafe {
+            crate::vec::GcVec::from_raw(self.alloc_raw_vec_with_capacity(capacity))
+        }
+    }
 }
 /// The internal representation of a frozen context
 ///
@@ -649,10 +665,10 @@ pub unsafe trait HandleCollectorId: CollectorId {
 pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop + 'static + for<'gc> GcSafe<'gc, Self> {
     /// The type of the garbage collector system
     type System: GcSystem<Id=Self>;
-    /// The raw representation of vectors in this collector.
+    /// The implementation of [RawGcVec] for this type.
     ///
-    /// May be [crate::vec::repr::VecUnsupported] if vectors are unsupported.
-    type RawVecRepr<'gc>: crate::vec::repr::GcVecRepr<'gc, Id=Self>;
+    /// May be [crate::vec::repr::Unsupported] if vectors are unsupported.
+    type RawVec<'gc, T: GcSafe<'gc, Self>>: crate::vec::repr::RawGcVec<'gc, T, Id=Self>;
     /// The raw representation of `GcArray` pointers
     /// in this collector.
     type ArrayRepr<'gc, T>: ~const crate::array::repr::GcArrayRepr<'gc, T, Id=Self>;
@@ -671,7 +687,7 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
         where 'gc: 'a;
 
     /// Resolve the length of the specified array
-    fn resolve_array_len<'gc, T>(repr: &Self::ArrayRepr<'gc, T>) -> usize;
+    fn resolve_array_len<T>(repr: &Self::ArrayRepr<'_, T>) -> usize;
 
     /// Perform a write barrier before writing to a garbage collected field
     ///
@@ -885,20 +901,12 @@ impl<'gc, T: GcSafe<'gc, Id> + PartialEq, Id: CollectorId> PartialEq for Gc<'gc,
         // NOTE: We compare by value, not identity
         self.value() == other.value()
     }
-    #[inline]
-    fn ne(&self, other: &Self) -> bool {
-        self.value() != other.value()
-    }
 }
 impl<'gc, T: GcSafe<'gc, Id> + Eq, Id: CollectorId> Eq for Gc<'gc, T, Id> {}
 impl<'gc, T: GcSafe<'gc, Id> + PartialEq, Id: CollectorId> PartialEq<T> for Gc<'gc, T, Id> {
     #[inline]
     fn eq(&self, other: &T) -> bool {
         self.value() == other
-    }
-    #[inline]
-    fn ne(&self, other: &T) -> bool {
-        self.value() != other
     }
 }
 impl<'gc, T: GcSafe<'gc, Id> + PartialOrd, Id: CollectorId> PartialOrd for Gc<'gc, T, Id> {
@@ -1439,10 +1447,10 @@ pub unsafe trait GcVisitor: Sized {
     ///
     /// ## Safety
     /// Undefined behavior if the vector is invalid.
-    unsafe fn trace_vec<'gc, T, Id>(
-        &mut self, raw: &mut Gc<'gc, Id::RawVecRepr<'gc>, Id>
+    unsafe fn trace_vec<'gc, T, V>(
+        &mut self, raw: &mut V
     ) -> Result<(), Self::Err>
-        where T: GcSafe<'gc, Id>, Id: CollectorId;
+        where T: GcSafe<'gc, V::Id>, V: RawGcVec<'gc, T>;
 
     /// Visit a garbage collected array.
     ///

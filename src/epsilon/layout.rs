@@ -1,9 +1,13 @@
 use std::ffi::c_void;
+use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::alloc::Layout;
 use std::cell::Cell;
 
-use crate::vec::repr::GcVecRepr;
+use crate::{GcRebrand, GcSafe, GcSimpleAlloc};
+use crate::vec::repr::{IGcVec, RawGcVec};
+
+use super::{EpsilonCollectorId, EpsilonContext};
 
 /// The header of an object in the epsilon collector.
 ///
@@ -175,63 +179,122 @@ unsafe fn drop_array<T>(ptr: *mut c_void) {
 /// The raw representation of a vector in the "epsilon" collector
 ///
 /// NOTE: Length and capacity are stored implicitly in the [GcVecHeader]
-pub struct EpsilonVecRepr {
-    _priv: ()
+pub struct EpsilonRawVec<'gc, T> {
+    header: NonNull<EpsilonVecHeader>,
+    context: &'gc EpsilonContext,
+    marker: PhantomData<crate::Gc<'gc, [T], EpsilonCollectorId>>
 }
-impl EpsilonVecRepr {
+impl<'gc, T> Copy for EpsilonRawVec<'gc, T> {}
+impl<'gc, T> Clone for EpsilonRawVec<'gc, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<'gc, T> EpsilonRawVec<'gc, T> {
+    #[inline]
+    pub(in super) unsafe fn from_raw_parts(
+        header: NonNull<EpsilonVecHeader>,
+        context: &'gc EpsilonContext
+    ) -> Self {
+        EpsilonRawVec {
+            header, context, marker: PhantomData
+        }
+    }
     #[inline]
     fn header(&self) -> *const EpsilonVecHeader {
-        /*
-         * todo: what if we have a non-standard alignment?
-         * this is a bug in the simple collector too
-         */
-        unsafe {
-            (self as *const Self as *mut Self as *mut u8)
-                .sub(std::mem::size_of::<EpsilonVecHeader>())
-                .cast()
-        }
+        self.header.as_ptr() as *const EpsilonVecHeader
     }
 }
 zerogc_derive::unsafe_gc_impl!(
-    target => EpsilonVecRepr,
-    params => [],
+    target => EpsilonRawVec<'gc, T>,
+    params => ['gc, T: GcSafe<'gc, EpsilonCollectorId>],
     bounds => {
-        TraceImmutable => never
+        TraceImmutable => never,
+        GcRebrand => { where T: GcRebrand<'new_gc, EpsilonCollectorId>, T::Branded: Sized }
     },
+    branded_type => EpsilonRawVec<'new_gc, T::Branded>,
+    collector_id => EpsilonCollectorId,
     NEEDS_TRACE => true, // meh
-    NEEDS_DROP => true, // unable to know at compile time (so be conservative)
+    NEEDS_DROP => T::NEEDS_DROP,
     null_trace => never,
     trace_mut => |self, visitor| {
-        // TODO: What if someone wants to trace our innards using a different collector?
-        todo!("tracing EpsilonVecRepr")
+        unsafe { visitor.trace_vec(self) }
     },
 );
-unsafe impl<'gc> GcVecRepr<'gc> for EpsilonVecRepr {
-    // It is meaningless to reallocate with bump-pointer allocation
-    const SUPPORTS_REALLOC: bool = false;
-    type Id = super::EpsilonCollectorId;
+#[inherent::inherent]
+unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> RawGcVec<'gc, T> for EpsilonRawVec<'gc, T> {
+    pub fn iter(&self) -> zerogc::vec::repr::RawVecIter<'gc, T, Self>
+        where T: Copy;
+}
+#[inherent::inherent]
+unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> IGcVec<'gc, T> for EpsilonRawVec<'gc, T> {
+    type Id = EpsilonCollectorId;
 
-    fn element_layout(&self) -> Layout {
-        todo!()
+    #[inline]
+    pub fn with_capacity_in(capacity: usize, ctx: &'gc EpsilonContext) -> Self {
+        ctx.alloc_raw_vec_with_capacity(capacity)
     }
 
     #[inline]
-    fn len(&self) -> usize {
-        unsafe { (*self.header()).len.get() }
+    pub fn len(&self) -> usize {
+        unsafe {
+            (*self.header()).len.get()
+        }
     }
 
     #[inline]
-    unsafe fn set_len(&self, len: usize) {
-        debug_assert!(len <= self.capacity());
-        (*self.header()).len.set(len);
+    pub unsafe fn set_len(&mut self, len: usize) {
+        (*self.header()).len.set(len)
     }
 
     #[inline]
-    fn capacity(&self) -> usize {
+    pub fn capacity(&self) -> usize {
         unsafe { (*self.header()).capacity }
     }
+
     #[inline]
-    unsafe fn ptr(&self) -> *const c_void {
-        self as *const Self as *const c_void // We are actually just a GC pointer to the value ptr
+    pub fn reserve_in_place(&mut self, _additional: usize) -> Result<(), crate::vec::repr::ReallocFailedError> {
+        Err(crate::vec::repr::ReallocFailedError::Unsupported)
+    }
+
+    #[inline]
+    pub unsafe fn as_ptr(&self) -> *const T {
+        const LAYOUT: Layout = Layout::new::<EpsilonVecHeader>();
+        let offset = LAYOUT.size() + 
+            LAYOUT.padding_needed_for(core::mem::align_of::<T>());
+        (self.header() as *const u8).add(offset) as *const T
+    }
+
+    #[inline]
+    pub fn context(&self) -> &'gc EpsilonContext {
+        self.context
+    }
+
+    // Default methods:
+    pub unsafe fn as_mut_ptr(&mut self) -> *mut T;
+    pub fn replace(&mut self, index: usize, val: T) -> T;
+    pub fn set(&mut self, index: usize, val: T);
+    pub fn extend_from_slice(&mut self, src: &[T])
+        where T: Copy;
+    pub fn push(&mut self, val: T);
+    pub fn reserve(&mut self, additional: usize);
+    pub fn is_empty(&self) -> bool;
+    pub fn new_in(ctx: &'gc EpsilonContext) -> Self;
+    pub fn copy_from_slice(src: &[T], ctx: &'gc EpsilonContext) -> Self
+        where T: Copy;
+    pub fn from_vec(src: Vec<T>, ctx: &'gc EpsilonContext) -> Self;
+    pub fn get(&mut self, index: usize) -> Option<T>
+        where T: Copy;
+    pub unsafe fn as_slice_unchecked(&self) -> &[T];
+}
+impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> Extend<T> for EpsilonRawVec<'gc, T> {
+    #[inline]
+    fn extend<E: IntoIterator<Item=T>>(&mut self, iter: E) {
+        let iter = iter.into_iter();
+        self.reserve(iter.size_hint().1.unwrap_or(0));
+        for val in iter {
+            self.push(val);
+        }
     }
 }

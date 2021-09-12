@@ -78,7 +78,7 @@ fn vec() {
         assert_eq!(*val, None);
     }
     drop(vec_none);
-    let vec_text: GcVec<u8> = GcVec { raw: safepoint!(context, vec_text.into_raw()), context: &context };
+    let vec_text: GcVec<u8> = GcVec::copy_from_slice(safepoint!(context, vec_text).as_slice(), &context);
     assert_eq!(vec_text.as_slice(), TEXT);
     let mut nested_trace: GcVec<Gc<Dummy>> = context.alloc_vec_with_capacity(3);
     let mut last = None;
@@ -91,7 +91,7 @@ fn vec() {
         last = Some(obj);
     }
     drop(vec_text);
-    let nested_trace: GcVec<Gc<Dummy>> = GcVec{ raw: safepoint!(context, nested_trace.into_raw()), context: &context };
+    let nested_trace: GcVec<Gc<Dummy>> = GcVec::from_vec(safepoint!(context, nested_trace).into_iter().collect(), &context);
     for (idx, val) in nested_trace.iter().enumerate() {
         assert_eq!(val.val, idx, "Invalid val: {:?}", val);
         if let Some(last) = val.inner {

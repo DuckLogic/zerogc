@@ -12,6 +12,7 @@ mod layout;
 mod alloc;
 mod handle;
 
+
 use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, Trace, internals::ConstCollectorId};
 use std::ptr::NonNull;
 use std::alloc::Layout;
@@ -20,6 +21,12 @@ use std::cell::Cell;
 use std::lazy::OnceCell;
 
 use self::alloc::{EpsilonAlloc};
+use self::layout::EpsilonRawVec;
+
+/// The implementation of [EpsilonRawVec]
+pub mod vec {
+    pub use super::layout::EpsilonRawVec;
+}
 
 /// Coerce a reference into a [Gc] pointer.
 ///
@@ -171,7 +178,7 @@ struct State {
     alloc: alloc::Default,
     /// The head of the linked-list of allocated objects.
     head: Cell<Option<NonNull<layout::EpsilonHeader>>>,
-    empty_vec: OnceCell<NonNull<layout::EpsilonVecRepr>>
+    empty_vec: OnceCell<NonNull<layout::EpsilonVecHeader>>
 }
 impl State {
     #[inline]
@@ -328,26 +335,14 @@ unsafe impl GcSimpleAlloc for EpsilonContext {
     }
 
     #[inline]
-    fn alloc_vec<'gc, T>(&'gc self) -> crate::vec::GcVec<'gc, T, Self>
-        where T: GcSafe<'gc, Self::Id> {
-        let ptr = self.system().state().empty_vec.get_or_init(|| unsafe {
-            NonNull::new_unchecked(self.alloc_vec_with_capacity::<'gc, ()>(0).as_repr().as_raw_ptr())
-        }).as_ptr();
-        crate::vec::GcVec {
-            context: self,
-            raw: unsafe { crate::vec::GcRawVec::from_repr(crate::Gc::from_raw(NonNull::new_unchecked(ptr))) }
-        }
-    }
-
-    #[inline]
-    fn alloc_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> crate::vec::GcVec<'gc, T, Self>
-        where T: GcSafe<'gc, Self::Id> {
+    fn alloc_raw_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> EpsilonRawVec<'gc, T>
+    where T: GcSafe<'gc, Self::Id> {
         if capacity == 0 {
             if let Some(&empty_ptr) = self.system().state().empty_vec.get() {
-                return crate::vec::GcVec {
-                    context: self,
-                    raw: unsafe { crate::vec::GcRawVec::from_repr(crate::Gc::from_raw(empty_ptr)) }
-                }
+                return unsafe { self::layout::EpsilonRawVec::from_raw_parts(
+                    empty_ptr,
+                    self
+                ) };
             }
         }
         let type_info = layout::TypeInfo::of_vec::<T>();
@@ -366,11 +361,13 @@ unsafe impl GcSimpleAlloc for EpsilonContext {
                 capacity
             });
             self.system().state().push_state(NonNull::from(&header.as_ref().common_header));
-            let ptr = mem.as_ptr().add(offset).cast::<layout::EpsilonVecRepr>();
-            crate::vec::GcVec {
-                context: self,
-                raw: crate::vec::GcRawVec::from_repr(crate::Gc::from_raw(NonNull::new_unchecked(ptr)))
-            }
+            let value_ptr = mem.as_ptr().add(offset).cast::<T>();
+            let raw = self::layout::EpsilonRawVec::from_raw_parts(
+                header,
+                self
+            );
+            debug_assert_eq!(raw.as_ptr(), value_ptr);
+            raw
         }
     }
 }
@@ -387,13 +384,13 @@ pub struct EpsilonCollectorId {
 crate::impl_nulltrace_for_static!(EpsilonCollectorId);
 unsafe impl const ConstCollectorId for EpsilonCollectorId {
     #[inline]
-    fn resolve_array_len_const<'gc, T>(repr: &Self::ArrayRepr<'gc, T>) -> usize {
+    fn resolve_array_len_const<T>(repr: &Self::ArrayRepr<'_, T>) -> usize {
         repr.len()
     }
 }
 unsafe impl CollectorId for EpsilonCollectorId {
     type System = EpsilonSystem;
-    type RawVecRepr<'gc> = self::layout::EpsilonVecRepr;
+    type RawVec<'gc, T: GcSafe<'gc, Self>> = self::layout::EpsilonRawVec<'gc, T>;
     /// We use fat-pointers for arrays,
     /// so that we can transmute from `&'static [T]` -> `GcArray`
     type ArrayRepr<'gc, T> = zerogc::array::repr::FatArrayRepr<'gc, T, Self>;
@@ -411,7 +408,7 @@ unsafe impl CollectorId for EpsilonCollectorId {
     }
 
     #[inline]
-    fn resolve_array_len<'gc, T>(repr: &Self::ArrayRepr<'gc, T>) -> usize {
+    fn resolve_array_len<T>(repr: &Self::ArrayRepr<'_, T>) -> usize {
         repr.len()
     }
 

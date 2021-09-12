@@ -66,12 +66,12 @@ use zerogc::{GcSafe, Trace, GcVisitor};
 use zerogc_context::utils::{ThreadId, MemorySize};
 
 use crate::alloc::{SmallArenaList, SmallArena};
-use crate::layout::{StaticGcType, GcType, SimpleVecRepr, DynamicObj, StaticVecType, SimpleMarkData, SimpleMarkDataSnapshot, GcHeader, BigGcObject, HeaderLayout, GcArrayHeader, GcVecHeader, GcTypeLayout};
+use crate::layout::{StaticGcType, GcType, SimpleVecRepr, StaticVecType, SimpleMarkData, SimpleMarkDataSnapshot, GcHeader, BigGcObject, HeaderLayout, GcArrayHeader, GcVecHeader, GcTypeLayout};
 
 use zerogc_context::collector::{RawSimpleAlloc};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 use zerogc_context::{CollectionManager as AbstractCollectionManager, RawContext as AbstractRawContext, CollectorContext};
-use zerogc::vec::{GcRawVec};
+use zerogc::vec::repr::{RawGcVec};
 use zerogc::array::repr::{GcArrayRepr, ThinArrayRepr};
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -145,7 +145,7 @@ pub type Gc<'gc, T> = ::zerogc::Gc<'gc, T, CollectorId>;
 /// A garbage collected array, allocated in the "simple" collector
 pub type GcArray<'gc, T> = ::zerogc::array::GcArray<'gc, T, CollectorId>;
 /// A garbage colelcted vector, allocated in the "simple" collector
-pub type GcVec<'gc, T> = ::zerogc::vec::GcVec<'gc, T, SimpleCollectorContext>;
+pub type GcVec<'gc, T> = ::zerogc::vec::GcVec<'gc, T, CollectorId>;
 
 #[cfg(not(feature = "multiple-collectors"))]
 static GLOBAL_COLLECTOR: AtomicPtr<RawSimpleCollector> = AtomicPtr::new(std::ptr::null_mut());
@@ -171,44 +171,38 @@ unsafe impl RawSimpleAlloc for RawSimpleCollector {
         ptr.cast()
     }
 
-    #[inline]
-    fn alloc_vec<'gc, T>(context: &'gc CollectorContext<Self>) -> GcVec<'gc, T> where T: GcSafe<'gc, crate::CollectorId> {
-        if std::mem::align_of::<T>() > EMPTY_VEC_ALIGNMENT {
-            // We have to do an actual allocation because we want higher alignment :(
-            return Self::alloc_vec_with_capacity(context, 0)
-        }
-        let header = context.collector().heap.empty_vec();
-        // NOTE: Assuming header is already initialized
-        unsafe {
-            debug_assert_eq!((*header).len.get(), 0);
-            debug_assert_eq!((*header).capacity, 0);
-        }
-        let ptr = unsafe { NonNull::new_unchecked((header as *mut u8)
-            .add(GcVecHeader::LAYOUT.value_offset(EMPTY_VEC_ALIGNMENT))) };
-        GcVec {
-            raw: unsafe { GcRawVec::from_repr(Gc::from_raw(ptr.cast())) },
-            context
-        }
-    }
-
-    fn alloc_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> GcVec<'gc, T> where T: GcSafe<'gc, crate::CollectorId> {
+    fn alloc_raw_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> Self::RawVec<'gc, T> where T: GcSafe<'gc, crate::CollectorId> {
         if capacity == 0 && std::mem::align_of::<T>() <= EMPTY_VEC_ALIGNMENT {
-            return Self::alloc_vec(context)
+            let header = context.collector().heap.empty_vec();
+            // NOTE: Assuming header is already initialized
+            unsafe {
+                debug_assert_eq!((*header).len.get(), 0);
+                debug_assert_eq!((*header).capacity, 0);
+                return self::layout::SimpleVecRepr::from_raw_parts(
+                    NonNull::new_unchecked(header),
+                    context
+                );
+            }
         }
         let (header, value_ptr) = context.collector().heap.allocator.alloc_layout(
             GcVecHeader::LAYOUT,
             Layout::array::<T>(capacity).unwrap(),
             <T as StaticVecType>::STATIC_VEC_TYPE
         );
-        let ptr = unsafe {
+        unsafe {
             (*header).capacity = capacity;
             (*header).len.set(0);
-            NonNull::new_unchecked(value_ptr as *mut SimpleVecRepr<T>)
-        };
-        GcVec {
-            raw: unsafe { GcRawVec::from_repr(Gc::from_raw(ptr.cast())) },
-            context
+            let res = self::layout::SimpleVecRepr::from_raw_parts(
+                NonNull::new_unchecked(header),
+                context
+            );
+            debug_assert_eq!(
+                res.as_ptr(),
+                value_ptr as *mut T as *const T,
+            );
+            res
         }
+
     }
 }
 
@@ -637,7 +631,7 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
 
     type RawContext = RawContext<Self>;
 
-    type RawVecRepr<'gc> = SimpleVecRepr<'gc, DynamicObj>;
+    type RawVec<'gc, T: GcSafe<'gc, CollectorId>> = SimpleVecRepr<'gc, T>;
 
     const SINGLETON: bool = cfg!(not(feature = "multiple-collectors"));
 
@@ -645,29 +639,17 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
 
     #[inline]
     fn id_for_gc<'a, 'gc, T>(gc: &'a Gc<'gc, T>) -> &'a CollectorId where 'gc: 'a, T: ?Sized + 'gc {
-        #[cfg(feature = "multiple-collectors")] {
-            unsafe {
-                let header = GcHeader::from_value_ptr(gc.as_raw_ptr());
-                &*(*header).mark_data.load_snapshot().collector_id_ptr
-            }
-        }
-        #[cfg(not(feature = "multiple-collectors"))] {
-            const ID: CollectorId = unsafe { CollectorId::from_raw(PhantomData) };
-            &ID
+        unsafe {
+            let header = GcHeader::from_value_ptr(gc.as_raw_ptr());
+            (*header).collector_id()
         }
     }
 
     #[inline]
     fn id_for_array<'a, 'gc, T>(repr: &'a ThinArrayRepr<'gc, T, CollectorId>) -> &'a CollectorId where 'gc: 'a, T: 'gc {
-        #[cfg(feature = "multiple-collectors")] {
-            unsafe {
-                let header = GcArrayHeader::LAYOUT.from_value_ptr(repr.as_raw_ptr());
-                &*(*header).common_header.mark_data.load_snapshot().collector_id_ptr
-            }
-        }
-        #[cfg(not(feature = "multiple-collectors"))] {
-            const ID: CollectorId = unsafe { CollectorId::from_raw(PhantomData) };
-            &ID
+        unsafe {
+            let header = GcArrayHeader::LAYOUT.from_value_ptr(repr.as_raw_ptr());
+            (*header).common_header.collector_id()
         }
     }
 
@@ -819,14 +801,7 @@ impl RawSimpleCollector {
                 fn trace(&mut self, visitor: &mut MarkVisitor) {
                     let cached_vec_header = self as *mut Self as *mut GcVecHeader;
                     unsafe {
-                        let target_repr = (cached_vec_header as *mut u8)
-                            .add(GcVecHeader::LAYOUT.value_offset(EMPTY_VEC_ALIGNMENT))
-                            .cast::<SimpleVecRepr<()>>();
-                        let mut target_gc = *(&target_repr
-                            as *const *mut SimpleVecRepr<()>
-                            as *const Gc<SimpleVecRepr<DynamicObj>>);
-                        // TODO: Assert not moving?
-                        let Ok(()) = visitor.trace_vec::<(), _>(&mut target_gc);
+                        visitor._trace_own_rawvec::<()>(cached_vec_header);
                     }
                 }
             }
@@ -974,7 +949,7 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
              * other people's data.
              */
             assert_eq!(*gc.collector_id(), self.expected_collector);
-            self._visit_own_gc(gc);
+            self._trace_own_gc(gc);
             Ok(())
         } else {
             // Just ignore
@@ -993,9 +968,12 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
                 &mut ::zerogc::Gc<'gc, T, crate::CollectorId>
             >(gc);
             let header = GcHeader::from_value_ptr(gc.as_raw_ptr());
-            self._visit_own_gc_with(gc, |ptr, visitor| {
+            self._trace_own_gc_with::<_>(
+                GcHeader::from_value_ptr(gc.as_raw_ptr()),
+                true,
+                |val, visitor| {
                 if let Some(func) = (*header).type_info.trace_func {
-                    func(ptr as *mut T as *mut c_void, visitor)
+                    func(val, visitor)
                 }
                 Ok(())
             });
@@ -1006,10 +984,16 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
     }
 
     #[inline]
-    unsafe fn trace_vec<'gc, T, Id>(&mut self, raw: &mut ::zerogc::Gc<'gc, Id::RawVecRepr<'gc>, Id>) -> Result<(), Self::Err>
-        where T: GcSafe<'gc, Id>, Id: ::zerogc::CollectorId {
-        // Just visit our innards as if they were a regular `Gc` reference
-        self.trace_gc(raw)
+    unsafe fn trace_vec<'gc, T, V>(&mut self, raw: &mut V) -> Result<(), Self::Err>
+        where T: GcSafe<'gc, V::Id>, V: RawGcVec<'gc, T> {
+        if TypeId::of::<V::Id>() == TypeId::of::<crate::CollectorId>() {
+            let raw = &mut *(raw as *mut V as *mut self::layout::SimpleVecRepr<'gc, T>);
+            assert_eq!(*(*raw.header()).common_header.collector_id(), self.expected_collector);
+            self._trace_own_rawvec::<T>(raw.header() as *mut _);
+            Ok(())
+        } else {
+            unreachable!("Can't trace {}", std::any::type_name::<V::Id>());
+        }
     }
 
     #[inline]
@@ -1036,7 +1020,7 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
             let mut gc = std::mem::transmute::<NonNull<[T]>, ::zerogc::Gc<'gc, [T], CollectorId>>(
                 NonNull::from(array.as_slice())
             );
-            self._visit_own_gc(&mut gc);
+            self._trace_own_gc(&mut gc);
             /*
              * NOTE: Must transmute instead of using GcArray::from_raw
              * because we don't satisfy the 'GcSafe' bound.
@@ -1059,39 +1043,60 @@ impl MarkVisitor<'_> {
     /// although that can't be proven at compile time.
     ///
     /// The caller should only use `GcVisitor::visit_gc()`
-    unsafe fn _visit_own_gc<'gc, T: Trace + ?Sized>(
+    unsafe fn _trace_own_gc<'gc, T: Trace + ?Sized>(
         &mut self, gc: &mut Gc<'gc, T>
     ) {
-        self._visit_own_gc_with(gc, |val, visitor| <T as Trace>::trace(val, visitor))
+        self._trace_own_gc_with(
+            GcHeader::from_value_ptr(gc.as_raw_ptr()),
+            T::NEEDS_TRACE,
+            |_value, visitor| {
+                <T as Trace>::trace(&mut *gc.as_raw_ptr(), visitor)
+            }
+        )
+    }
+    unsafe fn _trace_own_rawvec<T: Trace>(
+        &mut self, header: *mut GcVecHeader,
+    ) {
+        self._trace_own_gc_with(&mut (*header).common_header, T::NEEDS_TRACE, |ptr, visitor| {
+            let slice = std::slice::from_raw_parts_mut(ptr as *mut T, (*header).len.get());
+            for val in slice {
+                T::trace(val, visitor)?;
+            }
+            Ok(())
+        });
     }
     /// Visit a GC type whose [::zerogc::CollectorId] matches our own,
     /// tracing it with the specified closure
     ///
     /// The caller should only use `GcVisitor::visit_gc()`
-    unsafe fn _visit_own_gc_with<'gc, T: Trace + ?Sized>(
-        &mut self, gc: &mut Gc<'gc, T>,
-        trace_func: impl FnOnce(&mut T, &mut MarkVisitor) -> Result<(), !>
-    ) {
+    #[inline]
+    unsafe fn _trace_own_gc_with< F>(
+        &mut self, header: *mut GcHeader,
+        needs_trace: bool,
+        trace_func: F
+    ) where F: FnOnce(*mut c_void, &mut MarkVisitor) -> Result<(), !> {
         // Verify this again (should be checked by caller)
-        debug_assert_eq!(*gc.collector_id(), self.expected_collector);
-        let header = GcHeader::from_value_ptr(gc.as_raw_ptr());
-        self.visit_raw_gc(&mut *header, |obj, visitor| {
+        debug_assert_eq!(*(*header).collector_id(), self.expected_collector);
+        self.visit_raw_gc(&mut *header, |actual_header, visitor| {
+            debug_assert_eq!(actual_header as *const _, header as *const _);
             let inverted_mark = visitor.inverted_mark;
-            if !T::NEEDS_TRACE {
+            #[allow(unused_variables)]
+            let val = (*header).value();
+            if !needs_trace {
                 /*
                  * We don't need to mark this grey
                  * It has no internals that need to be traced.
                  * We can directly move it directly to the black set
                  */
-                obj.update_raw_mark_state(MarkState::Black.to_raw(inverted_mark));
+                (*header).update_raw_mark_state(MarkState::Black.to_raw(inverted_mark));
             } else {
                 /*
                  * We need to mark this object grey and push it onto the grey stack.
                  * It will be processed later
                  */
-                (*obj).update_raw_mark_state(MarkState::Grey.to_raw(inverted_mark));
+                (*header).update_raw_mark_state(MarkState::Grey.to_raw(inverted_mark));
                 #[cfg(not(feature = "implicit-grey-stack"))] {
-                    visitor.grey_stack.push(obj as *mut GcHeader);
+                    visitor.grey_stack.push(header as *const GcHeader as *mut GcHeader);
                     drop(trace_func);
                 }
                 #[cfg(feature = "implicit-grey-stack")] {
@@ -1101,15 +1106,12 @@ impl MarkVisitor<'_> {
                      * boost performance (See 9a9634d68a4933d).
                      * On some workloads this is fine.
                      */
-                    let Ok(()) = trace_func(
-                        &mut *gc.as_raw_ptr(),
-                        visitor
-                    );
+                    let Ok(()) = trace_func(val, visitor);
                     /*
                      * Mark the object black now it's innards have been traced
                      * NOTE: We do **not** do this with an implicit stack.
                      */
-                    (*obj).update_raw_mark_state(MarkState::Black.to_raw(
+                    (*header).update_raw_mark_state(MarkState::Black.to_raw(
                         inverted_mark
                     ));
                 }

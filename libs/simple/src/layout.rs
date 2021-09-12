@@ -14,8 +14,8 @@ use std::cell::Cell;
 use std::ffi::c_void;
 use std::alloc::Layout;
 
-use zerogc::{GcSafe, Trace};
-use zerogc::vec::repr::{GcVecRepr,};
+use zerogc::{GcSafe, GcSimpleAlloc, Trace};
+use zerogc::vec::repr::{IGcVec, RawGcVec};
 
 use zerogc_context::field_offset;
 use zerogc_derive::{NullTrace, unsafe_gc_impl};
@@ -259,61 +259,102 @@ impl GcVecHeader {
 ///
 /// NOTE: Length and capacity are stored implicitly in the [GcVecHeader]
 #[repr(C)]
-pub struct SimpleVecRepr<'gc, T: GcSafe<'gc, crate::CollectorId> + Sized> {
-    marker: PhantomData<(*const [T], &'gc crate::CollectorId)>,
+pub struct SimpleVecRepr<'gc, T: Sized> {
+    marker: PhantomData<crate::Gc<'gc, [T]>>,
+    header: NonNull<GcVecHeader>,
+    ctx: &'gc crate::SimpleCollectorContext
 }
-impl<'gc, T: GcSafe<'gc, crate::CollectorId>> SimpleVecRepr<'gc, T> {
+impl<'gc, T> SimpleVecRepr<'gc, T> {
     #[inline]
-    fn header(&self) -> *mut GcVecHeader {
-        unsafe {
-            /*
-             * TODO: what if we have a non-standard alignment?\
-             * Our `T` is erased at runtime....
-             * this is a bug in the epsilon collector too
-             */
-            (self as *const Self as *mut Self as *mut u8)
-                .sub(GcVecHeader::LAYOUT.value_offset(std::mem::align_of::<T>()))
-                .cast()
+    pub(crate) unsafe fn from_raw_parts(header: NonNull<GcVecHeader>, ctx: &'gc crate::SimpleCollectorContext) -> Self {
+        SimpleVecRepr { header, ctx, marker: PhantomData }
+    }
+    #[inline]
+    pub(crate) fn header(&self) -> *const GcVecHeader {
+        self.header.as_ptr() as *const _
+    }
+}
+impl<'gc, T: GcSafe<'gc, crate::CollectorId>> Copy for SimpleVecRepr<'gc, T> {}
+impl<'gc, T: GcSafe<'gc, crate::CollectorId>> Clone for SimpleVecRepr<'gc, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<'gc, T: GcSafe<'gc, crate::CollectorId>> Extend<T> for SimpleVecRepr<'gc, T> {
+    #[inline]
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        let iter = iter.into_iter();
+        self.reserve(iter.size_hint().1.unwrap_or(0));
+        for val in iter {
+            self.push(val);
         }
     }
 }
-unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> GcVecRepr<'gc> for SimpleVecRepr<'gc, T> {
-    /// Right now, there is no stable API for in-place re-allocation
-    const SUPPORTS_REALLOC: bool = false;
+#[inherent::inherent]
+unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> RawGcVec<'gc, T> for SimpleVecRepr<'gc, T> {
+    pub fn iter(&self) -> zerogc::vec::repr::RawVecIter<'gc, T, Self>
+        where T: Copy;
+}
+#[inherent::inherent]
+unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> IGcVec<'gc, T> for SimpleVecRepr<'gc ,T> {
     type Id = crate::CollectorId;
 
     #[inline]
-    fn element_layout(&self) -> Layout {
-        unsafe {
-            match (*self.header()).common_header.type_info.layout {
-                GcTypeLayout::Vec {
-                    element_layout, ..
-                } => element_layout,
-                _ => std::hint::unreachable_unchecked()
-            }
-        }
-    }
-
-    #[inline]
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         unsafe { (*self.header()).len.get() }
     }
 
     #[inline]
-    unsafe fn set_len(&self, len: usize) {
+    pub unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.capacity());
         (*self.header()).len.set(len);
     }
 
     #[inline]
-    fn capacity(&self) -> usize {
+    pub fn capacity(&self) -> usize {
         unsafe { (*self.header()).capacity }
     }
 
     #[inline]
-    unsafe fn ptr(&self) -> *const c_void {
-        self as *const Self as *const c_void // We are actually just a GC pointer to the value ptr
+    pub fn with_capacity_in(capacity: usize, ctx: &'gc crate::SimpleCollectorContext) -> Self {
+        ctx.alloc_raw_vec_with_capacity(capacity)
     }
+
+    #[inline]
+    pub fn reserve_in_place(&mut self, _additional: usize) -> Result<(), zerogc::vec::repr::ReallocFailedError> {
+        // TODO: Can we reasonably implement this?
+        Err(zerogc::vec::repr::ReallocFailedError::Unsupported)
+    }
+
+    #[inline]
+    pub unsafe fn as_ptr(&self) -> *const T {
+        (self.header.as_ptr() as *mut u8)
+            .add(GcVecHeader::LAYOUT.value_offset(std::mem::align_of::<T>()))
+            .cast()
+    }
+
+    #[inline]
+    pub fn context(&self) -> &'gc crate::SimpleCollectorContext {
+        self.ctx
+    }
+
+    // Default methods:
+    pub unsafe fn as_mut_ptr(&mut self) -> *mut T;
+    pub fn replace(&mut self, index: usize, val: T) -> T;
+    pub fn set(&mut self, index: usize, val: T);
+    pub fn extend_from_slice(&mut self, src: &[T])
+        where T: Copy;
+    pub fn push(&mut self, val: T);
+    pub fn reserve(&mut self, additional: usize);
+    pub fn is_empty(&self) -> bool;
+    pub fn new_in(ctx: &'gc crate::SimpleCollectorContext) -> Self;
+    pub fn copy_from_slice(src: &[T], ctx: &'gc crate::SimpleCollectorContext) -> Self
+        where T: Copy;
+    pub fn from_vec(src: Vec<T>, ctx: &'gc crate::SimpleCollectorContext) -> Self;
+    pub fn get(&mut self, index: usize) -> Option<T>
+        where T: Copy;
+    pub unsafe fn as_slice_unchecked(&self) -> &[T];
 }
 unsafe_gc_impl!(
     target => SimpleVecRepr<'gc, T>,
@@ -328,7 +369,7 @@ unsafe_gc_impl!(
     trace_mut => |self, visitor| {
         // Trace our innards
         unsafe {
-            let start: *mut T = self.ptr() as *const T as *mut T;
+            let start: *mut T = self.as_ptr() as *const T as *mut T;
             for i in 0..self.len() {
                 visitor.trace(&mut *start.add(i))?;
             }
@@ -338,7 +379,7 @@ unsafe_gc_impl!(
     trace_immutable => |self, visitor| {
         // Trace our innards
         unsafe {
-            let start: *mut T = self.ptr() as *const T as *mut T;
+            let start: *mut T = self.as_ptr() as *const T as *mut T;
             for i in 0..self.len() {
                 visitor.trace_immutable(&*start.add(i))?;
             }
@@ -367,6 +408,19 @@ impl GcHeader {
         common_header_offset: 0,
         marker: PhantomData
     };
+    /// Get the collector id associated with this object.
+    #[inline]
+    pub fn collector_id(&self) -> &'_ crate::CollectorId {
+        #[cfg(feature = "multiple-collectors")] {
+            unsafe {
+                &*self.mark_data.load_snapshot().collector_id_ptr
+            }
+        }
+        #[cfg(not(feature = "multiple-collectors"))] {
+            const ID: CollectorId = unsafe { CollectorId::from_raw(PhantomData) };
+            &ID
+        } 
+    }
     /// Create a new header
     #[inline]
     pub fn new(type_info: &'static GcType, mark_data: SimpleMarkData) -> Self {
