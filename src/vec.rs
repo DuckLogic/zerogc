@@ -11,7 +11,10 @@ use zerogc_derive::{unsafe_gc_impl};
 use crate::{CollectorId, GcRebrand, GcSafe, GcSystem, Trace};
 use crate::vec::raw::{IGcVec, ReallocFailedError};
 
+pub mod cell;
 pub mod raw;
+
+pub use self::cell::GcVecCell;
 
 /// A uniquely owned [Vec] for use with garbage collectors.
 ///

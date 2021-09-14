@@ -213,13 +213,16 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     ///
     /// In other words, the following is invalid:
     /// ```no_run
+    /// # use zerogc::epsilon::{EpsilonCollectorId, EpsilonContext};
     /// # use zerogc::vec::{GcVecCell};
-    /// let v = GcVecCell::<i32>::new();
-    /// v.push(v);
-    /// let copy = v;
-    /// let slice = unsafe { v.get_slice_unchecked() };
+    /// # fn do_ub(context: &EpsilonContext) {
+    /// let mut v = GcVecCell::<i32, EpsilonCollectorId>::new_in(context);
+    /// v.push(23);
+    /// let mut copy = v;
+    /// let slice = unsafe { v.as_slice_unchecked() };
     /// copy.push(15);
-    /// slice[0] // UB
+    /// slice[0]; // UB
+    /// # }
     /// ```
     #[inline]
     unsafe fn as_slice_unchecked(&self) -> &[T] {
