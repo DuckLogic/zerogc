@@ -5,7 +5,7 @@ use std::alloc::Layout;
 use std::cell::Cell;
 
 use crate::{GcRebrand, GcSafe, GcSimpleAlloc};
-use crate::vec::raw::{IGcVec, RawGcVec};
+use crate::vec::raw::{IGcVec, GcRawVec};
 
 use super::{EpsilonCollectorId, EpsilonContext};
 
@@ -223,7 +223,7 @@ zerogc_derive::unsafe_gc_impl!(
     },
 );
 #[inherent::inherent]
-unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> RawGcVec<'gc, T> for EpsilonRawVec<'gc, T> {
+unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> GcRawVec<'gc, T> for EpsilonRawVec<'gc, T> {
     pub fn iter(&self) -> zerogc::vec::raw::RawVecIter<'gc, T, Self>
         where T: Copy;
 }

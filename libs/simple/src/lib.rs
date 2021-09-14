@@ -71,7 +71,7 @@ use crate::layout::{StaticGcType, GcType, SimpleVecRepr, StaticVecType, SimpleMa
 use zerogc_context::collector::{RawSimpleAlloc};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 use zerogc_context::{CollectionManager as AbstractCollectionManager, RawContext as AbstractRawContext, CollectorContext};
-use zerogc::vec::raw::{RawGcVec};
+use zerogc::vec::raw::{GcRawVec};
 use zerogc::array::repr::{GcArrayRepr, ThinArrayRepr};
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -985,7 +985,7 @@ unsafe impl GcVisitor for MarkVisitor<'_> {
 
     #[inline]
     unsafe fn trace_vec<'gc, T, V>(&mut self, raw: &mut V) -> Result<(), Self::Err>
-        where T: GcSafe<'gc, V::Id>, V: RawGcVec<'gc, T> {
+        where T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T> {
         if TypeId::of::<V::Id>() == TypeId::of::<crate::CollectorId>() {
             let raw = &mut *(raw as *mut V as *mut self::layout::SimpleVecRepr<'gc, T>);
             assert_eq!(*(*raw.header()).common_header.collector_id(), self.expected_collector);

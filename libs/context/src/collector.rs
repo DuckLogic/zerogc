@@ -15,7 +15,7 @@ use zerogc::{Gc, GcSafe, GcSimpleAlloc, GcSystem, Trace};
 
 use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
-use zerogc::vec::raw::RawGcVec;
+use zerogc::vec::raw::GcRawVec;
 
 
 pub unsafe trait ConstRawCollectorImpl: RawCollectorImpl {
@@ -44,7 +44,7 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     /// The context
     type RawContext: RawContext<Self>;
     /// The raw representation of a vec
-    type RawVec<'gc, T: GcSafe<'gc, CollectorId<Self>>>: RawGcVec<'gc, T, Id=CollectorId<Self>>;
+    type RawVec<'gc, T: GcSafe<'gc, CollectorId<Self>>>: GcRawVec<'gc, T, Id=CollectorId<Self>>;
 
     /// True if this collector is a singleton
     ///

@@ -288,7 +288,7 @@ fn grow_vec<'gc, T, V>(vec: &mut V, amount: usize)
 /// In particular, this still contains a `len`.
 ///
 /// ## Safety
-/// This must be implemented consistent with the API of [RawGcVec].
+/// This must be implemented consistent with the API of [GcRawVec].
 ///
 /// It is undefined behavior to take a slice of the elements
 /// while the length is being mutated.
@@ -299,7 +299,7 @@ fn grow_vec<'gc, T, V>(vec: &mut V, amount: usize)
 ///
 /// Generally speaking,
 /// [GcVec] and [GcVec] should be preferred.
-pub unsafe trait RawGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Copy + IGcVec<'gc, T> {
+pub unsafe trait GcRawVec<'gc, T: GcSafe<'gc, Self::Id>>: Copy + IGcVec<'gc, T> {
     /// Iterate over the elements of the vectors
     ///
     /// Panics if the length changes.
@@ -319,7 +319,7 @@ pub unsafe trait RawGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Copy + IGcVec<'gc, T> 
     }
 }
 
-/// An iterator over a [RawGcVec]
+/// An iterator over a [GcRawVec]
 ///
 /// Because the length may change,
 /// this iterates over the indices
@@ -334,7 +334,7 @@ pub unsafe trait RawGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Copy + IGcVec<'gc, T> 
 ///
 /// It will panic if the length changes,
 /// either increasing or decreasing.
-pub struct RawVecIter<'gc, T: GcSafe<'gc, V::Id> + Copy, V: RawGcVec<'gc, T>> {
+pub struct RawVecIter<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> {
     target: V,
     marker: PhantomData<crate::Gc<'gc, T, V::Id>>,
     index: usize,
@@ -345,7 +345,7 @@ pub struct RawVecIter<'gc, T: GcSafe<'gc, V::Id> + Copy, V: RawGcVec<'gc, T>> {
     end: usize,
     original_len: usize,
 }
-impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: RawGcVec<'gc, T>> RawVecIter<'gc, T, V> {
+impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> RawVecIter<'gc, T, V> {
     /// Return the original length of the vector
     /// when iteration started.
     ///
@@ -364,7 +364,7 @@ impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: RawGcVec<'gc, T>> RawVecIter<'gc, T, 
         );
     }
 }
-impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: RawGcVec<'gc, T>> Iterator for RawVecIter<'gc, T, V> {
+impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> Iterator for RawVecIter<'gc, T, V> {
     type Item = T;
     #[inline]
     #[track_caller]
@@ -394,7 +394,7 @@ impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: RawGcVec<'gc, T>> Iterator for RawVec
         self.len()
     }
 }
-impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: RawGcVec<'gc, T>> DoubleEndedIterator for RawVecIter<'gc, T, V> {
+impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> DoubleEndedIterator for RawVecIter<'gc, T, V> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         self.check_unmodified_length();
@@ -408,9 +408,9 @@ impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: RawGcVec<'gc, T>> DoubleEndedIterator
         }
     }
 }
-impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: RawGcVec<'gc, T>> ExactSizeIterator for RawVecIter<'gc, T, V> {}
-impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: RawGcVec<'gc, T>> core::iter::FusedIterator for RawVecIter<'gc, T, V> {}
-/// Dummy implementation of [RawGcVec] for collectors
+impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> ExactSizeIterator for RawVecIter<'gc, T, V> {}
+impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> core::iter::FusedIterator for RawVecIter<'gc, T, V> {}
+/// Dummy implementation of [GcRawVec] for collectors
 /// which do not support [GcVec]
 pub struct Unsupported<'gc, T, Id: CollectorId> {
     /// The marker `PhantomData` needed to construct this type
@@ -450,7 +450,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Clone for Unsupported<'gc, T, Id>
     }
 }
 
-unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> RawGcVec<'gc, T> for Unsupported<'gc, T, Id> {}
+unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcRawVec<'gc, T> for Unsupported<'gc, T, Id> {}
 #[allow(unused_variables)]
 unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for Unsupported<'gc, T, Id> {
     type Id = Id;

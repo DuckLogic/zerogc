@@ -28,7 +28,7 @@ pub struct GcVec<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
     raw: UnsafeCell<Id::RawVec<'gc, T>>
 }
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
-    /// Create a [GcVec] from a [RawGcVec].
+    /// Create a [GcVec] from a [GcRawVec].
     ///
     /// ## Safety
     /// There must be no other references to the specified raw vector.
@@ -36,7 +36,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
     pub unsafe fn from_raw(raw: Id::RawVec<'gc, T>) -> Self {
         GcVec { raw: UnsafeCell::new(raw) }
     }
-    /// Convert this vector into its underlying [RawGcVec](`zerogc::vec::repr::RawGcVec`)
+    /// Convert this vector into its underlying [GcRawVec](`zerogc::vec::repr::GcRawVec`)
     ///
     /// ## Safety
     /// Because this consumes ownership,
@@ -77,7 +77,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
             )
         }
     }
-    /// Get a reference to the underlying [RawGcVec](`zerogc::vec::repr::RawGcVec`),
+    /// Get a reference to the underlying [GcRawVec](`zerogc::vec::repr::GcRawVec`),
     /// bypassing restrictions on unique ownership.
     ///
     /// ## Safety
@@ -325,7 +325,7 @@ unsafe_gc_impl!(
     collector_id => Id
 );
 
-/// Indicates there is insufficient capacity for an operation on a [RawGcVec]
+/// Indicates there is insufficient capacity for an operation on a [GcRawVec]
 #[derive(Debug)]
 pub struct InsufficientCapacityError;
 

@@ -60,7 +60,7 @@ use core::hash::{Hash, Hasher};
 use core::fmt::{self, Debug, Formatter, Display};
 use core::cmp::Ordering;
 
-use vec::raw::{RawGcVec};
+use vec::raw::{GcRawVec};
 use zerogc_derive::unsafe_gc_impl;
 pub use zerogc_derive::{Trace, NullTrace};
 
@@ -578,7 +578,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
             self.alloc_slice_fill_with(len, |_idx| val)
         }
     }
-    /// Create a new [RawGcVec] with the specified capacity
+    /// Create a new [GcRawVec] with the specified capacity
     /// and an implicit reference to this [GcContext].
     fn alloc_raw_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> <Self::Id as CollectorId>::RawVec<'gc, T>
         where T: GcSafe<'gc, Self::Id>;
@@ -665,10 +665,10 @@ pub unsafe trait HandleCollectorId: CollectorId {
 pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop + 'static + for<'gc> GcSafe<'gc, Self> {
     /// The type of the garbage collector system
     type System: GcSystem<Id=Self>;
-    /// The implementation of [RawGcVec] for this type.
+    /// The implementation of [GcRawVec] for this type.
     ///
     /// May be [crate::vec::repr::Unsupported] if vectors are unsupported.
-    type RawVec<'gc, T: GcSafe<'gc, Self>>: crate::vec::repr::RawGcVec<'gc, T, Id=Self>;
+    type RawVec<'gc, T: GcSafe<'gc, Self>>: crate::vec::raw::GcRawVec<'gc, T, Id=Self>;
     /// The raw representation of `GcArray` pointers
     /// in this collector.
     type ArrayRepr<'gc, T>: ~const crate::array::repr::GcArrayRepr<'gc, T, Id=Self>;
@@ -1450,7 +1450,7 @@ pub unsafe trait GcVisitor: Sized {
     unsafe fn trace_vec<'gc, T, V>(
         &mut self, raw: &mut V
     ) -> Result<(), Self::Err>
-        where T: GcSafe<'gc, V::Id>, V: RawGcVec<'gc, T>;
+        where T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>;
 
     /// Visit a garbage collected array.
     ///

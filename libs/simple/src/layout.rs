@@ -15,7 +15,7 @@ use std::ffi::c_void;
 use std::alloc::Layout;
 
 use zerogc::{GcSafe, GcSimpleAlloc, Trace};
-use zerogc::vec::raw::{IGcVec, RawGcVec};
+use zerogc::vec::raw::{IGcVec, GcRawVec};
 
 use zerogc_context::field_offset;
 use zerogc_derive::{NullTrace, unsafe_gc_impl};
@@ -292,7 +292,7 @@ impl<'gc, T: GcSafe<'gc, crate::CollectorId>> Extend<T> for SimpleVecRepr<'gc, T
     }
 }
 #[inherent::inherent]
-unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> RawGcVec<'gc, T> for SimpleVecRepr<'gc, T> {
+unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> GcRawVec<'gc, T> for SimpleVecRepr<'gc, T> {
     pub fn iter(&self) -> zerogc::vec::raw::RawVecIter<'gc, T, Self>
         where T: Copy;
 }
