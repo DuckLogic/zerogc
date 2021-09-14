@@ -5,7 +5,7 @@ use std::alloc::Layout;
 use std::cell::Cell;
 
 use crate::{GcRebrand, GcSafe, GcSimpleAlloc};
-use crate::vec::repr::{IGcVec, RawGcVec};
+use crate::vec::raw::{IGcVec, RawGcVec};
 
 use super::{EpsilonCollectorId, EpsilonContext};
 
@@ -224,7 +224,7 @@ zerogc_derive::unsafe_gc_impl!(
 );
 #[inherent::inherent]
 unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> RawGcVec<'gc, T> for EpsilonRawVec<'gc, T> {
-    pub fn iter(&self) -> zerogc::vec::repr::RawVecIter<'gc, T, Self>
+    pub fn iter(&self) -> zerogc::vec::raw::RawVecIter<'gc, T, Self>
         where T: Copy;
 }
 #[inherent::inherent]
@@ -254,8 +254,8 @@ unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> IGcVec<'gc, T> for EpsilonR
     }
 
     #[inline]
-    pub fn reserve_in_place(&mut self, _additional: usize) -> Result<(), crate::vec::repr::ReallocFailedError> {
-        Err(crate::vec::repr::ReallocFailedError::Unsupported)
+    pub fn reserve_in_place(&mut self, _additional: usize) -> Result<(), crate::vec::raw::ReallocFailedError> {
+        Err(crate::vec::raw::ReallocFailedError::Unsupported)
     }
 
     #[inline]

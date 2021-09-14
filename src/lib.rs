@@ -60,7 +60,7 @@ use core::hash::{Hash, Hasher};
 use core::fmt::{self, Debug, Formatter, Display};
 use core::cmp::Ordering;
 
-use vec::repr::{RawGcVec};
+use vec::raw::{RawGcVec};
 use zerogc_derive::unsafe_gc_impl;
 pub use zerogc_derive::{Trace, NullTrace};
 

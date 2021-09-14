@@ -71,7 +71,7 @@ use crate::layout::{StaticGcType, GcType, SimpleVecRepr, StaticVecType, SimpleMa
 use zerogc_context::collector::{RawSimpleAlloc};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 use zerogc_context::{CollectionManager as AbstractCollectionManager, RawContext as AbstractRawContext, CollectorContext};
-use zerogc::vec::repr::{RawGcVec};
+use zerogc::vec::raw::{RawGcVec};
 use zerogc::array::repr::{GcArrayRepr, ThinArrayRepr};
 use std::cell::Cell;
 use std::ffi::c_void;

@@ -15,7 +15,7 @@ use std::ffi::c_void;
 use std::alloc::Layout;
 
 use zerogc::{GcSafe, GcSimpleAlloc, Trace};
-use zerogc::vec::repr::{IGcVec, RawGcVec};
+use zerogc::vec::raw::{IGcVec, RawGcVec};
 
 use zerogc_context::field_offset;
 use zerogc_derive::{NullTrace, unsafe_gc_impl};
@@ -293,7 +293,7 @@ impl<'gc, T: GcSafe<'gc, crate::CollectorId>> Extend<T> for SimpleVecRepr<'gc, T
 }
 #[inherent::inherent]
 unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> RawGcVec<'gc, T> for SimpleVecRepr<'gc, T> {
-    pub fn iter(&self) -> zerogc::vec::repr::RawVecIter<'gc, T, Self>
+    pub fn iter(&self) -> zerogc::vec::raw::RawVecIter<'gc, T, Self>
         where T: Copy;
 }
 #[inherent::inherent]
@@ -322,9 +322,9 @@ unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> IGcVec<'gc, T> for SimpleVe
     }
 
     #[inline]
-    pub fn reserve_in_place(&mut self, _additional: usize) -> Result<(), zerogc::vec::repr::ReallocFailedError> {
+    pub fn reserve_in_place(&mut self, _additional: usize) -> Result<(), zerogc::vec::raw::ReallocFailedError> {
         // TODO: Can we reasonably implement this?
-        Err(zerogc::vec::repr::ReallocFailedError::Unsupported)
+        Err(zerogc::vec::raw::ReallocFailedError::Unsupported)
     }
 
     #[inline]

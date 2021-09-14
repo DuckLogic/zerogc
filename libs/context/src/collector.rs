@@ -15,7 +15,7 @@ use zerogc::{Gc, GcSafe, GcSimpleAlloc, GcSystem, Trace};
 
 use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
-use zerogc::vec::repr::RawGcVec;
+use zerogc::vec::raw::RawGcVec;
 
 
 pub unsafe trait ConstRawCollectorImpl: RawCollectorImpl {

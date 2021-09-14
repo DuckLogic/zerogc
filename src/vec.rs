@@ -9,9 +9,9 @@ use inherent::inherent;
 use zerogc_derive::{unsafe_gc_impl};
 
 use crate::{CollectorId, GcRebrand, GcSafe, GcSystem, Trace};
-use crate::vec::repr::{IGcVec, ReallocFailedError};
+use crate::vec::raw::{IGcVec, ReallocFailedError};
 
-pub mod repr;
+pub mod raw;
 
 /// A uniquely owned [Vec] for use with garbage collectors.
 ///
