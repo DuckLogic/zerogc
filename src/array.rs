@@ -1,7 +1,8 @@
 //! Defines the interface to garbage collected arrays.
-use core::ops::Deref;
+use core::ops::{Deref, Index};
 use core::ptr::NonNull;
 use core::cmp::Ordering;
+use core::slice::SliceIndex;
 use core::str;
 use core::fmt::{self, Formatter, Debug, Display};
 use core::hash::{Hash, Hasher};
@@ -207,6 +208,14 @@ impl<'gc, T, Id: ~const ConstCollectorId> const ConstArrayAccess<'gc, T> for GcA
     #[inline]
     fn len_const(&self) -> usize {
         self.as_slice_const().len()
+    }
+}
+impl<'gc, T, I, Id: CollectorId> Index<I> for GcArray<'gc, T, Id>
+    where I: SliceIndex<[T]> {
+    type Output = I::Output;
+    #[inline]
+    fn index(&self, idx: I) -> &I::Output {
+        &self.as_slice()[idx]
     }
 }
 impl<'gc, T, Id: CollectorId> Deref for GcArray<'gc, T, Id> {

@@ -104,10 +104,12 @@
 //! by some. This is less of a problem for `zerogc`, because collections can only
 //! happen at explicit safepoints.
 use core::marker::PhantomData;
-use core::ops::{Deref, DerefMut};
+use core::ops::{Deref, DerefMut, Index, IndexMut};
+use core::slice::SliceIndex;
 use core::convert::{AsRef, AsMut};
 use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;
+use core::fmt::{self, Debug, Formatter};
 
 use inherent::inherent;
 use zerogc_derive::{unsafe_gc_impl};
@@ -227,6 +229,21 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
         self.as_mut_slice().iter_mut()
     }
 }
+impl<'gc, T: GcSafe<'gc, Id>, I, Id: CollectorId> Index<I> for GcVec<'gc, T, Id>
+    where I: SliceIndex<[T]> {
+    type Output = I::Output;
+    #[inline]
+    fn index(&self, idx: I) -> &I::Output {
+        &self.as_slice()[idx]
+    }
+}
+impl<'gc, T: GcSafe<'gc, Id>, I, Id: CollectorId> IndexMut<I> for GcVec<'gc, T, Id>
+    where I: SliceIndex<[T]> {
+    #[inline]
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        &mut self.as_mut_slice()[index]
+    }
+}
 /// Because `GcVec` is uniquely owned (`!Copy`),
 /// it can safely dereference to a slice
 /// without risk of another reference mutating it.
@@ -244,6 +261,14 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> DerefMut for GcVec<'gc, T, Id> {
     #[inline]
     fn deref_mut(&mut self) -> &mut [T] {
         self.as_mut_slice()
+    }
+}
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Debug for GcVec<'gc, T, Id>
+    where T: Debug {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.iter())
+            .finish()
     }
 }
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> AsRef<[T]> for GcVec<'gc, T, Id> {
