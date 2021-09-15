@@ -1,12 +1,10 @@
-//! The underlying representation of a [GcVec]
+//! The underlying representation of a [GcVec](`crate::vec::GcVec`)
 
 use core::marker::PhantomData;
 
 use crate::{CollectorId, GcRebrand, GcSafe, GcSystem};
 
 use zerogc_derive::unsafe_gc_impl;
-
-
 
 /// A marker error to indicate in-place reallocation failed
 #[derive(Debug)]
@@ -22,7 +20,7 @@ pub enum ReallocFailedError {
 /// Basic methods shared across all garbage collected vectors.
 ///
 /// All garbage collectors are implicitly
-/// associated with their owning [GcContext].
+/// associated with their owning [GcContext](`crate::GcContext`).
 ///
 /// This can be changed by calling `detatch`,
 /// although this is currently unimplemented.
@@ -102,7 +100,7 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     fn reserve_in_place(&mut self, additional: usize) -> Result<(), ReallocFailedError>;
     /// Reserves capacity for at least `additional`.
     ///
-    /// If this type is a [GcVecCell] and there are outstanding borrows references,
+    /// If this type is a [GcVecCell](`crate::vec::cell::GcVecCell`) and there are outstanding borrows references,
     /// then this will panic as if calling [`RefCell::borrow_mut`](`core::cell::RefCell::borrow_mut`).
     /// 
     /// ## Safety
@@ -121,7 +119,7 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     /// Push the specified element onto the end
     /// of this vector.
     ///
-    /// If this type is a [GcVecCell] and there are outstanding borrows references,
+    /// If this type is a [GcVecCell](`crate::vec::GcVecCell`) and there are outstanding borrows references,
     /// then this will panic as if calling [`RefCell::borrow_mut`](`core::cell::RefCell::borrow_mut`).
     ///
     /// ## Safety
@@ -228,9 +226,9 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     unsafe fn as_slice_unchecked(&self) -> &[T] {
         core::slice::from_raw_parts(self.as_ptr(), self.len())
     }
-    /// Get the [GcContext] that this vector is associated with.
+    /// Get the [GcContext](`crate::GcContext`) that this vector is associated with.
     ///
-    /// Because each vector is implicitly associated with a [GcContext] (which is thread-local),
+    /// Because each vector is implicitly associated with a [GcContext](`crate::GcContext`) (which is thread-local),
     /// vectors are `!Send` unless you call `detatch`.
     fn context(&self) -> &'gc <<Self::Id as CollectorId>::System as GcSystem>::Context;
 }
@@ -271,19 +269,22 @@ fn grow_vec<'gc, T, V>(vec: &mut V, amount: usize)
 /// with unchecked interior mutability.
 ///
 /// See the [module docs](`zerogc::vec`) for
-/// more details on the distinctions
+/// more details on the distinctions between vector types.
 /// 
 /// ## Interior Mutability
-/// TLDR: This is the [UnsafeCell](std::cell::UnsafeCell)
+/// TLDR: This is the [Cell](core::cell::Cell)
 /// equivalent of [GcVecCell](zerogc::vec::GcVecCell).
+///
+/// It only gives/accepts owned values `T`, and cannot safely
+/// give out references like `&T` or `&[T]`.
 ///
 /// Interior mutability is necessary because garbage collection
 /// allows shared references, and the length can be mutated
 /// by one reference while another reference is in use.
 /// 
 /// Unlike `UnsafeCell`, not *all* accesses to this are `unsafe`.
-/// Calls to `get`, `set`, and `push` are perfectly safe.
-/// Only calls to `get_slice_unchecked
+/// Calls to `get`, `set`, and `push` are perfectly safe because they take/return `T`, not `&T`.
+/// Only calls to `get_slice_unchecked` are `unsafe`.
 ///
 /// NOTE: This is completely different from the distinction between
 /// [Vec] and [RawVec](https://github.com/rust-lang/rust/blob/master/library/alloc/src/raw_vec.rs)
@@ -298,10 +299,10 @@ fn grow_vec<'gc, T, V>(vec: &mut V, amount: usize)
 ///
 /// This type is `!Send`,
 /// because it is implicitly associated
-/// with the [GcContext] it was allocated in.
+/// with the [GcContext](`crate::GcContext`) it was allocated in.
 ///
 /// Generally speaking,
-/// [GcVec] and [GcVec] should be preferred.
+/// [GcVec](`crate::vec::GcVec`) and [GcVecCell](`crate::vec::GcVecCell`) should be preferred.
 pub unsafe trait GcRawVec<'gc, T: GcSafe<'gc, Self::Id>>: Copy + IGcVec<'gc, T> {
     /// Iterate over the elements of the vectors
     ///
@@ -414,7 +415,7 @@ impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> DoubleEndedIterator
 impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> ExactSizeIterator for RawVecIter<'gc, T, V> {}
 impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> core::iter::FusedIterator for RawVecIter<'gc, T, V> {}
 /// Dummy implementation of [GcRawVec] for collectors
-/// which do not support [GcVec]
+/// which do not support [GcVec](`crate::vec::GcVec`)
 pub struct Unsupported<'gc, T, Id: CollectorId> {
     /// The marker `PhantomData` needed to construct this type
     pub marker: PhantomData<crate::Gc<'gc, [T], Id>>,

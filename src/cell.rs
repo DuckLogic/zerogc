@@ -1,7 +1,6 @@
 //! Implements a [GcCell] to allow mutating values
 //! inside garbage collected objects.
 //!
-//! 
 //! Normally garbage collected objects are immutable,
 //! since their references are shared. It's typical
 //! for collectors to want to trigger a write barrier

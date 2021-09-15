@@ -1,4 +1,4 @@
-//! Defines the underlying reprsention of a [GcArray] pointer.
+//! Defines the underlying representation of a [GcArray](`crate::array::GcArray`) pointer.
 //!
 //!
 //! Two possible implementations are also available:

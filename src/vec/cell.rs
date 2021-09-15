@@ -37,8 +37,8 @@ unsafe_gc_impl!(
 /// A garbage collected vector,
 /// wrapped in a [RefCell] for interior mutability.
 ///
-/// Essentially a `RefCell<GcVec<'gc, T, Id>>`. However,
-/// this can't be done ddirectly because `RefCell<T>` requires
+/// Essentially a `Gc<RefCell<GcVec<'gc, T, Id>>>`. However,
+/// this can't be done directly because `RefCell<T>` normally requires
 /// `T: NullTrace` (because of the possibility of write barriers).
 #[derive(Trace)]
 #[zerogc(collector_ids(Id), copy)]
@@ -100,6 +100,9 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Clone for GcVecCell<'gc, T, Id> {
        *self
     }
 }
+/// Because vectors are associated with a [GcContext](`crate::GcContext`),
+/// they contain thread local data (and thus must be `!Send`
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> !Send for GcVecCell<'gc, T, Id> {}
 #[inherent]
 unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> IGcVec<'gc, T> for GcVecCell<'gc, T, Id> {
     type Id = Id;

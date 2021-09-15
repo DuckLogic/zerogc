@@ -464,7 +464,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
             Gc::from_raw(NonNull::new_unchecked(ptr))
         }
     }
-    /// Allocate a [GcString], copied from the specified source
+    /// Allocate a [GcString](`crate::array::GcString`), copied from the specified source
     #[inline]
     fn alloc_str<'gc>(&'gc self, src: &str) -> array::GcString<'gc, Self::Id> {
         let bytes = self.alloc_slice_copy(src.as_bytes());
@@ -624,7 +624,7 @@ impl<C: GcContext> FrozenContext<C> {
     }
 }
 
-/// A trait alias for [CollectorId]s that support [SimpleGcALloc]
+/// A trait alias for [CollectorId]s that support [GcSimpleAlloc]
 pub trait SimpleAllocCollectorId = CollectorId where <<Self as CollectorId>::System as GcSystem>::Context: GcSimpleAlloc;
 
 /// A [CollectorId] that supports allocating [GcHandle]s
@@ -667,7 +667,7 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
     type System: GcSystem<Id=Self>;
     /// The implementation of [GcRawVec] for this type.
     ///
-    /// May be [crate::vec::repr::Unsupported] if vectors are unsupported.
+    /// May be [crate::vec::raw::Unsupported] if vectors are unsupported.
     type RawVec<'gc, T: GcSafe<'gc, Self>>: crate::vec::raw::GcRawVec<'gc, T, Id=Self>;
     /// The raw representation of `GcArray` pointers
     /// in this collector.

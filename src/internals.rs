@@ -5,6 +5,6 @@ use super::CollectorId;
 
 /// `const` access to the `CollectorId`
 pub unsafe trait ConstCollectorId: CollectorId {
-   /// Resolve the length of the specified [GcArray]
+   /// Resolve the length of the specified [GcArray](`crate::array::GcArray`)
     fn resolve_array_len_const<T>(repr: &Self::ArrayRepr<'_, T>) -> usize;
 }

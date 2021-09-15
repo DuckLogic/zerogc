@@ -1,4 +1,108 @@
 //! Garbage collected vectors.
+//!
+//! There are three different vector types in zerogc
+//! 1. `GcVec` - Requires unique ownership `!Copy`,
+//!      but coerces directly to a slice and implements `Index`
+//! 2. `GcVecCell` - Is `Copy`, but uses a [RefCell] to guard coercion to a slice along with all other accesses.
+//!     - Since every operation implicitly calls `borrow`, *any* operation may panic.
+//! 3. `GcRawVec` - Is `Copy`, but coercion to slice is `unsafe`.
+//!    - Iteration implicitly panics if the length changes.
+//!
+//! Here's a table comparing them:
+//!
+//! | Supported Features   | [`GcVec`]    | [`GcRawVec`]      | [`GcVecCell`]  |
+//! |----------------------|--------------|-------------------|----------------|
+//! | Shared ownership?    | No - `!Copy` | Yes, is `Copy`    | Yes, is `Copy` |
+//! | Can coerce to slice? | Easiy `Deref` | No (is `unsafe`)  | Needs `borrow()` -> `cell::Ref<[T]>` |
+//! | impl `std::ops::Index` | Yes.       | No.               | No (but can `borrow` as `GcVec` which does) |
+//! | Runtime borrow checks? | No.        | Only for `iter`    | Yes            |
+//! | Best stdlib analogy  | `Vec<T>`     | `Rc<Vec<Cell<T>>>` | `Rc<RefCell<Vec<T>>>` |
+//!
+//! All vector types are `!Send`, because all garbage collected vectors
+//! have an [implicit reference to the GcContext](`crate::vec::IGcVec::context`).
+//!
+//! ## The shared mutability problem
+//! Because a vector's length is mutable, garbage collected vectors are significantly more complicated
+//! than [garbage collected arrays](`crate::array::GcArray`).
+//! Rust's memory safety is based around the distinction between mutable and immutable references
+//! `&mut T` and `&T`.Mutable references `&mut T` must be uniquely owned and cannot be duplicated,
+//! while immutable references `&T` can be freely duplicated and shared,
+//! but cannot be duplicated. This has been called "aliasing XOR mutability".
+//!
+//! This becomes a significant problem with garbage collected references like [`Gc`](`crate::Gc`),
+//! because they can be copied freely (they implement `Copy`).
+//! Just like [`Rc`](`std::rc::Rc`), this means they can only give out immutable references `&T`
+//! by difference. With vectors this makes it impossible to mutate the length (ie. call `push`)
+//! without interior mutability like RefCell.
+//!
+//! This is a problem for languages beyond just rust, because of issues like iterator invalidation.
+//! If we have two references to a vector, a `push` on one vector may mutate the length while an iteration
+//! on the other vector is still in progress.
+//!
+//! To put it another way, it's impossible for a garbage collected vector/list to implement all of the following properties:
+//! 1. Coerce the vector directly into a slice or pointer to the underlying memory.
+//! 2. Allow multiple references to the vector (implement ~Copy`)
+//! 3. The ability to mutate the length and potentially reallocate.
+//!
+//! ### What Java/Python do
+//! Most languages sidestep the problem by forbidding option 1
+//! and refusing to give direct pointer-access to garbage-collected arrays.
+//! Usually, forbidding option 1 is not a problem, since arrays in Java
+//! and lists in Python are builtin into the language and replace most of the users of pointers.
+//!
+//! There are some exceptions though. Java's JNI allows raw access to an arrays's memory with `GetPrimitiveArrayCritical`.
+//! However, there is no need to worry about mutating length because java arrays have a fixed
+//! size (although it does temporarily prevent garbage collection).
+//! Python's native CAPI exposes access to a list's raw memory with `PyListObject->ob_items`,
+//! although native code must be careful of any user code changing the length.
+//!
+//! This problem can also come up in unexpected places.
+//! For example, the C implementation of Python's `list.sort` coerces the list into a raw pointer,
+//! then sorts the memory directly using the pointers. The original code for that function
+//! continued to use the original pointer even if a user comparison, leading to bugs.
+//! The current implementation temporarily sets the length to zero and carefully guards against any mutations.
+//!
+//! ### What Rust/C++ do (in their stdlib)
+//! Rust and C++ tend to restrict the second option, allowing only a single
+//! reference to a vector by default.
+//!
+//! Rust's ownership system and borrow checker ensures that `Vec<T>` only has a single owner.
+//! Changing the length requires a a uniquely owned `&mut T` reference.
+//! Mutating the length while iterating is statically impossible
+//!
+//! In C++, you *should* only have one owner, but this can't be statically verified.
+//! Mutating the length while iterating is undefined behavior.
+//!
+//! In Rust, you can have duplicate ownership by wrapping in a `Rc`,
+//! and you can allow runtime-checked mutation by wrapping in a `RefCell`.
+//!
+//! ### The zerogc solution
+//! `zerogc` allows the user to pick their guarantees.
+//!
+//! If you are fine with unique ownership, you can use [`GcVec`].
+//! Unlike most garbage collected types, this allows mutable access
+//! to the contents. It can even coerce to a `&mut [T]` reference.
+//!
+//! If you want multiple ownership, you are left with two options:
+//! 1. `GcVecCell` which is essentially `Gc<RefCell<Vec<T>>>`. It has some runtime overhead,
+//!    but allows coercion to `&[T]` (and even `&mut [T]`)
+//! 2. `GcRawVec` which *doesn't* allow coercion to `&[T]`, but avoids runtime borrow checks.
+//!
+//! `GcRawVec` is probably the most niche of all the vector types and it doesn't really
+//! have a direct analogue with any standard library types. It is probably most similar to
+//! a `Cell< Gc< Vec<Cell<T>> >>`.
+//!
+//! Calls to `get` yield `T` instead of `&T` require `T: Copy` (just like [`Cell`](`core::cell::Cell`)),
+//! because there is no way to guarantee the length wont be mutated or the element won't be `set`
+//! while the reference is in use.
+//!
+//! A `GcRawVec` may never give out references or slices directly to its contents,
+//! because other references may trigger reallocation at any time (via a `push`).
+//!
+//! NOTE: A similar problem occurs with asynchronous, concurrent collectors.
+//! It has been called the [stretchy vector problem](https://www.ravenbrook.com/project/mps/master/manual/html/guide/vector.html)
+//! by some. This is less of a problem for `zerogc`, because collections can only
+//! happen at explicit safepoints.
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::convert::{AsRef, AsMut};
@@ -9,11 +113,12 @@ use inherent::inherent;
 use zerogc_derive::{unsafe_gc_impl};
 
 use crate::{CollectorId, GcRebrand, GcSafe, GcSystem, Trace};
-use crate::vec::raw::{IGcVec, ReallocFailedError};
+use crate::vec::raw::{ReallocFailedError};
 
 pub mod cell;
 pub mod raw;
 
+pub use self::raw::{IGcVec, GcRawVec};
 pub use self::cell::GcVecCell;
 
 /// A uniquely owned [Vec] for use with garbage collectors.
@@ -39,7 +144,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
     pub unsafe fn from_raw(raw: Id::RawVec<'gc, T>) -> Self {
         GcVec { raw: UnsafeCell::new(raw) }
     }
-    /// Convert this vector into its underlying [GcRawVec](`zerogc::vec::repr::GcRawVec`)
+    /// Convert this vector into its underlying [GcRawVec](`zerogc::vec::raw::GcRawVec`)
     ///
     /// ## Safety
     /// Because this consumes ownership,
@@ -80,7 +185,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
             )
         }
     }
-    /// Get a reference to the underlying [GcRawVec](`zerogc::vec::repr::GcRawVec`),
+    /// Get a reference to the underlying [GcRawVec](`zerogc::vec::raw::GcRawVec`),
     /// bypassing restrictions on unique ownership.
     ///
     /// ## Safety
@@ -300,7 +405,7 @@ impl<'gc, T: GcSafe<'gc, Id> + Clone, Id: CollectorId> Clone for GcVec<'gc, T, I
         res
     }
 }
-/// Because it is implicitly associated with a [GcContext] (which is thread-local),
+/// Because it is implicitly associated with a [GcContext](`crate::GcContext`) (which is thread-local),
 /// this must be `!Send`
 impl<'gc, T, Id: CollectorId> !Send for GcVec<'gc, T, Id> {}
 unsafe_gc_impl!(

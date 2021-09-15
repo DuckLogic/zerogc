@@ -177,8 +177,9 @@ unsafe fn drop_array<T>(ptr: *mut c_void) {
 
 
 /// The raw representation of a vector in the "epsilon" collector
-///
-/// NOTE: Length and capacity are stored implicitly in the [GcVecHeader]
+/*
+ * Implementation note: Length and capacity are stored implicitly in the [`EpsilonVecHeader`]
+ */
 pub struct EpsilonRawVec<'gc, T> {
     header: NonNull<EpsilonVecHeader>,
     context: &'gc EpsilonContext,

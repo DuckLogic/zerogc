@@ -1,6 +1,6 @@
-/// Implement [Trace] for a dynamically dispatched trait object
+/// Implement [Trace](`crate::Trace`) for a dynamically dispatched trait object
 ///
-/// This requires that the trait object extends [DynTrace].
+/// This requires that the trait object extends [DynTrace](`crate::DynTrace`).
 ///
 /// ## Example
 /// ```
@@ -75,7 +75,7 @@ macro_rules! trait_object_trace {
     }
 }
 
-/// Implement [Trace] and [TraceImmutable] as a no-op,
+/// Implement [Trace](`crate::Trace`) and [TraceImmutable](`crate::TraceImmutable`) as a no-op,
 /// based on the fact that a type implements [NullTrace](crate::NullTrace)
 ///
 /// ## Safety
@@ -106,7 +106,7 @@ macro_rules! impl_trace_for_nulltrace {
     }
 }
 
-/// Implement [NullTrace] for a type that lives for `'static`
+/// Implement [NullTrace](`crate::NullTrace`) for a type that lives for `'static`
 ///
 /// ## Safety
 /// Because the type is `'static`, it can't possibly
