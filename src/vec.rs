@@ -104,12 +104,13 @@
 //! by some. This is less of a problem for `zerogc`, because collections can only
 //! happen at explicit safepoints.
 use core::marker::PhantomData;
-use core::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds, Bound, Range};
+use core::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
 use core::slice::SliceIndex;
 use core::convert::{AsRef, AsMut};
 use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;
 use core::fmt::{self, Debug, Formatter};
+use core::ptr::NonNull;
 
 use inherent::inherent;
 use zerogc_derive::{unsafe_gc_impl};
@@ -324,16 +325,30 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for GcVec<'
         unsafe { self.as_raw().context() }
     }
 
-    type Drain<'a> = Drain<'a, 'gc, T, Id>;
+    type Drain<'a> where T: 'a, 'gc: 'a = Drain<'a, 'gc, T, Id>;
 
-    #[inline]
-    pub fn drain(&mut self, range: impl RangeBounds<usize>) -> Self::Drain<'_> {
-        let range = shift_into_scratch(self, into_range(self.len(), range));
-        Vec::drain()
-        // Create an iterator over our scratch space
-        Drain {
-            start: range.start, end: range.end,
-            marker: PhantomData
+    pub fn drain(&mut self, range: impl RangeBounds<usize>) -> Drain<'_, 'gc, T, Id> {
+        /*
+         * See `Vec::drain`
+         */
+        let old_len = self.len();
+        let range = core::slice::range(range, ..old_len);
+        /*
+         * Preemptively set length to `range.start` in case the resulting `Drain`
+         * is leaked.
+         */
+        unsafe {
+            self.set_len(range.start);
+            let r = core::slice::from_raw_parts(
+                self.as_ptr().add(range.start),
+                range.len()
+            );
+            Drain {
+                tail_start: range.end,
+                tail_len: old_len - range.end,
+                iter: r.iter(),
+                vec: NonNull::from(self)
+            }
         }
     }
 
@@ -344,6 +359,7 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for GcVec<'
         where T: Copy;
     pub fn push(&mut self, val: T);
     pub fn pop(&mut self) -> Option<T>;
+    pub fn swap_remove(&mut self, index: usize) -> T;
     pub fn reserve(&mut self, additional: usize);
     pub fn is_empty(&self) -> bool;
     pub fn new_in(ctx: &'gc <Id::System as GcSystem>::Context) -> Self;
@@ -383,57 +399,63 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IntoIterator for GcVec<'gc, T, Id
             IntoIter { start, end, raw: ManuallyDrop::new(self), marker: PhantomData }
         }
     }
-
 }
 
+/// The garbage collected analogue of [`std::vec::Drain`]
 pub struct Drain<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
-    start: *const T,
-    end: *const T,
-    marker: PhantomData<&'a mut GcVec<'gc, T, Id>>
+    /// Index of tail to preserve
+    tail_start: usize,
+    /// The length of tail to preserve
+    tail_len: usize,
+    iter: core::slice::Iter<'a, T>,
+    vec: NonNull<GcVec<'gc, T, Id>>,
+}
+impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Drain<'a, 'gc, T, Id> {
+    unsafe fn cleanup(&mut self) {
+        if self.tail_len == 0 { return }
+        /*
+         * Copy `tail` back to vec.
+         */
+        let v = self.vec.as_mut();
+        let old_len = v.len();
+        debug_assert!(old_len <= self.tail_start);
+        if old_len != self.tail_start {
+            v.as_ptr().add(self.tail_start)
+                .copy_to(v.as_mut_ptr().add(old_len), self.tail_len);
+        }
+        v.set_len(old_len + self.tail_len);
+    }
 }
 impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Iterator for Drain<'a, 'gc, T, Id> {
     type Item = T;
     #[inline]
     fn next(&mut self) -> Option<T> {
-        if start < self.end {
-            unsafe {
-                let val = self.start;
-                self.start = self.start.add(1);
-                Some(val.read())
-            }
-        } else {
-            None
-        }
+        self.iter.next().map(|e| unsafe { core::ptr::read(e) })
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = unsafe { self.end.offset_from(self.start) as usize };
-        (len, Some(len))
+        self.iter.size_hint()
+    }
+}
+impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Drop for Drain<'a, 'gc, T, Id> {
+    fn drop(&mut self) {
+        while let Some(val) = self.iter.next() {
+            let _guard = scopeguard::guard(self, |s| unsafe { s.cleanup() });
+            unsafe { core::ptr::drop_in_place(val as *const T as *mut T); }
+            core::mem::forget(_guard);
+        }
+        unsafe { self.cleanup() };
     }
 }
 impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> DoubleEndedIterator for Drain<'a, 'gc, T, Id> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
-        if self.end > self.start {
-            unsafe {
-                self.end = self.end.sub(1);
-                Some(self.end.read())
-            }
-        } else {
-            None
-        }
+        self.iter.next_back().map(|e| unsafe { core::ptr::read(e) })
     }
 }
-impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::ExactSizeIterator for Drain<'a, 'gc, T, Id> {}
-impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::FusedIterator for Drain<'a, 'gc, T, Id> {}
-impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Drop for Drain<'a, 'gc, T, Id> {
-    fn drop(&mut self) {
-        for val in self.by_ref() {
-            drop(val);
-        }
-    }
-}
+impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::ExactSizeIterator for Drain<'a, 'gc, T, Id> {}
+impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::FusedIterator for Drain<'a, 'gc, T, Id> {}
 
 /// The [GcVec] analogue of [std::vec::IntoIter]
 pub struct IntoIter<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
@@ -524,54 +546,3 @@ unsafe_gc_impl!(
 /// Indicates there is insufficient capacity for an operation on a [GcRawVec]
 #[derive(Debug)]
 pub struct InsufficientCapacityError;
-
-/// Reserve scratch space, then move `target[src_range]` into that scratch space
-///
-/// Shift all intermediate elements to the left in the process,
-/// filling the hole where `src_range` used to be.
-///
-/// This is equivalent to `scratch_space = v.drain(src_range))` but without any intermediate allocations.
-fn shift_into_scratch<'gc, V, T>(target: &mut V, src_range: Range<usize>) -> Range<*const T>
-    where V: IGcVec<'gc, T> {
-    assert!(src_range.start <= src_range.end && src_range.end <= target.len());
-    target.reserve(src_range.len());
-    let old_len = target.len();
-    debug_assert!(target.len() >= src_range.len());
-    let new_len = target.len() - src_range.len();
-    let scratch_range = Range {
-        start: old_len,
-        end: old_len + src_range.len(),
-    };
-    debug_assert_eq!(src_range.len(), scratch_range.len());
-    debug_assert!(src_range.end <= scratch_range.start);
-    unsafe {
-        // Copy `src_range` to the scratch space
-        target.as_ptr().add(src_range.start)
-            .copy_nonoverlapping_to(target.as_mut_ptr().add(scratch_range.start), src_range.len());
-        // Fill the hole we created at `src_range`
-        target.as_mut_ptr().add(src_range.start)
-            .copy_from(target.as_ptr().add(src_range.end), old_len - src_range.end);
-        // Update our length
-        let start = target.as_ptr().add(scratch_range.start);
-        let end = ptr.add(src_range.len());
-        target.set_len(new_len);
-        Range { start, end }
-    }
-}
-
-fn into_range(len: usize, bounds: impl RangeBounds<usize>) -> Range<usize> {
-    let r = Range {
-        start: match range.start_bound() {
-            Bound::Included(&val) => val,
-            Bound::Excluded(&val) => val.checked_add(1).expect("Bounds overflow"),
-            Bound::Unbounded => 0,
-        },
-        end: match range.end_bound() {
-            Bound::Included(&val) => val.checked_add(1).expect("Bounds overflow"),
-            Bound::Excluded(&val) => val,
-            Bound::Unbounded => len,
-        }
-    };
-    assert!(r.start <= r.end && r.end <= len, "Invalid range {:?} for len {}", r, len);
-    r
-}

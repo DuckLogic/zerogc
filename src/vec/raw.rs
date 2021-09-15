@@ -161,6 +161,22 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
             None
         }
     }
+    /// Removes an element from the vector and returns it.
+    ///
+    /// The removed element is replaced by the last element in the vector.
+    ///
+    /// This doesn't preserve ordering, but it is `O(1)`
+    #[inline]
+    fn swap_remove(&mut self, index: usize) -> T {
+        let len = self.len();
+        assert!(index < len);
+        unsafe {
+            let last = core::ptr::read(self.as_ptr().add(len - 1));
+            let hole = self.as_mut_ptr().add(index);
+            self.set_len(len - 1);
+            core::ptr::replace(hole, last)
+        }
+    }
     /// Extend the vector with elements copied from the specified slice
     #[inline]
     fn extend_from_slice(&mut self, src: &[T])
@@ -259,7 +275,7 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     /// vectors are `!Send` unless you call `detatch`.
     fn context(&self) -> &'gc <<Self::Id as CollectorId>::System as GcSystem>::Context;
     /// The type of draining
-    type Drain<'a>: Iterator<Item=T> + 'a;
+    type Drain<'a>: Iterator<Item=T> + 'a where T: 'a, 'gc: 'a;
     /// Creates a draining iterator that removes the specified range in the vector
     /// and yields the removed items.
     ///
@@ -548,5 +564,50 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for Unsuppo
 
     fn context(&self) -> &'gc <Id::System as GcSystem>::Context {
         unimplemented!()
+    }
+}
+
+/// Drains a [`GcRawVec`] by repeatedly calling `IGcVec::swap_remove`
+/// 
+/// Panics if the length is modified while iteration is in progress.
+pub struct DrainRaw<'a, 'gc, T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>> {
+    start: usize,
+    expected_len: usize,
+    target: &'a mut V,
+    marker: PhantomData<crate::Gc<'gc, T, V::Id>>
+}
+impl<'a, 'gc, T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>> Iterator for DrainRaw<'a, 'gc, T, V> {
+    type Item = T;
+    #[inline]
+    fn next(&mut self) -> Option<T> {
+        assert_eq!(self.expected_len, self.target.len(), "Length changed while iteration was in progress");
+        if self.start < self.expected_len {
+            self.expected_len -= 1;
+            Some(self.target.swap_remove(self.start))
+        } else {
+            None
+        }
+    }
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.expected_len - self.start;
+        (len, Some(len))
+    }
+}
+impl<'a, 'gc, T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>> DoubleEndedIterator for DrainRaw<'a, 'gc, T, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.start < self.expected_len {
+            self.expected_len -= 1;
+            Some(self.target.pop().unwrap())
+        } else {
+            None
+        }
+    }
+}
+impl<'a, 'gc, T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>> Drop for DrainRaw<'a, 'gc, T, V> {
+    fn drop(&mut self) {
+       for val in self.by_ref() {
+           drop(val);
+       }
     }
 }

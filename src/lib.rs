@@ -17,6 +17,7 @@
     const_trait_impl, // EXPERIMENTAL: const Deref
     const_slice_from_raw_parts,
     const_transmute_copy,
+    slice_range, // Convenient for bounds checking :)
 )]
 #![cfg_attr(feature="error", backtrace)]
 #![feature(maybe_uninit_slice)]
