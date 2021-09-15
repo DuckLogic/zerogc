@@ -1,6 +1,5 @@
 //! The underlying representation of a [GcVec](`crate::vec::GcVec`)
 
-use core::ops::RangeBounds;
 use core::marker::PhantomData;
 use core::iter::Iterator;
 
@@ -274,21 +273,6 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     /// Because each vector is implicitly associated with a [GcContext](`crate::GcContext`) (which is thread-local),
     /// vectors are `!Send` unless you call `detatch`.
     fn context(&self) -> &'gc <<Self::Id as CollectorId>::System as GcSystem>::Context;
-    /// The type of draining
-    type Drain<'a>: Iterator<Item=T> + 'a where T: 'a, 'gc: 'a;
-    /// Creates a draining iterator that removes the specified range in the vector
-    /// and yields the removed items.
-    ///
-    /// See [Vec::drain] for more details on this operation.
-    ///
-    /// Whether or not leaking the iterator causes the underlying elements to be
-    /// leaked (if it does "leak amplification") depends on the implementation.
-    ///
-    /// Some implementations may need to allocate intermediate memory,
-    /// but all should be able to complete in at most `O(n)` time.
-    /// In other words, this should always avoid the quadratic behavior
-    /// of repeated `remove` calls.
-    fn drain(&mut self, range: impl RangeBounds<usize>) -> Self::Drain<'_>;
 }
 
 /// Slow-case for `reserve`, when reallocation is actually needed
@@ -529,7 +513,11 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Clone for Unsupported<'gc, T, Id>
     }
 }
 
-unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcRawVec<'gc, T> for Unsupported<'gc, T, Id> {}
+unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcRawVec<'gc, T> for Unsupported<'gc, T, Id> {
+    unsafe fn steal_as_array_unchecked(self) -> crate::GcArray<'gc, T, Id> {
+        unimplemented!()
+    }
+}
 #[allow(unused_variables)]
 unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for Unsupported<'gc, T, Id> {
     type Id = Id;

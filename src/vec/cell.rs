@@ -152,6 +152,7 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> IGcVec<'gc, T> 
         where T: Copy;
     pub fn push(&mut self, val: T);
     pub fn pop(&mut self) -> Option<T>;
+    pub fn swap_remove(&mut self, index: usize) -> T;
     pub fn reserve(&mut self, additional: usize);
     pub fn is_empty(&self) -> bool;
     pub fn new_in(ctx: &'gc <<Id as CollectorId>::System as GcSystem>::Context) -> Self;

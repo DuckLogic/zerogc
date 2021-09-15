@@ -108,7 +108,6 @@ use core::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
 use core::slice::SliceIndex;
 use core::convert::{AsRef, AsMut};
 use core::cell::UnsafeCell;
-use core::mem::ManuallyDrop;
 use core::fmt::{self, Debug, Formatter};
 use core::ptr::NonNull;
 
@@ -146,6 +145,14 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
     #[inline]
     pub unsafe fn from_raw(raw: Id::RawVec<'gc, T>) -> Self {
         GcVec { raw: UnsafeCell::new(raw) }
+    }
+    /// Consume ownership of this vector, converting it into its corresponding [`GcArray`](`zerogc::array::GcArray`)
+    ///
+    /// Depending on the collector, this may need to copy the values into a new allocation.
+    /// Although it should reuse the existing memory wherever possible.
+    #[inline]
+    pub fn into_array(self) -> crate::GcArray<'gc, T, Id> {
+        unsafe { self.into_raw().steal_as_array_unchecked() }
     }
     /// Convert this vector into its underlying [GcRawVec](`zerogc::vec::raw::GcRawVec`)
     ///
@@ -228,6 +235,42 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
     #[inline]
     pub fn iter_mut(&mut self) -> core::slice::IterMut<'_, T> {
         self.as_mut_slice().iter_mut()
+    }
+    /// Creates a draining iterator that removes the specified range in the vector
+    /// and yields the removed items.
+    ///
+    /// See [Vec::drain] for more details on this operation.
+    ///
+    /// Whether or not leaking the iterator causes the underlying elements to be
+    /// leaked (if it does "leak amplification") depends on the implementation.
+    ///
+    /// Some implementations may need to allocate intermediate memory,
+    /// but all should be able to complete in at most `O(n)` time.
+    /// In other words, this should always avoid the quadratic behavior
+    /// of repeated `remove` calls.
+    pub fn drain(&mut self, range: impl RangeBounds<usize>) -> Drain<'_, 'gc, T, Id> {
+        /*
+         * See `Vec::drain`
+         */
+        let old_len = self.len();
+        let range = core::slice::range(range, ..old_len);
+        /*
+         * Preemptively set length to `range.start` in case the resulting `Drain`
+         * is leaked.
+         */
+        unsafe {
+            self.set_len(range.start);
+            let r = core::slice::from_raw_parts(
+                self.as_ptr().add(range.start),
+                range.len()
+            );
+            Drain {
+                tail_start: range.end,
+                tail_len: old_len - range.end,
+                iter: r.iter(),
+                vec: NonNull::from(self)
+            }
+        }
     }
 }
 impl<'gc, T: GcSafe<'gc, Id>, I, Id: CollectorId> Index<I> for GcVec<'gc, T, Id>
@@ -325,33 +368,6 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for GcVec<'
         unsafe { self.as_raw().context() }
     }
 
-    type Drain<'a> where T: 'a, 'gc: 'a = Drain<'a, 'gc, T, Id>;
-
-    pub fn drain(&mut self, range: impl RangeBounds<usize>) -> Drain<'_, 'gc, T, Id> {
-        /*
-         * See `Vec::drain`
-         */
-        let old_len = self.len();
-        let range = core::slice::range(range, ..old_len);
-        /*
-         * Preemptively set length to `range.start` in case the resulting `Drain`
-         * is leaked.
-         */
-        unsafe {
-            self.set_len(range.start);
-            let r = core::slice::from_raw_parts(
-                self.as_ptr().add(range.start),
-                range.len()
-            );
-            Drain {
-                tail_start: range.end,
-                tail_len: old_len - range.end,
-                iter: r.iter(),
-                vec: NonNull::from(self)
-            }
-        }
-    }
-
     // Default methods:
     pub fn replace(&mut self, index: usize, val: T) -> T;
     pub fn set(&mut self, index: usize, val: T);
@@ -396,7 +412,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IntoIterator for GcVec<'gc, T, Id
             let start = self.as_ptr();
             let end = start.add(len);
             self.set_len(0);
-            IntoIter { start, end, raw: ManuallyDrop::new(self), marker: PhantomData }
+            IntoIter { start, end, marker: PhantomData }
         }
     }
 }
@@ -441,7 +457,7 @@ impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Iterator for Drain<'a, 'gc, T
 impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Drop for Drain<'a, 'gc, T, Id> {
     fn drop(&mut self) {
         while let Some(val) = self.iter.next() {
-            let _guard = scopeguard::guard(self, |s| unsafe { s.cleanup() });
+            let _guard = scopeguard::guard(&mut *self, |s| unsafe { s.cleanup() });
             unsafe { core::ptr::drop_in_place(val as *const T as *mut T); }
             core::mem::forget(_guard);
         }
@@ -461,7 +477,6 @@ impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::FusedIterator for
 pub struct IntoIter<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
     start: *const T,
     end: *const T,
-    raw: ManuallyDrop<GcVec<'gc, T, Id>>,
     marker: PhantomData<GcVec<'gc, T, Id>>
 }
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Iterator for IntoIter<'gc, T, Id> {

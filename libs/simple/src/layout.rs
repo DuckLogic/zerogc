@@ -244,6 +244,10 @@ impl GcArrayHeader {
 #[repr(C)]
 pub struct GcVecHeader {
     pub(crate) capacity: usize,
+    /*
+     * NOTE: Suffix must be transmutable to `GcArrayHeader`
+     * in order for `steal_as_array_unchecked` to work
+     */
     pub(crate) len: Cell<usize>,
     pub(crate) common_header: GcHeader
 }
@@ -293,6 +297,18 @@ impl<'gc, T: GcSafe<'gc, crate::CollectorId>> Extend<T> for SimpleVecRepr<'gc, T
 }
 #[inherent::inherent]
 unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> GcRawVec<'gc, T> for SimpleVecRepr<'gc, T> {
+    #[allow(dead_code)]
+    unsafe fn steal_as_array_unchecked(mut self) -> zerogc::GcArray<'gc, T, crate::CollectorId> {
+        /*
+         * Invalidate capacity
+         * NOTE: This should never be relied upon.
+         * It is already undefined behavior to use this vector
+         * after calling this method.
+         * This is just an extra check
+         */
+        self.header.as_mut().capacity = 0;
+        zerogc::GcArray::from_raw_ptr(NonNull::new_unchecked(self.as_mut_ptr()), self.len())
+    }
     pub fn iter(&self) -> zerogc::vec::raw::RawVecIter<'gc, T, Self>
         where T: Copy;
 }
@@ -347,6 +363,7 @@ unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> IGcVec<'gc, T> for SimpleVe
         where T: Copy;
     pub fn push(&mut self, val: T);
     pub fn pop(&mut self) -> Option<T>;
+    pub fn swap_remove(&mut self, index: usize) -> T;
     pub fn reserve(&mut self, additional: usize);
     pub fn is_empty(&self) -> bool;
     pub fn new_in(ctx: &'gc crate::SimpleCollectorContext) -> Self;

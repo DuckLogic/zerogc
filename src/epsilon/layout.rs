@@ -4,7 +4,7 @@ use std::ptr::NonNull;
 use std::alloc::Layout;
 use std::cell::Cell;
 
-use crate::{GcRebrand, GcSafe, GcSimpleAlloc};
+use crate::{GcRebrand, GcSafe, GcSimpleAlloc, GcArray};
 use crate::vec::raw::{IGcVec, GcRawVec};
 
 use super::{EpsilonCollectorId, EpsilonContext};
@@ -225,6 +225,13 @@ zerogc_derive::unsafe_gc_impl!(
 );
 #[inherent::inherent]
 unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> GcRawVec<'gc, T> for EpsilonRawVec<'gc, T> {
+    #[inline]
+    #[allow(dead_code)]
+    unsafe fn steal_as_array_unchecked(mut self) -> GcArray<'gc, T, EpsilonCollectorId> {
+        // Set capacity to zero, so no one else gets any funny ideas!
+        self.header.as_mut().capacity = 0;
+        GcArray::from_raw_ptr(NonNull::new_unchecked(self.as_mut_ptr()), self.len())
+    }
     pub fn iter(&self) -> zerogc::vec::raw::RawVecIter<'gc, T, Self>
         where T: Copy;
 }
@@ -280,6 +287,7 @@ unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> IGcVec<'gc, T> for EpsilonR
         where T: Copy;
     pub fn push(&mut self, val: T);
     pub fn pop(&mut self) -> Option<T>;
+    pub fn swap_remove(&mut self, index: usize) -> T;
     pub fn reserve(&mut self, additional: usize);
     pub fn is_empty(&self) -> bool;
     pub fn new_in(ctx: &'gc EpsilonContext) -> Self;
