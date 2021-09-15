@@ -346,6 +346,7 @@ unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> IGcVec<'gc, T> for SimpleVe
     pub fn extend_from_slice(&mut self, src: &[T])
         where T: Copy;
     pub fn push(&mut self, val: T);
+    pub fn pop(&mut self) -> Option<T>;
     pub fn reserve(&mut self, additional: usize);
     pub fn is_empty(&self) -> bool;
     pub fn new_in(ctx: &'gc crate::SimpleCollectorContext) -> Self;

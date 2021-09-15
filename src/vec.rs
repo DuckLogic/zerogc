@@ -104,7 +104,7 @@
 //! by some. This is less of a problem for `zerogc`, because collections can only
 //! happen at explicit safepoints.
 use core::marker::PhantomData;
-use core::ops::{Deref, DerefMut, Index, IndexMut};
+use core::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds, Bound, Range};
 use core::slice::SliceIndex;
 use core::convert::{AsRef, AsMut};
 use core::cell::UnsafeCell;
@@ -324,18 +324,33 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for GcVec<'
         unsafe { self.as_raw().context() }
     }
 
+    type Drain<'a> = Drain<'a, 'gc, T, Id>;
+
+    #[inline]
+    pub fn drain(&mut self, range: impl RangeBounds<usize>) -> Self::Drain<'_> {
+        let range = shift_into_scratch(self, into_range(self.len(), range));
+        Vec::drain()
+        // Create an iterator over our scratch space
+        Drain {
+            start: range.start, end: range.end,
+            marker: PhantomData
+        }
+    }
+
     // Default methods:
     pub fn replace(&mut self, index: usize, val: T) -> T;
     pub fn set(&mut self, index: usize, val: T);
     pub fn extend_from_slice(&mut self, src: &[T])
         where T: Copy;
     pub fn push(&mut self, val: T);
+    pub fn pop(&mut self) -> Option<T>;
     pub fn reserve(&mut self, additional: usize);
     pub fn is_empty(&self) -> bool;
     pub fn new_in(ctx: &'gc <Id::System as GcSystem>::Context) -> Self;
     pub fn copy_from_slice(src: &[T], ctx: &'gc <Id::System as GcSystem>::Context) -> Self
         where T: Copy;
     pub fn from_vec(src: Vec<T>, ctx: &'gc <Id::System as GcSystem>::Context) -> Self;
+
     /*
      * Intentionally hidden:
      * 1. as_slice_unchecked (just use as_slice)
@@ -369,6 +384,55 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IntoIterator for GcVec<'gc, T, Id
         }
     }
 
+}
+
+pub struct Drain<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
+    start: *const T,
+    end: *const T,
+    marker: PhantomData<&'a mut GcVec<'gc, T, Id>>
+}
+impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Iterator for Drain<'a, 'gc, T, Id> {
+    type Item = T;
+    #[inline]
+    fn next(&mut self) -> Option<T> {
+        if start < self.end {
+            unsafe {
+                let val = self.start;
+                self.start = self.start.add(1);
+                Some(val.read())
+            }
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = unsafe { self.end.offset_from(self.start) as usize };
+        (len, Some(len))
+    }
+}
+impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> DoubleEndedIterator for Drain<'a, 'gc, T, Id> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.end > self.start {
+            unsafe {
+                self.end = self.end.sub(1);
+                Some(self.end.read())
+            }
+        } else {
+            None
+        }
+    }
+}
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::ExactSizeIterator for Drain<'a, 'gc, T, Id> {}
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::FusedIterator for Drain<'a, 'gc, T, Id> {}
+impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Drop for Drain<'a, 'gc, T, Id> {
+    fn drop(&mut self) {
+        for val in self.by_ref() {
+            drop(val);
+        }
+    }
 }
 
 /// The [GcVec] analogue of [std::vec::IntoIter]
@@ -418,7 +482,6 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Drop for IntoIter<'gc, T, Id> {
         for val in self.by_ref() {
             drop(val);
         }
-        unsafe { ManuallyDrop::drop(&mut self.raw) };
     }
 }
 
@@ -462,3 +525,53 @@ unsafe_gc_impl!(
 #[derive(Debug)]
 pub struct InsufficientCapacityError;
 
+/// Reserve scratch space, then move `target[src_range]` into that scratch space
+///
+/// Shift all intermediate elements to the left in the process,
+/// filling the hole where `src_range` used to be.
+///
+/// This is equivalent to `scratch_space = v.drain(src_range))` but without any intermediate allocations.
+fn shift_into_scratch<'gc, V, T>(target: &mut V, src_range: Range<usize>) -> Range<*const T>
+    where V: IGcVec<'gc, T> {
+    assert!(src_range.start <= src_range.end && src_range.end <= target.len());
+    target.reserve(src_range.len());
+    let old_len = target.len();
+    debug_assert!(target.len() >= src_range.len());
+    let new_len = target.len() - src_range.len();
+    let scratch_range = Range {
+        start: old_len,
+        end: old_len + src_range.len(),
+    };
+    debug_assert_eq!(src_range.len(), scratch_range.len());
+    debug_assert!(src_range.end <= scratch_range.start);
+    unsafe {
+        // Copy `src_range` to the scratch space
+        target.as_ptr().add(src_range.start)
+            .copy_nonoverlapping_to(target.as_mut_ptr().add(scratch_range.start), src_range.len());
+        // Fill the hole we created at `src_range`
+        target.as_mut_ptr().add(src_range.start)
+            .copy_from(target.as_ptr().add(src_range.end), old_len - src_range.end);
+        // Update our length
+        let start = target.as_ptr().add(scratch_range.start);
+        let end = ptr.add(src_range.len());
+        target.set_len(new_len);
+        Range { start, end }
+    }
+}
+
+fn into_range(len: usize, bounds: impl RangeBounds<usize>) -> Range<usize> {
+    let r = Range {
+        start: match range.start_bound() {
+            Bound::Included(&val) => val,
+            Bound::Excluded(&val) => val.checked_add(1).expect("Bounds overflow"),
+            Bound::Unbounded => 0,
+        },
+        end: match range.end_bound() {
+            Bound::Included(&val) => val.checked_add(1).expect("Bounds overflow"),
+            Bound::Excluded(&val) => val,
+            Bound::Unbounded => len,
+        }
+    };
+    assert!(r.start <= r.end && r.end <= len, "Invalid range {:?} for len {}", r, len);
+    r
+}

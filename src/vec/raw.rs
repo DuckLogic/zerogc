@@ -1,6 +1,8 @@
 //! The underlying representation of a [GcVec](`crate::vec::GcVec`)
 
+use core::ops::RangeBounds;
 use core::marker::PhantomData;
+use core::iter::Iterator;
 
 use crate::{CollectorId, GcRebrand, GcSafe, GcSystem};
 
@@ -130,8 +132,33 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
         // TODO: Write barriers
         self.reserve(1);
         unsafe {
+            // NOTE: This implicitly calls `borrow_mut` if we are a `GcVecCell`
             self.as_mut_ptr().add(old_len).write(val);
             self.set_len(old_len + 1);
+        }
+    }
+    /// Pop an element of the end of the vector,
+    /// returning `None` if empty.
+    ///
+    /// This is analogous to [`Vec::pop`]
+    ///
+    /// If this type is a [GcVecCell](`crate::vec::GcVecCell`) and there are outstanding borrowed references,
+    /// this will panic as if calling [`RefCell::borrow_mut`](`core::cell::RefCell::borrow_mut`).
+    ///
+    /// ## Safety
+    /// This method is safe.
+    #[inline]
+    fn pop(&mut self) -> Option<T> {
+        let old_len = self.len();
+        if old_len > 0 {
+            // TODO: Write barriers?
+            // NOTE: This implicitly calls `borrow_mut` if we are a `GcVecCell`
+            unsafe {
+                self.set_len(old_len - 1);
+                Some(self.as_ptr().add(old_len - 1).read())
+            }
+        } else {
+            None
         }
     }
     /// Extend the vector with elements copied from the specified slice
@@ -231,6 +258,21 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     /// Because each vector is implicitly associated with a [GcContext](`crate::GcContext`) (which is thread-local),
     /// vectors are `!Send` unless you call `detatch`.
     fn context(&self) -> &'gc <<Self::Id as CollectorId>::System as GcSystem>::Context;
+    /// The type of draining
+    type Drain<'a>: Iterator<Item=T> + 'a;
+    /// Creates a draining iterator that removes the specified range in the vector
+    /// and yields the removed items.
+    ///
+    /// See [Vec::drain] for more details on this operation.
+    ///
+    /// Whether or not leaking the iterator causes the underlying elements to be
+    /// leaked (if it does "leak amplification") depends on the implementation.
+    ///
+    /// Some implementations may need to allocate intermediate memory,
+    /// but all should be able to complete in at most `O(n)` time.
+    /// In other words, this should always avoid the quadratic behavior
+    /// of repeated `remove` calls.
+    fn drain(&mut self, range: impl RangeBounds<usize>) -> Self::Drain<'_>;
 }
 
 /// Slow-case for `reserve`, when reallocation is actually needed
@@ -304,6 +346,23 @@ fn grow_vec<'gc, T, V>(vec: &mut V, amount: usize)
 /// Generally speaking,
 /// [GcVec](`crate::vec::GcVec`) and [GcVecCell](`crate::vec::GcVecCell`) should be preferred.
 pub unsafe trait GcRawVec<'gc, T: GcSafe<'gc, Self::Id>>: Copy + IGcVec<'gc, T> {
+    /// Steal ownership of this vector, converting it into a [GcArray].
+    ///
+    /// Assumes that there are no other active references.
+    ///
+    /// This avoids copying memory if at all possible
+    /// (although it might be necessary, depending on the implementation).
+    ///
+    /// ## Safety
+    /// Undefined behavior if there are any other references
+    /// to the vector or any uses after it has been stolen.
+    ///
+    /// This may or may not be debug-checked,
+    /// depending on the implementation.
+    ///
+    /// This logically steals ownership of this vector and invalidates all other references to it,
+    /// although the safety of it cannot be checked statically.
+    unsafe fn steal_as_array_unchecked(self) -> crate::array::GcArray<'gc, T, Self::Id>;
     /// Iterate over the elements of the vectors
     ///
     /// Panics if the length changes.
