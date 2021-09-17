@@ -45,6 +45,11 @@ std = ["alloc"]
 #
 # This implements `Trace` for `Box` and collections like `Vec`
 alloc = []
+# Emulate the `core::alloc::Allocator` api
+#
+# NOTE: This doesn't *necessarily* require the 'alloc'
+# feature (because the API itself is in 'core')
+allocator-api = []
 # Support a 'GcError' type that implements 'std::error::Error'
 # by wrapping a 'GcHandle'
 errors = []

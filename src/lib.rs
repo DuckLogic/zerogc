@@ -20,6 +20,7 @@
     slice_range, // Convenient for bounds checking :)
 )]
 #![cfg_attr(feature="error", backtrace)]
+#![cfg_attr(feature="allocator-api", feature(allocator_api))]
 #![feature(maybe_uninit_slice)]
 #![feature(new_uninit)]
 #![deny(missing_docs)]
@@ -84,6 +85,8 @@ pub mod vec;
 pub mod internals;
 #[cfg(feature = "errors")]
 pub mod errors;
+#[cfg(feature = "allocator-api")]
+pub mod allocator;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.
