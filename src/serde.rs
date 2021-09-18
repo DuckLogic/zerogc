@@ -100,13 +100,7 @@ impl<'gc, Id: CollectorId> Serialize for GcString<'gc, Id> {
     }
 }
 
-/*
- * impl GcDeserialize for PhantomData<T>
- * regardless of T
- * NOTE: We still need T: 'gc because of GcSafe bound....
- * TODO: Remove this if and when T: GcSafe becomes independent of T: 'gc
- */
-impl<'gc, 'de, T: 'gc, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for PhantomData<T> {
+impl<'gc, 'de, T, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for PhantomData<T> {
     fn deserialize_gc<D: Deserializer<'de>>(_ctx: &'gc Id::Context, _deserializer: D) -> Result<Self, D::Error> {
         Ok(PhantomData)
     }
