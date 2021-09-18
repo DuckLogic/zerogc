@@ -402,7 +402,7 @@ impl MacroInput {
             let (impl_generics, _, where_clause) = generics.split_for_impl();
             Ok(Some(quote! {
                 impl #impl_generics #zerogc_crate::serde::GcDeserialize<#gc_lt, #de_lt, #id_type> for #target_type #where_clause {
-                    fn deserialize_gc<D: serde::Deserializer<'deserialize>>(ctx: &#gc_lt <<#id_type as zerogc::CollectorId>::System as zerogc::GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+                    fn deserialize_gc<D: serde::Deserializer<'deserialize>>(ctx: &#gc_lt <#id_type as zerogc::CollectorId>::Context, deserializer: D) -> Result<Self, D::Error> {
                         #deserialize
                     }
                 }

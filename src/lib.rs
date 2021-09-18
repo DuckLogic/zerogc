@@ -435,7 +435,7 @@ pub unsafe trait GcContext: Sized {
     /// Get the id of this context
     fn id(&self) -> Self::Id;
 }
-/// A simple interface to allocating from a [GcContext]. 
+/// A simple interface to allocating from a [GcContext].
 ///
 /// Some garbage collectors implement more complex interfaces,
 /// so implementing this is optional
@@ -518,7 +518,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// the specified vec.
     #[inline]
     #[cfg(feature = "alloc")]
-    fn alloc_array_from_vec<'gc, T>(&'gc self, mut src: Vec<T>) -> GcArray<'gc, T, Self::Id> 
+    fn alloc_array_from_vec<'gc, T>(&'gc self, mut src: Vec<T>) -> GcArray<'gc, T, Self::Id>
         where T: GcSafe<'gc, Self::Id> {
         unsafe {
             let ptr = src.as_ptr();
@@ -629,7 +629,7 @@ impl<C: GcContext> FrozenContext<C> {
 }
 
 /// A trait alias for [CollectorId]s that support [GcSimpleAlloc]
-pub trait SimpleAllocCollectorId = CollectorId where <<Self as CollectorId>::System as GcSystem>::Context: GcSimpleAlloc;
+pub trait SimpleAllocCollectorId = CollectorId where <Self as CollectorId>::Context: GcSimpleAlloc;
 
 /// A [CollectorId] that supports allocating [GcHandle]s
 ///
@@ -668,7 +668,9 @@ pub unsafe trait HandleCollectorId: CollectorId {
 /// if any of its pointers still do!
 pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop + 'static + for<'gc> GcSafe<'gc, Self> {
     /// The type of the garbage collector system
-    type System: GcSystem<Id=Self>;
+    type System: GcSystem<Id=Self, Context=Self::Context>;
+    /// The type of [GcContext] associated with this id.
+    type Context: GcContext<System=Self::System, Id=Self>;
     /// The implementation of [GcRawVec] for this type.
     ///
     /// May be [crate::vec::raw::Unsupported] if vectors are unsupported.
@@ -736,7 +738,7 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
 ///
 /// ## Lifetime
 /// The borrow does *not* refer to the value `&'gc T`.
-/// Instead, it refers to the *system* `&'gc Id::System`
+/// Instead, it refers to the *context* `&'gc Id::Context`
 ///
 /// This is necessary because `T` may have borrowed interior data
 /// with a shorter lifetime `'a < 'gc`, making `&'gc T` invalid
@@ -746,13 +748,13 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
 /// ```no_run
 /// # trait GcSafe{}
 /// # use core::marker::PhantomData;
-/// struct GcSystem {
+/// struct GcContext {
 ///     values: Vec<Box<dyn GcSafe>>
 /// }
 /// struct Gc<'gc, T: GcSafe> {
 ///     index: usize,
 ///     marker: PhantomData<T>,
-///     system: &'gc GcSystem
+///     ctx: &'gc GcContext
 /// }
 /// ```
 ///
@@ -776,7 +778,7 @@ pub struct Gc<'gc, T: ?Sized, Id: CollectorId> {
     ///
     /// The runtime instance of this value can be
     /// computed from the pointer itself: `NonNull<T>` -> `&CollectorId`
-    collector_id: PhantomData<&'gc Id::System>,
+    collector_id: PhantomData<&'gc Id::Context>,
 }
 impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
     /// Create a GC pointer from a raw pointer

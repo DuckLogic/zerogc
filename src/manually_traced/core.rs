@@ -116,14 +116,14 @@ macro_rules! deser_tuple_impl {
             where $($param: $crate::serde::GcDeserialize<'gc, 'de, Id>),* {
             #[allow(non_snake_case, unused)]
             fn deserialize_gc<Deser: serde::Deserializer<'de>>(
-                ctx: &'gc <<Id as $crate::CollectorId>::System as $crate::GcSystem>::Context,
+                ctx: &'gc <Id as $crate::CollectorId>::Context,
                 deser: Deser
             ) -> Result<Self, <Deser as serde::Deserializer<'de>>::Error> {
                 use serde::de::{Visitor, Error, SeqAccess};
                 use std::marker::PhantomData;
                 use $crate::{CollectorId, GcSystem};
                 struct TupleVisitor<'gc, 'de, Id: $crate::CollectorId, $($param: $crate::serde::GcDeserialize<'gc, 'de, Id>),*> {
-                    ctx: &'gc <Id::System as GcSystem>::Context,
+                    ctx: &'gc Id::Context,
                     marker: PhantomData<(&'de (), ( $($param,)*) )>
                 }
                 impl<'gc, 'de, Id: CollectorId, $($param: $crate::serde::GcDeserialize<'gc, 'de, Id>),*>

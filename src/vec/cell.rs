@@ -108,7 +108,7 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> IGcVec<'gc, T> 
     type Id = Id;
 
     #[inline]
-    pub fn with_capacity_in(capacity: usize, ctx: &'gc <<Id as CollectorId>::System as GcSystem>::Context) -> Self {
+    pub fn with_capacity_in(capacity: usize, ctx: &'gc <Id as CollectorId>::Context) -> Self {
         GcVecCell { inner: ctx.alloc(VecCellInner {
             cell: RefCell::new(GcVec::with_capacity_in(capacity, ctx))
         }) }
@@ -140,7 +140,7 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> IGcVec<'gc, T> 
     }
 
     #[inline]
-    pub fn context(&self) -> &'gc <<Id as CollectorId>::System as GcSystem>::Context {
+    pub fn context(&self) -> &'gc <Id as CollectorId>::Context {
         self.inner.cell.borrow().context()
     }
 
@@ -155,10 +155,10 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> IGcVec<'gc, T> 
     pub fn swap_remove(&mut self, index: usize) -> T;
     pub fn reserve(&mut self, additional: usize);
     pub fn is_empty(&self) -> bool;
-    pub fn new_in(ctx: &'gc <<Id as CollectorId>::System as GcSystem>::Context) -> Self;
-    pub fn copy_from_slice(src: &[T], ctx: &'gc <<Id as CollectorId>::System as GcSystem>::Context) -> Self
+    pub fn new_in(ctx: &'gc <Id as CollectorId>::Context) -> Self;
+    pub fn copy_from_slice(src: &[T], ctx: &'gc <Id as CollectorId>::Context) -> Self
         where T: Copy;
-    pub fn from_vec(src: Vec<T>, ctx: &'gc <<Id as CollectorId>::System as GcSystem>::Context) -> Self;
+    pub fn from_vec(src: Vec<T>, ctx: &'gc <Id as CollectorId>::Context) -> Self;
     pub fn get(&mut self, index: usize) -> Option<T>
         where T: Copy;
     pub unsafe fn as_slice_unchecked(&self) -> &[T];

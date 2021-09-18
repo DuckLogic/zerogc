@@ -3,7 +3,7 @@
 use core::marker::PhantomData;
 use core::iter::Iterator;
 
-use crate::{CollectorId, GcRebrand, GcSafe, GcSystem};
+use crate::{CollectorId, GcRebrand, GcSafe};
 
 use zerogc_derive::unsafe_gc_impl;
 
@@ -40,7 +40,7 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     ///
     /// This consumes ownership of the original vector.
     #[inline]
-    fn from_vec(mut src: Vec<T>, ctx: &'gc <<Self::Id as CollectorId>::System as GcSystem>::Context) -> Self {
+    fn from_vec(mut src: Vec<T>, ctx: &'gc <Self::Id as CollectorId>::Context) -> Self {
         let len = src.len();
         let mut res = Self::with_capacity_in(len, ctx);
         unsafe {
@@ -53,7 +53,7 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     /// Copy the specified elements into a new vector,
     /// allocating it in the specified context
     #[inline]
-    fn copy_from_slice(src: &[T], ctx: &'gc <<Self::Id as CollectorId>::System as GcSystem>::Context) -> Self 
+    fn copy_from_slice(src: &[T], ctx: &'gc <Self::Id as CollectorId>::Context) -> Self
         where T: Copy {
         let len = src.len();
         let mut res = Self::with_capacity_in(len, ctx);
@@ -65,12 +65,12 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     }
     /// Allocate a new vector inside the specified context
     #[inline]
-    fn new_in(ctx: &'gc <<Self::Id as CollectorId>::System as GcSystem>::Context) -> Self {
+    fn new_in(ctx: &'gc <Self::Id as CollectorId>::Context) -> Self {
         Self::with_capacity_in(0, ctx)
     }
     /// Allocate a new vector with the specified capacity,
     /// using the specified context.
-    fn with_capacity_in(capacity: usize, ctx: &'gc <<Self::Id as CollectorId>::System as GcSystem>::Context) -> Self;
+    fn with_capacity_in(capacity: usize, ctx: &'gc <Self::Id as CollectorId>::Context) -> Self;
     /// The length of the vector.
     ///
     /// This is the number of elements that are actually
@@ -272,7 +272,7 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     ///
     /// Because each vector is implicitly associated with a [GcContext](`crate::GcContext`) (which is thread-local),
     /// vectors are `!Send` unless you call `detatch`.
-    fn context(&self) -> &'gc <<Self::Id as CollectorId>::System as GcSystem>::Context;
+    fn context(&self) -> &'gc <Self::Id as CollectorId>::Context;
 }
 
 /// Slow-case for `reserve`, when reallocation is actually needed
@@ -534,7 +534,7 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for Unsuppo
         unimplemented!()
     }
 
-    fn with_capacity_in(capacity: usize, ctx: &'gc <<Id as CollectorId>::System as GcSystem>::Context) -> Self {
+    fn with_capacity_in(capacity: usize, ctx: &'gc <Id as CollectorId>::Context) -> Self {
         unimplemented!()
     }
 
@@ -550,7 +550,7 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for Unsuppo
         unimplemented!()
     }
 
-    fn context(&self) -> &'gc <Id::System as GcSystem>::Context {
+    fn context(&self) -> &'gc Id::Context {
         unimplemented!()
     }
 }

@@ -114,7 +114,7 @@ use core::ptr::NonNull;
 use inherent::inherent;
 use zerogc_derive::{unsafe_gc_impl};
 
-use crate::{CollectorId, GcRebrand, GcSafe, GcSystem, Trace};
+use crate::{CollectorId, GcRebrand, GcSafe, Trace};
 use crate::vec::raw::{ReallocFailedError};
 
 pub mod cell;
@@ -332,7 +332,7 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for GcVec<'
     type Id = Id;
 
     #[inline]
-    pub fn with_capacity_in(capacity: usize, ctx: &'gc <Id::System as GcSystem>::Context) -> Self {
+    pub fn with_capacity_in(capacity: usize, ctx: &'gc Id::Context) -> Self {
         unsafe {
             Self::from_raw(Id::RawVec::<'gc, T>::with_capacity_in(capacity, ctx))
         }
@@ -364,7 +364,7 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for GcVec<'
     }
 
     #[inline]
-    pub fn context(&self) -> &'gc <Id::System as GcSystem>::Context {
+    pub fn context(&self) -> &'gc Id::Context {
         unsafe { self.as_raw().context() }
     }
 
@@ -378,10 +378,10 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for GcVec<'
     pub fn swap_remove(&mut self, index: usize) -> T;
     pub fn reserve(&mut self, additional: usize);
     pub fn is_empty(&self) -> bool;
-    pub fn new_in(ctx: &'gc <Id::System as GcSystem>::Context) -> Self;
-    pub fn copy_from_slice(src: &[T], ctx: &'gc <Id::System as GcSystem>::Context) -> Self
+    pub fn new_in(ctx: &'gc Id::Context) -> Self;
+    pub fn copy_from_slice(src: &[T], ctx: &'gc Id::Context) -> Self
         where T: Copy;
-    pub fn from_vec(src: Vec<T>, ctx: &'gc <Id::System as GcSystem>::Context) -> Self;
+    pub fn from_vec(src: Vec<T>, ctx: &'gc Id::Context) -> Self;
 
     /*
      * Intentionally hidden:

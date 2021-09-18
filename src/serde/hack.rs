@@ -195,7 +195,7 @@ unsafe fn unregister_context(state: &ContextHackState) {
 /// ## Safety
 /// The inferred lifetime must be correct.
 #[track_caller]
-pub unsafe fn current_ctx<'gc, Id: CollectorId>() -> ContextHackGuard<'gc, <Id::System as GcSystem>::Context> {
+pub unsafe fn current_ctx<'gc, Id: CollectorId>() -> ContextHackGuard<'gc, Id::Context> {
     PRIMARY_DE_CONTEXT.with(|state| {
         match state.get_unchecked() {
             Some(hack) if hack.collector_type_id == TypeId::of::<Id>() => {
@@ -207,7 +207,7 @@ pub unsafe fn current_ctx<'gc, Id: CollectorId>() -> ContextHackGuard<'gc, <Id::
 }
 #[cold]
 #[track_caller]
-unsafe fn _fallback_current_ctx<'gc, Id: CollectorId>() -> ContextHackGuard<'gc, <Id::System as GcSystem>::Context> {
+unsafe fn _fallback_current_ctx<'gc, Id: CollectorId>() -> ContextHackGuard<'gc, Id::Context> {
     OTHER_DE_CONTEXT.with(|map| {
         let map = map.borrow();
         let state = map.get(&TypeId::of::<Id>())

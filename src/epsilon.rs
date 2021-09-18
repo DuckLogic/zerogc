@@ -390,6 +390,7 @@ unsafe impl const ConstCollectorId for EpsilonCollectorId {
 }
 unsafe impl CollectorId for EpsilonCollectorId {
     type System = EpsilonSystem;
+    type Context = EpsilonContext;
     type RawVec<'gc, T: GcSafe<'gc, Self>> = self::layout::EpsilonRawVec<'gc, T>;
     /// We use fat-pointers for arrays,
     /// so that we can transmute from `&'static [T]` -> `GcArray`

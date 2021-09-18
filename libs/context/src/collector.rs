@@ -301,6 +301,7 @@ unsafe impl<C: SyncCollector> Sync for CollectorId<C> {}
 unsafe impl<C: SyncCollector> Send for CollectorId<C> {}
 unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     type System = CollectorRef<C>;
+    type Context = CollectorContext<C>;
     type RawVec<'gc, T: GcSafe<'gc, Self>> = C::RawVec<'gc, T>;
     // TODO: What if clients want to customize this?
     type ArrayRepr<'gc, T> = zerogc::array::repr::ThinArrayRepr<'gc, T, Self>;

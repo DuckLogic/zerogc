@@ -32,21 +32,21 @@ pub mod hack;
 /// The type must be [GcSafe], so that it can actually be allocated.
 pub trait GcDeserialize<'gc, 'de, Id: CollectorId>: GcSafe<'gc, Id> + Sized {
     /// Deserialize the value given the specified context
-    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error>;
+    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error>;
 }
 
 impl<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserialize<'gc, 'de, Id> for Gc<'gc, T, Id>
-    where <Id::System as GcSystem>::Context: GcSimpleAlloc {
+    where Id::Context: GcSimpleAlloc {
     #[inline]
-    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error> {
         Ok(ctx.alloc(T::deserialize_gc(ctx, deserializer)?))
     }
 }
 
 
 impl<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserialize<'gc, 'de, Id> for GcArray<'gc, T, Id>
-    where <Id::System as GcSystem>::Context: GcSimpleAlloc {
-    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+    where Id::Context: GcSimpleAlloc {
+    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error> {
         Ok(ctx.alloc_array_from_vec(
             Vec::<T>::deserialize_gc(ctx, deserializer)?
         ))
@@ -55,8 +55,8 @@ impl<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserialize<'g
 
 
 impl<'gc, 'de, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for GcString<'gc, Id>
-    where <Id::System as GcSystem>::Context: GcSimpleAlloc {
-    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+    where Id::Context: GcSimpleAlloc {
+    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error> {
         struct GcStrVisitor<'gc, A: GcSimpleAlloc> {
             ctx: &'gc A
         }
@@ -107,13 +107,13 @@ impl<'gc, Id: CollectorId> Serialize for GcString<'gc, Id> {
  * TODO: Remove this if and when T: GcSafe becomes independent of T: 'gc
  */
 impl<'gc, 'de, T: 'gc, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for PhantomData<T> {
-    fn deserialize_gc<D: Deserializer<'de>>(_ctx: &'gc <Id::System as GcSystem>::Context, _deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize_gc<D: Deserializer<'de>>(_ctx: &'gc Id::Context, _deserializer: D) -> Result<Self, D::Error> {
         Ok(PhantomData)
     }
 }
 
 impl<'gc, 'de, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for () {
-    fn deserialize_gc<D: Deserializer<'de>>(_ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize_gc<D: Deserializer<'de>>(_ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error> {
 
         struct UnitVisitor;
         impl<'de> Visitor<'de> for UnitVisitor {
@@ -141,7 +141,7 @@ macro_rules! impl_delegating_deserialize {
     (impl $(<$($lt:lifetime,)* $($param:ident),*>)? GcDeserialize<$gc:lifetime, $de:lifetime, $id:ident> for $target:path $(where $($where_clause:tt)*)?) => {
         impl$(<$($lt,)* $($param),*>)? $crate::serde::GcDeserialize<$gc, $de, $id> for $target
             where Self: Deserialize<$de> + $(, $($where_clause)*)?{
-            fn deserialize_gc<D: serde::Deserializer<$de>>(_ctx: &$gc <<$id as $crate::CollectorId>::System as $crate::GcSystem>::Context, deserializer: D) -> Result<Self, <D as serde::Deserializer<$de>>::Error> {
+            fn deserialize_gc<D: serde::Deserializer<$de>>(_ctx: &$gc <$id as $crate::CollectorId>::Context, deserializer: D) -> Result<Self, <D as serde::Deserializer<$de>>::Error> {
                 <Self as serde::Deserialize<$de>>::deserialize(deserializer)
             }
         }
@@ -151,13 +151,13 @@ macro_rules! impl_delegating_deserialize {
 
 /// An implementation of [serde::de::DeserializeSeed] that wraps [GcDeserialize]
 pub struct GcDeserializeSeed<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> {
-    context: &'gc <Id::System as GcSystem>::Context,
+    context: &'gc Id::Context,
     marker: PhantomData<fn(&'de ()) -> T>
 }
 impl<'de, 'gc, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserializeSeed<'gc, 'de, Id, T> {
     /// Create a new wrapper for the specified context
     #[inline]
-    pub fn new(context: &'gc <Id::System as GcSystem>::Context) -> Self {
+    pub fn new(context: &'gc Id::Context) -> Self {
         GcDeserializeSeed { context, marker: PhantomData }
     }
 }
@@ -176,14 +176,14 @@ macro_rules! impl_for_map {
             V: GcDeserialize<'gc, 'de, Id>,
             S: BuildHasher + Default
         > GcDeserialize<'gc, 'de, Id> for $target<K, V, S> $(where $($bounds)*)* {
-            fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+            fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error> {
                 struct MapVisitor<
                     'gc, 'de, Id: CollectorId,
                     K: GcDeserialize<'gc, 'de, Id>,
                     V: GcDeserialize<'gc, 'de, Id>,
                     S: BuildHasher + Default
                 > {
-                    ctx: &'gc <Id::System as GcSystem>::Context,
+                    ctx: &'gc Id::Context,
                     marker: PhantomData<(&'de S, K, V)>
                 }
                 impl<'gc, 'de, Id: CollectorId,
@@ -225,13 +225,13 @@ macro_rules! impl_for_set {
             T: Eq + Hash + GcDeserialize<'gc, 'de, Id>,
             S: BuildHasher + Default
         > GcDeserialize<'gc, 'de, Id> for $target<T, S> $(where $($bounds)*)* {
-            fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc <Id::System as GcSystem>::Context, deserializer: D) -> Result<Self, D::Error> {
+            fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error> {
                 struct SetVisitor<
                     'gc, 'de, Id: CollectorId,
                     T: GcDeserialize<'gc, 'de, Id>,
                     S: BuildHasher + Default
                 > {
-                    ctx: &'gc <Id::System as GcSystem>::Context,
+                    ctx: &'gc Id::Context,
                     marker: PhantomData<fn(&'de (), S) -> T>
                 }
                 impl<'gc, 'de, Id: CollectorId,

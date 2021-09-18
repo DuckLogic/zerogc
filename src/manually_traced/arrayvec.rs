@@ -33,7 +33,7 @@ unsafe_gc_impl!(
     },
     deserialize => |ctx, deserializer| {
         use core::marker::PhantomData;
-        use crate::{CollectorId, GcSystem};
+        use crate::CollectorId;
         use crate::serde::{GcDeserialize, GcDeserializeSeed};
         use serde::de::{Visitor, Error, SeqAccess};
         struct ArrayVecVisitor<
@@ -41,7 +41,7 @@ unsafe_gc_impl!(
             T: GcDeserialize<'gc, 'de, Id>,
             const SIZE: usize
         > {
-            ctx: &'gc <Id::System as GcSystem>::Context,
+            ctx: &'gc Id::Context,
             marker: PhantomData<fn(&'de ()) -> ArrayVec<T, SIZE>>
         }
         impl<
