@@ -87,6 +87,8 @@ pub mod internals;
 pub mod errors;
 #[cfg(feature = "allocator-api")]
 pub mod allocator;
+#[cfg(feature = "hashmap-impl")]
+pub mod hash_map;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.

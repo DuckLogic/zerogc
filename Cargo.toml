@@ -24,6 +24,15 @@ serde = { version = "1", optional = true, features = ["derive"] }
 zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.5" }
 # Used for the "epsilon" no-op collector
 bumpalo = { version = "3", optional = true }
+# Used for our custom hashmap
+ahash = { version = "0.7.0", default-features = false, optional = true }
+
+[dependencies.hashbrown]
+# Hashbrown is used for our custom hashmap implementation
+# We also implement Trace regardless
+version = "0.11"
+optional = true
+features = ["raw", "nightly"]
 
 [dev-dependencies]
 serde_json = "1"
@@ -50,11 +59,13 @@ alloc = []
 # NOTE: This doesn't *necessarily* require the 'alloc'
 # feature (because the API itself is in 'core')
 allocator-api = []
+# Our custom hashmap implementation
+hashmap-impl = ["allocator-api", "hashbrown", "ahash"]
 # Support a 'GcError' type that implements 'std::error::Error'
 # by wrapping a 'GcHandle'
 errors = []
 # Serde support
-serde1 = ["serde", "zerogc-derive/__serde-internal", "arrayvec/serde", "indexmap/serde-1"]
+serde1 = ["serde", "zerogc-derive/__serde-internal", "arrayvec/serde", "indexmap/serde-1", "hashbrown/serde"]
 # Support the "epsilon" no-op collector
 epsilon = []
 # Configure the "epsilon" collector use arena allocation

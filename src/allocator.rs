@@ -15,6 +15,15 @@ use crate::{GcSimpleAlloc};
 
 /// A wrapper for a `GcContext` that implements [core::alloc::Allocator]
 /// by allocating `GcArray<u8>`
+///
+/// ## Safety
+/// Using this allocator api comes with two major caveats:
+/// 1. All pointers that are in-use must be traced by re-interpreting them as the relavent `GcArray`
+/// 2. The `Trace` implementation must support relocating pointers.
+///
+/// NOTE: Item number two may be considerably more difficult.
+/// For example, the 'hashbrown::raw::RawTable' api supports accessing the raw pointers,
+/// but doesn't support changing or reloacting it.....x
 pub struct GcAllocWrapper<'gc, C: GcSimpleAlloc>(&'gc C);
 
 unsafe impl<'gc, C: GcSimpleAlloc> Allocator for GcAllocWrapper<'gc, C> {

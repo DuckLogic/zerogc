@@ -23,7 +23,7 @@ pub use crate::{
 };
 // TODO: Should this trait be auto-imported???
 pub use crate::CollectorId;
-// Utils
 pub use crate::AssumeNotTraced;
 pub use crate::cell::GcCell;
 pub use crate::vec::GcVec;
+pub use crate::array::{GcArray, GcString};
