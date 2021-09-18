@@ -970,6 +970,20 @@ unsafe impl<'gc, T, Id> Send for Gc<'gc, T, Id>
 unsafe impl<'gc, T, Id> Sync for Gc<'gc, T, Id>
     where T: GcSafe<'gc, Id> + ?Sized + Sync, Id: CollectorId + Sync {}
 
+/// Indicates that a mutable reference to a type
+/// is safe to use without triggering a write barrier.
+///
+/// This means one of either two things:
+/// 1. This type doesn't need any write barriers
+/// 2. Mutating this type implicitly triggers a write barrier.
+///
+/// This is the bound for `RefCell<T>`. Since a RefCell doesn't explicitly trigger write barriers,
+/// a `RefCell` can only be used with `T` if either:
+/// 1. `T` doesn't need any write barriers or
+/// 2. `T` implicitly triggers write barriers on any mutation
+pub unsafe trait ImplicitWriteBarrier {}
+unsafe impl<T: NullTrace> ImplicitWriteBarrier for T {}
+
 /// A owned handle which points to a garbage collected object.
 ///
 /// This is considered a root by the garbage collector that is independent

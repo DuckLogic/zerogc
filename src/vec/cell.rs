@@ -1,38 +1,11 @@
 //! The implementation of [GcVecCell]
 use core::cell::RefCell;
 
-use zerogc_derive::unsafe_gc_impl;
 use inherent::inherent;
 
 use crate::SimpleAllocCollectorId;
 use crate::vec::raw::{IGcVec, ReallocFailedError};
 use crate::prelude::*;
-
-struct VecCellInner<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
-    cell: RefCell<GcVec<'gc, T, Id>>
-}
-unsafe_gc_impl!(
-    target => VecCellInner<'gc, T, Id>,
-    params => ['gc, T: GcSafe<'gc, Id>, Id: CollectorId],
-    bounds => {
-        Trace => { where T: Trace },
-        TraceImmutable => { where T: Trace },
-        TrustedDrop => { where T: TrustedDrop },
-        GcSafe => { where T: GcSafe<'gc, Id> },
-        GcRebrand => { where T: GcRebrand<'new_gc, Id>, T::Branded: Sized }
-    },
-    null_trace => never,
-    NEEDS_TRACE => true,
-    NEEDS_DROP => GcVec::<'gc, T, Id>::NEEDS_DROP,
-    branded_type => VecCellInner<'new_gc, T::Branded, Id>,
-    trace_mut => |self, visitor| {
-        visitor.trace::<GcVec<'gc, T, Id>>(self.cell.get_mut())
-    },
-    collector_id => Id,
-    trace_immutable => |self, visitor| {
-        visitor.trace::<GcVec<'gc, T, Id>>(unsafe { &mut *self.cell.as_ptr() })
-    }
-);
 
 /// A garbage collected vector,
 /// wrapped in a [RefCell] for interior mutability.
@@ -43,7 +16,7 @@ unsafe_gc_impl!(
 #[derive(Trace)]
 #[zerogc(collector_ids(Id), copy)]
 pub struct GcVecCell<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
-    inner: Gc<'gc, VecCellInner<'gc, T, Id>, Id>,
+    inner: Gc<'gc, RefCell<GcVec<'gc, T, Id>>, Id>,
 }
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVecCell<'gc, T, Id> {
     /// Immutably borrow the wrapped [GcVec].
@@ -59,7 +32,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVecCell<'gc, T, Id> {
     /// Panics if this vector has an outstanding mutable borrow.
     #[inline]
     pub fn borrow(&self) -> core::cell::Ref<'_, GcVec<'gc, T, Id>> {
-        self.inner.cell.borrow()
+        self.inner.borrow()
     }
     /// Mutably (and exclusively) borrow the wrapped [GcVec].
     ///
@@ -74,7 +47,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVecCell<'gc, T, Id> {
     /// Panics if this vector has any other outstanding borrows.
     #[inline]
     pub fn borrow_mut(&self) -> core::cell::RefMut<'_, GcVec<'gc, T, Id>> {
-        self.inner.cell.borrow_mut()
+        self.inner.borrow_mut()
     }
     /// Immutably borrow a slice of this vector's contents.
     ///
@@ -109,39 +82,37 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> IGcVec<'gc, T> 
 
     #[inline]
     pub fn with_capacity_in(capacity: usize, ctx: &'gc <Id as CollectorId>::Context) -> Self {
-        GcVecCell { inner: ctx.alloc(VecCellInner {
-            cell: RefCell::new(GcVec::with_capacity_in(capacity, ctx))
-        }) }
+        GcVecCell { inner: ctx.alloc(RefCell::new(GcVec::with_capacity_in(capacity, ctx))) }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.inner.cell.borrow().len()
+        self.inner.borrow().len()
     }
 
     #[inline]
     pub unsafe fn set_len(&mut self, len: usize) {
-        self.inner.cell.borrow_mut().set_len(len);
+        self.inner.borrow_mut().set_len(len);
     }
 
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.inner.cell.borrow().capacity()
+        self.inner.borrow().capacity()
     }
 
     #[inline]
     pub fn reserve_in_place(&mut self, additional: usize) -> Result<(), ReallocFailedError> {
-        self.inner.cell.borrow_mut().reserve_in_place(additional)
+        self.inner.borrow_mut().reserve_in_place(additional)
     }
 
     #[inline]
     pub unsafe fn as_ptr(&self) -> *const T {
-        self.inner.cell.borrow().as_ptr()
+        self.inner.borrow().as_ptr()
     }
 
     #[inline]
     pub fn context(&self) -> &'gc <Id as CollectorId>::Context {
-        self.inner.cell.borrow().context()
+        self.inner.borrow().context()
     }
 
     // Default methods:
@@ -165,6 +136,6 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> IGcVec<'gc, T> 
 }
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Extend<T> for GcVecCell<'gc, T, Id> {
     fn extend<A: IntoIterator<Item=T>>(&mut self, iter: A) {
-        self.inner.cell.borrow_mut().extend(iter);
+        self.inner.borrow_mut().extend(iter);
     }
 }

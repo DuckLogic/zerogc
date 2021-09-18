@@ -269,12 +269,13 @@ unsafe_gc_impl!(
 );
 unsafe_gc_impl!(
     target => RefCell<T>,
-    params => [T: NullTrace],
+    params => [T: crate::ImplicitWriteBarrier],
     bounds => {
-        GcRebrand => { where T: GcSafe<'new_gc, Id> + NullTrace }
+        TraceImmutable => { where T: TraceImmutable + crate::ImplicitWriteBarrier },
+        GcRebrand => { where T: GcRebrand<'new_gc, Id> + crate::ImplicitWriteBarrier, T::Branded: Sized + crate::ImplicitWriteBarrier }
     },
-    branded_type => Self,
-    null_trace => always,
+    branded_type => RefCell<T::Branded>,
+    null_trace => { where T: NullTrace },
     NEEDS_TRACE => false,
     NEEDS_DROP => T::NEEDS_DROP,
     collector_id => *,

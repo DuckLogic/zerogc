@@ -137,6 +137,7 @@ pub struct GcVec<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
      */
     raw: UnsafeCell<Id::RawVec<'gc, T>>
 }
+unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> crate::ImplicitWriteBarrier for GcVec<'gc, T, Id> {}
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
     /// Create a [GcVec] from a [GcRawVec].
     ///

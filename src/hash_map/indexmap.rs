@@ -22,7 +22,7 @@ pub struct GcIndexMap<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAll
     /// indices mapping from the entry hash to its index
     ///
     /// NOTE: This uses `std::alloc` instead of the garbage collector to allocate memory.
-    /// This is nessicarry because of the possibility of relocating pointers.....
+    /// This is necessary because of the possibility of relocating pointers.....
     ///
     /// The unfortunate downside is that allocating from `std::alloc` is slightly
     /// slower than allocating from a typical gc (which often uses bump-pointer allocation).
@@ -33,6 +33,8 @@ pub struct GcIndexMap<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAll
     /// The hasher used to hash elements
     hasher: S
 }
+unsafe impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S: BuildHasher>
+    crate::ImplicitWriteBarrier for GcIndexMap<'gc, K, V, Id, S> {}
 impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S: BuildHasher> GcIndexMap<'gc, K, V, Id, S> {
     /// Return the number of entries in the map
     #[inline]
