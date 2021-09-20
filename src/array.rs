@@ -6,11 +6,12 @@ use core::slice::SliceIndex;
 use core::str;
 use core::fmt::{self, Formatter, Debug, Display};
 use core::hash::{Hash, Hasher};
+use core::marker::PhantomData;
 
-use crate::{CollectorId, internals::ConstCollectorId, GcSafe, GcRebrand};
+use crate::{CollectorId, internals::ConstCollectorId, GcSafe, GcRebrand, Gc};
 use zerogc_derive::{Trace, unsafe_gc_impl};
 
-use self::repr::{GcArrayRepr};
+use self::repr::{GcArrayPtr};
 
 pub mod repr;
 
@@ -110,27 +111,33 @@ impl<'gc, Id: CollectorId> Display for GcString<'gc, Id> {
 /// once it has been allocated.
 ///
 /// ## Safety
-/// This is a `#[repr(transparent)]` wrapper around
+/// This is a 'repr(transparent)' wrapper arround
 /// [GcArrayRepr].
 #[repr(transparent)]
 pub struct GcArray<'gc, T, Id: CollectorId> {
-    repr: Id::ArrayRepr<'gc, T>
+    ptr: Id::ArrayPtr<T>,
+    marker: PhantomData<Gc<'gc, [T], Id>>
 }
 impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
     /// Convert this array into a slice
     #[inline]
-    pub fn as_slice<'a>(&self) -> &'a [T] where 'gc: 'a {
-        self.repr.as_slice()
+    pub fn as_slice(&self) -> &'gc [T] {
+        unsafe { self.ptr.as_slice_unchecked() }
     }
     /// Load a raw pointer to the array's value
     #[inline]
     pub fn as_raw_ptr(&self) -> *mut T {
-        self.as_slice().as_ptr() as *mut T
+        self.ptr.as_raw_ptr()
+    }
+    /// Get the underlying 'Id::ArrayPtr' for this array
+    #[inline]
+    pub const fn as_internal_ptr_repr(&self) -> &'_ Id::ArrayPtr<T> {
+        &self.ptr
     }
     /// Load the length of the array
     #[inline]
     pub fn len(&self) -> usize {
-        self.repr.len()
+        self.ptr.len()
     }
     /// Check if the array is empty
     #[inline]
@@ -140,12 +147,7 @@ impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
     /// Resolve the [CollectorId]
     #[inline]
     pub fn collector_id(&self) -> &'_ Id {
-        Id::resolve_array_id(&self.repr)
-    }
-    /// Get access to the array's underlying representation. 
-    #[inline]
-    pub fn as_raw_repr(&self) -> &Id::ArrayRepr<'gc, T> {
-        &self.repr
+        Id::resolve_array_id(self)
     }
     /// Create an array from the specified raw pointer and length
     ///
@@ -154,9 +156,18 @@ impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
     /// value allocated from the corresponding [CollectorId]
     #[inline]
     pub unsafe fn from_raw_ptr(ptr: NonNull<T>, len: usize) -> Self {
-        GcArray { repr: Id::ArrayRepr::<'gc, T>::from_raw_parts(ptr, len) }
+        GcArray { ptr: Id::ArrayPtr::<T>::from_raw_parts(ptr, len), marker: PhantomData }
     }
 }
+/// If the underlying type is `Sync`, it's safe
+/// to share garbage collected references between threads.
+///
+/// The safety of the collector itself depends on whether [CollectorId] is Sync.
+/// If it is, the whole garbage collection implementation should be as well.
+unsafe impl<'gc, T, Id> Sync for GcArray<'gc, T, Id>
+    where T: Sync, Id: CollectorId + Sync {}
+unsafe impl<'gc, T, Id> Send for GcArray<'gc, T, Id>
+    where T: Sync, Id: CollectorId + Sync {}
 /// Const access to [GcString]
 pub trait ConstArrayAccess<'gc, T> {
     /// The value of the array as a slice
@@ -174,25 +185,25 @@ impl<'gc, T, Id: ~const ConstCollectorId> const ConstArrayAccess<'gc, T> for GcA
          * TODO: This is horrible, but currently nessicarry
          * to do this in a const-fn context.
          */
-        match Id::ArrayRepr::<'gc, T>::UNCHECKED_KIND {
-            repr::ArrayReprKind::Fat => {
+        match Id::ArrayPtr::<T>::UNCHECKED_KIND {
+            repr::ArrayPtrKind::Fat => {
                 unsafe {
                     core::mem::transmute_copy::<
-                        Id::ArrayRepr<'gc, T>,
+                        Id::ArrayPtr<T>,
                         &'a [T]
-                    >(&self.repr)
+                    >(&self.ptr)
                 }
             },
-            repr::ArrayReprKind::Thin => {
+            repr::ArrayPtrKind::Thin => {
                 unsafe {
                     let ptr = core::mem::transmute_copy::<
-                        Id::ArrayRepr<'gc, T>,
+                        Id::ArrayPtr<T>,
                         NonNull<T>
-                    >(&self.repr);
+                    >(&self.ptr);
                     &*core::ptr::slice_from_raw_parts(
                         ptr.as_ptr(),
                         Id::resolve_array_len_const(
-                            &self.repr
+                            self
                         )
                     )
                 }
@@ -295,3 +306,19 @@ unsafe_gc_impl!(
         visitor.trace_gc(gc)
     }
 );
+
+#[cfg(test)]
+mod test {
+    use crate::{CollectorId, GcArray};
+    use crate::epsilon::{self};
+    #[test]
+    fn test_covariance<'a>() {
+        fn covariant<'a, T, Id: CollectorId>(s: GcArray<'static, T, Id>) -> GcArray<'a, T, Id> {
+            s as _
+        }
+        const SRC: &[u32] = &[1, 2, 5];
+        let s: epsilon::GcArray<'static, u32> = epsilon::gc_array(SRC);
+        let k: epsilon::GcArray<'a, u32> = covariant(s);
+        assert_eq!(k.as_slice(), SRC);
+    }
+}

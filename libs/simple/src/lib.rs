@@ -72,7 +72,6 @@ use zerogc_context::collector::{RawSimpleAlloc};
 use zerogc_context::handle::{GcHandleList, RawHandleImpl};
 use zerogc_context::{CollectionManager as AbstractCollectionManager, RawContext as AbstractRawContext, CollectorContext};
 use zerogc::vec::raw::{GcRawVec};
-use zerogc::array::repr::{GcArrayRepr, ThinArrayRepr};
 use std::cell::Cell;
 use std::ffi::c_void;
 
@@ -646,15 +645,15 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     }
 
     #[inline]
-    fn id_for_array<'a, 'gc, T>(repr: &'a ThinArrayRepr<'gc, T, CollectorId>) -> &'a CollectorId where 'gc: 'a, T: 'gc {
+    fn id_for_array<'a, 'gc, T>(array: &'a GcArray<'gc, T>) -> &'a CollectorId where 'gc: 'a, {
         unsafe {
-            let header = GcArrayHeader::LAYOUT.from_value_ptr(repr.as_raw_ptr());
+            let header = GcArrayHeader::LAYOUT.from_value_ptr(array.as_raw_ptr());
             (*header).common_header.collector_id()
         }
     }
 
     #[inline]
-    fn resolve_array_len<'gc, T>(gc: &ThinArrayRepr<'gc, T, CollectorId>) -> usize where T: 'gc {
+    fn resolve_array_len<'gc, T>(gc: &GcArray<'gc, T>) -> usize {
         unsafe {
             let header = GcArrayHeader::LAYOUT.from_value_ptr(gc.as_raw_ptr());
             (*header).len

@@ -2,8 +2,8 @@
 //!
 //!
 //! Two possible implementations are also available:
-//! 1. FatArrayRepr - Represents arrays as a fat pointer
-//! 2. ThinArrayRepr - Represents arrays as a thin pointer,
+//! 1. FatArrayPtr - Represents arrays as a fat pointer
+//! 2. ThinArraPtr - Represents arrays as a thin pointer,
 //!    with the length stored indirectly in the object header.
 #![allow(
     clippy::len_without_is_empty, // This is really an internal interface...
@@ -11,12 +11,11 @@
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
+use crate::{CollectorId};
 
-use crate::{CollectorId, Gc};
-
-/// The type of [GcArrayRepr] impl
+/// The type of [GcArrayPtr] impl
 #[derive(Copy, Clone, Debug)]
-pub enum ArrayReprKind {
+pub enum ArrayPtrKind {
     /// A `FatArrayRepr`, which can be transmuted <-> to `&[T]`
     Fat,
     /// A `ThinArrayRepr`, which can be transmuted <-> to `NonNull<T>`
@@ -25,11 +24,14 @@ pub enum ArrayReprKind {
 
 /// The raw representation of a GcArray pointer.
 ///
-///
 /// NOTE: This is only for customizing the *pointer*
 /// representation. The in-memory layout of the array and its
-/// header can be controlled separately from the pointer
-/// (ie. feel free to use a builtin impl even if you have a custom header).
+/// header can be controlled separately from the pointer.
+///
+/// This trait is sealed, and there are only two possible
+/// implementations:
+/// 1. fat pointers
+/// 2. thin pointers
 ///
 /// ## Safety
 /// The length and never change (and be valid for
@@ -37,14 +39,14 @@ pub enum ArrayReprKind {
 ///
 /// The underlying 'repr' is responsible
 /// for dropping memory as appropriate.
-pub unsafe trait GcArrayRepr<'gc, T>: Copy + sealed::Sealed {
+pub unsafe trait GcArrayPtr<T>: Copy + sealed::Sealed {
     /// The repr's collector
     type Id: CollectorId;
-    /// The "kind" of the array (whether fat or thin)
+    /// The "kind" of the array pointer (whether fat or thin)
     ///
     /// This is necessary to correctly
     /// transmute in a const-fn context
-    const UNCHECKED_KIND: ArrayReprKind;
+    const UNCHECKED_KIND: ArrayPtrKind;
     /// Construct an array representation from a combination
     /// of a pointer and length.
     ///
@@ -53,8 +55,12 @@ pub unsafe trait GcArrayRepr<'gc, T>: Copy + sealed::Sealed {
     /// ## Safety
     /// The combination of pointer + length must be valid. 
     unsafe fn from_raw_parts(ptr: NonNull<T>, len: usize) -> Self;
-    /// Convert the value to a slice
-    fn as_slice<'a>(&self) -> &'a [T] where 'gc: 'a;
+    /// Convert this pointer into a slice.
+    ///
+    /// ## Safety
+    /// Doesn't check the resulting lifetime is valid.
+    unsafe fn as_slice_unchecked<'a>(&self) -> &'a [T]
+        where T: 'a;
     /// Get a raw pointer to this array's elements.
     fn as_raw_ptr(&self) -> *mut T;
     /// Get the length of this value
@@ -67,33 +73,33 @@ pub unsafe trait GcArrayRepr<'gc, T>: Copy + sealed::Sealed {
 /// This type is guaranteed to be compatible with `&[T]`.
 /// Transmuting back and forth is safe.
 #[repr(transparent)]
-pub struct FatArrayRepr<'gc, T, Id: CollectorId> {
+pub struct FatArrayPtr<T, Id: CollectorId> {
     slice: NonNull<[T]>,
-    marker: PhantomData<Gc<'gc, [T], Id>>
+    marker: PhantomData<Id>
 }
-impl<'gc, T, Id: CollectorId> self::sealed::Sealed for FatArrayRepr<'gc, T, Id> {}
-impl<'gc, T, Id: CollectorId> FatArrayRepr<'gc, T, Id> {
+impl<T, Id: CollectorId> self::sealed::Sealed for FatArrayPtr<T, Id> {}
+impl<T, Id: CollectorId> FatArrayPtr<T, Id> {
     /// Get the length of this fat array (stored inline)
     #[inline]
     pub const fn len(&self) -> usize {
         unsafe { (&*self.slice.as_ptr()).len() }
     }
 }
-impl<'gc, T, Id: CollectorId> Copy for FatArrayRepr<'gc, T, Id> {}
-impl<'gc, T, Id: CollectorId> Clone for FatArrayRepr<'gc, T, Id> {
+impl<T, Id: CollectorId> Copy for FatArrayPtr<T, Id> {}
+impl<T, Id: CollectorId> Clone for FatArrayPtr<T, Id> {
     #[inline]
     fn clone(&self) -> Self {
         *self
     }
 }
 
-unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for FatArrayRepr<'gc, T, Id> {
+unsafe impl<T, Id: CollectorId> GcArrayPtr<T> for FatArrayPtr<T, Id> {
     type Id = Id;
-    const UNCHECKED_KIND: ArrayReprKind = ArrayReprKind::Fat;
+    const UNCHECKED_KIND: ArrayPtrKind = ArrayPtrKind::Fat;
 
     #[inline]
     unsafe fn from_raw_parts(ptr: NonNull<T>, len: usize) -> Self {
-        FatArrayRepr {
+        FatArrayPtr {
             slice: NonNull::new_unchecked(
                 core::ptr::slice_from_raw_parts(
                     ptr.as_ptr() as *const T, len
@@ -104,8 +110,8 @@ unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for FatArrayRepr<'gc, T
     }
 
     #[inline]
-    fn as_slice<'a>(&self) -> &'a [T] where 'gc: 'a {
-        unsafe { &*self.slice.as_ptr() }
+    unsafe fn as_slice_unchecked<'a>(&self) -> &'a [T] where T: 'a {
+        &*self.slice.as_ptr()
     }
 
     #[inline]
@@ -115,7 +121,7 @@ unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for FatArrayRepr<'gc, T
 
     #[inline]
     fn len(&self) -> usize {
-        self.len()
+        self.len() // delegates to inherent impl
     }
 }
 
@@ -127,24 +133,24 @@ unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for FatArrayRepr<'gc, T
 /// and can be transmuted back and forth
 /// (assuming the appropriate invariants are met).
 #[repr(transparent)]
-pub struct ThinArrayRepr<'gc, T, Id: CollectorId> {
+pub struct ThinArrayPtr<T, Id: CollectorId> {
     elements: NonNull<T>,
-    marker: PhantomData<Gc<'gc, [T], Id>>    
+    marker: PhantomData<Id>
 }
-impl<'gc, T, Id: CollectorId> Copy for ThinArrayRepr<'gc, T, Id> {}
-impl<'gc, T, Id: CollectorId> Clone for ThinArrayRepr<'gc, T, Id> {
+impl<T, Id: CollectorId> Copy for ThinArrayPtr<T, Id> {}
+impl<T, Id: CollectorId> Clone for ThinArrayPtr<T, Id> {
     #[inline]
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<'gc, T, Id: CollectorId> self::sealed::Sealed for ThinArrayRepr<'gc, T, Id> {}
-unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for ThinArrayRepr<'gc, T, Id> {
+impl<T, Id: CollectorId> self::sealed::Sealed for ThinArrayPtr<T, Id> {}
+unsafe impl<T, Id: CollectorId> GcArrayPtr<T> for ThinArrayPtr<T, Id> {
     type Id = Id;
-    const UNCHECKED_KIND: ArrayReprKind = ArrayReprKind::Thin;
+    const UNCHECKED_KIND: ArrayPtrKind = ArrayPtrKind::Thin;
     #[inline]
     unsafe fn from_raw_parts(ptr: NonNull<T>, len: usize) -> Self {
-        let res = ThinArrayRepr { elements: ptr, marker: PhantomData };
+        let res = ThinArrayPtr { elements: ptr, marker: PhantomData };
         debug_assert_eq!(
             res.len(),
             len
@@ -152,11 +158,11 @@ unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for ThinArrayRepr<'gc, 
         res
     }
     #[inline]
-    fn as_slice<'a>(&self) -> &'a [T] where 'gc: 'a {
-        unsafe { core::slice::from_raw_parts(
+    unsafe fn as_slice_unchecked<'a>(&self) -> &'a [T] where T: 'a {
+        core::slice::from_raw_parts(
             self.elements.as_ptr(),
             self.len()
-        ) }
+        )
     }
     #[inline]
     fn as_raw_ptr(&self) -> *mut T {
@@ -166,26 +172,10 @@ unsafe impl<'gc, T, Id: CollectorId> GcArrayRepr<'gc, T> for ThinArrayRepr<'gc, 
     fn len(&self) -> usize {
         unsafe { Id::resolve_array_len(
             &*(self as *const Self
-                as *const Id::ArrayRepr<'gc, T>)
+                as *const super::GcArray<'static, T, Id>)
         ) }
     }
 }
-
-/// If the underlying type is `Sync`, it's safe
-/// to share garbage collected references between threads.
-///
-/// The safety of the collector itself depends on whether [CollectorId] is Sync.
-/// If it is, the whole garbage collection implementation should be as well.
-unsafe impl<'gc, T, Id> Sync for ThinArrayRepr<'gc, T, Id>
-    where T: Sync, Id: CollectorId + Sync {}
-unsafe impl<'gc, T, Id> Send for ThinArrayRepr<'gc, T, Id>
-    where T: Sync, Id: CollectorId + Sync {}
-
-
-unsafe impl<'gc, T, Id> Sync for FatArrayRepr<'gc, T, Id>
-    where T: Sync, Id: CollectorId + Sync {}
-unsafe impl<'gc, T, Id> Send for FatArrayRepr<'gc, T, Id>
-    where T: Sync, Id: CollectorId + Sync {}
 
 
 mod sealed {

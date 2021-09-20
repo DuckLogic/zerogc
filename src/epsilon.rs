@@ -384,8 +384,8 @@ pub struct EpsilonCollectorId {
 crate::impl_nulltrace_for_static!(EpsilonCollectorId);
 unsafe impl const ConstCollectorId for EpsilonCollectorId {
     #[inline]
-    fn resolve_array_len_const<T>(repr: &Self::ArrayRepr<'_, T>) -> usize {
-        repr.len()
+    fn resolve_array_len_const<T>(repr: &GcArray<'_, T>) -> usize {
+        repr.as_internal_ptr_repr().len()
     }
 }
 unsafe impl CollectorId for EpsilonCollectorId {
@@ -394,7 +394,7 @@ unsafe impl CollectorId for EpsilonCollectorId {
     type RawVec<'gc, T: GcSafe<'gc, Self>> = self::layout::EpsilonRawVec<'gc, T>;
     /// We use fat-pointers for arrays,
     /// so that we can transmute from `&'static [T]` -> `GcArray`
-    type ArrayRepr<'gc, T> = zerogc::array::repr::FatArrayRepr<'gc, T, Self>;
+    type ArrayPtr<T> = zerogc::array::repr::FatArrayPtr<T, Self>;
 
     #[inline]
     fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: ?Sized, 'gc: 'a {
@@ -403,13 +403,13 @@ unsafe impl CollectorId for EpsilonCollectorId {
     }
 
     #[inline]
-    fn resolve_array_id<'a, 'gc, T>(_array: &'a Self::ArrayRepr<'gc, T>) -> &'a Self where 'gc: 'a {
+    fn resolve_array_id<'a, 'gc, T>(_array: &'a GcArray<'gc, T>) -> &'a Self where 'gc: 'a {
         const ID: EpsilonCollectorId = EpsilonCollectorId { _priv: () };
         &ID
     }
 
     #[inline]
-    fn resolve_array_len<T>(repr: &Self::ArrayRepr<'_, T>) -> usize {
+    fn resolve_array_len<T>(repr: &GcArray<'_, T>) -> usize {
         repr.len()
     }
 

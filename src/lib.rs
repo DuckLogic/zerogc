@@ -679,7 +679,7 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
     type RawVec<'gc, T: GcSafe<'gc, Self>>: crate::vec::raw::GcRawVec<'gc, T, Id=Self>;
     /// The raw representation of `GcArray` pointers
     /// in this collector.
-    type ArrayRepr<'gc, T>: ~const crate::array::repr::GcArrayRepr<'gc, T, Id=Self>;
+    type ArrayPtr<T>: ~const crate::array::repr::GcArrayPtr<T, Id=Self>;
 
     /// Get the runtime id of the collector that allocated the [Gc]
     ///
@@ -691,11 +691,11 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
     /// Resolve the CollectorId for the specified [GcArray]'s representation.
     ///
     /// This is the [GcArray] counterpart of `from_gc_ptr`
-    fn resolve_array_id<'a, 'gc, T>(repr: &'a Self::ArrayRepr<'gc, T>) -> &'a Self
+    fn resolve_array_id<'a, 'gc, T>(array: &'a GcArray<'gc, T, Self>) -> &'a Self
         where 'gc: 'a;
 
     /// Resolve the length of the specified array
-    fn resolve_array_len<T>(repr: &Self::ArrayRepr<'_, T>) -> usize;
+    fn resolve_array_len<T>(repr: &GcArray<'_, T, Self>) -> usize;
 
     /// Perform a write barrier before writing to a garbage collected field
     ///
