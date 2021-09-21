@@ -298,6 +298,27 @@ impl<'gc, T: Hash, Id: CollectorId> Hash for GcArray<'gc, T, Id> {
         T::hash_slice(self.as_slice(), hasher)
     }
 }
+impl<'gc, T, Id: CollectorId> IntoIterator for GcArray<'gc, T, Id>  where T: 'gc {
+    type Item = &'gc T;
+
+    type IntoIter = core::slice::Iter<'gc, T>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+impl<'array, 'gc, T, Id: CollectorId> IntoIterator for &'array GcArray<'gc, T, Id> 
+    where T: 'array {
+    type Item = &'array T;
+
+    type IntoIter = core::slice::Iter<'array, T>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
 // Need to implement by hand, because [T] is not GcRebrand
 unsafe_gc_impl!(
     target => GcArray<'gc, T, Id>,
