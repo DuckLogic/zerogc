@@ -679,7 +679,7 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
     type RawVec<'gc, T: GcSafe<'gc, Self>>: crate::vec::raw::GcRawVec<'gc, T, Id=Self>;
     /// The raw representation of `GcArray` pointers
     /// in this collector.
-    type ArrayPtr<T>: ~const crate::array::repr::GcArrayPtr<T, Id=Self>;
+    type ArrayPtr: ~const crate::array::repr::GcArrayPtr<Id=Self>;
 
     /// Get the runtime id of the collector that allocated the [Gc]
     ///

@@ -419,7 +419,6 @@ pub(crate) struct SimpleAlloc {
 }
 #[derive(Debug)]
 struct TargetLayout<H> {
-    value_layout: Layout,
     header_layout: HeaderLayout<H>,
     value_offset: usize,
     overall_layout: Layout
@@ -478,7 +477,7 @@ impl SimpleAlloc {
             header_layout.value_offset(value_layout.align())
         );
         let target_layout = TargetLayout {
-            header_layout, value_offset, value_layout, overall_layout
+            header_layout, value_offset, overall_layout
         };
         let (header, value_ptr) = if let Some(arena) = self.small_arenas.find(target_layout.overall_layout) {
             unsafe { self.alloc_layout_small(arena, target_layout) }
@@ -653,7 +652,7 @@ unsafe impl ::zerogc_context::collector::RawCollectorImpl for RawSimpleCollector
     }
 
     #[inline]
-    fn resolve_array_len<'gc, T>(gc: &GcArray<'gc, T>) -> usize {
+    fn resolve_array_len<T>(gc: &GcArray<T>) -> usize {
         unsafe {
             let header = GcArrayHeader::LAYOUT.from_value_ptr(gc.as_raw_ptr());
             (*header).len

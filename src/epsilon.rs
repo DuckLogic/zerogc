@@ -385,7 +385,7 @@ crate::impl_nulltrace_for_static!(EpsilonCollectorId);
 unsafe impl const ConstCollectorId for EpsilonCollectorId {
     #[inline]
     fn resolve_array_len_const<T>(repr: &GcArray<'_, T>) -> usize {
-        repr.as_internal_ptr_repr().len()
+        unsafe { repr.as_internal_ptr_repr() }.len()
     }
 }
 unsafe impl CollectorId for EpsilonCollectorId {
@@ -394,7 +394,7 @@ unsafe impl CollectorId for EpsilonCollectorId {
     type RawVec<'gc, T: GcSafe<'gc, Self>> = self::layout::EpsilonRawVec<'gc, T>;
     /// We use fat-pointers for arrays,
     /// so that we can transmute from `&'static [T]` -> `GcArray`
-    type ArrayPtr<T> = zerogc::array::repr::FatArrayPtr<T, Self>;
+    type ArrayPtr = zerogc::array::repr::FatArrayPtr<Self>;
 
     #[inline]
     fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: ?Sized, 'gc: 'a {
@@ -427,5 +427,34 @@ unsafe impl CollectorId for EpsilonCollectorId {
          * It would also necessitate a header for `Copy` objects.
          */
         unimplemented!("Unable to convert EpsilonCollectorId -> EpsilonSystem")
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::Trace;
+    #[test]
+    fn lifetime_variance<'a>() {
+        #[derive(Trace, Copy, Clone)]
+        #[zerogc(copy, collector_ids(EpsilonCollectorId))] 
+        enum ShouldBeVariant<'gc> {
+            First(Gc<'gc, ShouldBeVariant<'gc>>),
+            Second(u32),
+            #[allow(unused)]
+            Array(GcArray<'gc, ShouldBeVariant<'gc>>)
+        }
+        const STATIC: Gc<'static, u32> = gc(&32);
+        const SECOND: &ShouldBeVariant<'static> = &ShouldBeVariant::Second(32);
+        const FIRST_VAL: &ShouldBeVariant<'static> = &ShouldBeVariant::First(gc(SECOND));
+        const FIRST: Gc<'static, ShouldBeVariant<'static>> = gc(FIRST_VAL);
+        fn covariant<'a, T>(s: Gc<'static, T>) -> Gc<'a, T> {
+            s as _
+        }
+        let s: Gc<'a, u32> = covariant(STATIC);
+        assert_eq!(s.value(), &32);
+        let k: Gc<'a, ShouldBeVariant<'a>> = covariant::<'a, ShouldBeVariant<'static>>(FIRST) as _;
+        assert!(matches!(k.value(), ShouldBeVariant::First(_)));
+        
     }
 }

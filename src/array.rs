@@ -115,29 +115,41 @@ impl<'gc, Id: CollectorId> Display for GcString<'gc, Id> {
 /// [GcArrayRepr].
 #[repr(transparent)]
 pub struct GcArray<'gc, T, Id: CollectorId> {
-    ptr: Id::ArrayPtr<T>,
+    ptr: Id::ArrayPtr,
     marker: PhantomData<Gc<'gc, [T], Id>>
 }
 impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
     /// Convert this array into a slice
     #[inline]
     pub fn as_slice(&self) -> &'gc [T] {
-        unsafe { self.ptr.as_slice_unchecked() }
+        unsafe {
+            core::slice::from_raw_parts(
+                self.as_raw_ptr(),
+                self.len()
+            )
+        }
     }
     /// Load a raw pointer to the array's value
     #[inline]
     pub fn as_raw_ptr(&self) -> *mut T {
-        self.ptr.as_raw_ptr()
+        self.ptr.as_raw_ptr() as *mut T
     }
     /// Get the underlying 'Id::ArrayPtr' for this array
+    ///
+    /// ## Safety
+    /// Must not interpret the underlying pointer as the
+    /// incorrect type.
     #[inline]
-    pub const fn as_internal_ptr_repr(&self) -> &'_ Id::ArrayPtr<T> {
+    pub const unsafe fn as_internal_ptr_repr(&self) -> &'_ Id::ArrayPtr {
         &self.ptr
     }
     /// Load the length of the array
     #[inline]
     pub fn len(&self) -> usize {
-        self.ptr.len()
+        match self.ptr.len() {
+            Some(len) => len,
+            None => Id::resolve_array_len(self),
+        }
     }
     /// Check if the array is empty
     #[inline]
@@ -156,7 +168,7 @@ impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
     /// value allocated from the corresponding [CollectorId]
     #[inline]
     pub unsafe fn from_raw_ptr(ptr: NonNull<T>, len: usize) -> Self {
-        GcArray { ptr: Id::ArrayPtr::<T>::from_raw_parts(ptr, len), marker: PhantomData }
+        GcArray { ptr: Id::ArrayPtr::from_raw_parts(ptr, len), marker: PhantomData }
     }
 }
 /// If the underlying type is `Sync`, it's safe
@@ -185,11 +197,11 @@ impl<'gc, T, Id: ~const ConstCollectorId> const ConstArrayAccess<'gc, T> for GcA
          * TODO: This is horrible, but currently nessicarry
          * to do this in a const-fn context.
          */
-        match Id::ArrayPtr::<T>::UNCHECKED_KIND {
+        match Id::ArrayPtr::UNCHECKED_KIND {
             repr::ArrayPtrKind::Fat => {
                 unsafe {
                     core::mem::transmute_copy::<
-                        Id::ArrayPtr<T>,
+                        Id::ArrayPtr,
                         &'a [T]
                     >(&self.ptr)
                 }
@@ -197,7 +209,7 @@ impl<'gc, T, Id: ~const ConstCollectorId> const ConstArrayAccess<'gc, T> for GcA
             repr::ArrayPtrKind::Thin => {
                 unsafe {
                     let ptr = core::mem::transmute_copy::<
-                        Id::ArrayPtr<T>,
+                        Id::ArrayPtr,
                         NonNull<T>
                     >(&self.ptr);
                     &*core::ptr::slice_from_raw_parts(

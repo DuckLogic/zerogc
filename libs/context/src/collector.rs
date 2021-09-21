@@ -18,7 +18,7 @@ use zerogc::vec::raw::GcRawVec;
 
 
 pub unsafe trait ConstRawCollectorImpl: RawCollectorImpl {
-    fn resolve_array_len_const<'gc, T>(gc: &GcArray<'gc, T, CollectorId<Self>>) -> usize;
+    fn resolve_array_len_const<T>(gc: &GcArray<T, CollectorId<Self>>) -> usize;
 }
 
 /// A specific implementation of a collector
@@ -60,7 +60,7 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
 
     fn id_for_array<'a, 'gc, T>(gc: &'a GcArray<'gc, T, CollectorId<Self>>) -> &'a CollectorId<Self> where 'gc: 'a;
  
-    fn resolve_array_len<'gc, T>(repr: &GcArray<'gc, T, CollectorId<Self>>) -> usize;
+    fn resolve_array_len<T>(repr: &GcArray<T, CollectorId<Self>>) -> usize;
 
 
     /// Convert the specified value into a dyn pointer
@@ -300,7 +300,7 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     type Context = CollectorContext<C>;
     type RawVec<'gc, T: GcSafe<'gc, Self>> = C::RawVec<'gc, T>;
     // TODO: What if clients want to customize this?
-    type ArrayPtr<T> = zerogc::array::repr::ThinArrayPtr<T, Self>;
+    type ArrayPtr = zerogc::array::repr::ThinArrayPtr<Self>;
 
     #[inline]
     fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self where T: ?Sized, 'gc: 'a {
