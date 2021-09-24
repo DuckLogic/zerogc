@@ -186,6 +186,13 @@ impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S:
     pub fn values_mut(&mut self) -> ValuesMut<'_, K, V> {
         ValuesMut(self.entries.iter_mut())
     }
+    /// Return the context implicitly associated with this map
+    ///
+    /// See also: [GcVec::context]
+    #[inline]
+    pub fn context(&self) -> &'_ Id::Context {
+        self.entries.context()
+    }
 }
 macro_rules! define_iterator {
     (struct $name:ident {
