@@ -10,3 +10,5 @@ pub mod indexmap;
 
 /// The default hasher for garbage collected maps.
 pub type DefaultHasher = ahash::RandomState;
+
+pub use self::indexmap::GcIndexMap;

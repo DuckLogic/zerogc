@@ -36,6 +36,35 @@ pub struct GcIndexMap<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAll
 unsafe impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S: BuildHasher>
     crate::ImplicitWriteBarrier for GcIndexMap<'gc, K, V, Id, S> {}
 impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S: BuildHasher> GcIndexMap<'gc, K, V, Id, S> {
+    /// Allocate a new hashmap inside the specified collector
+    #[inline]
+    pub fn new_in(ctx: &'gc Id::Context) -> Self
+        where S: Default {
+        Self::with_capacity_in(0, ctx)
+    }
+    /// Allocate a new hashmap with the specified capacity,
+    /// inside of the specified collector
+    #[inline]
+    pub fn with_capacity_in(capacity: usize, ctx: &'gc Id::Context) -> Self where S: Default {
+        Self::with_capacity_and_hasher_in(capacity, Default::default(), ctx)
+    }
+    /// Allocate a new hashmap with the specified capacity and hasher,
+    /// inside of the specified collector
+    #[inline]
+    pub fn with_capacity_and_hasher_in(capacity: usize, hasher: S, ctx: &'gc Id::Context) -> Self {
+        GcIndexMap {
+            indices: RawTable::with_capacity(capacity),
+            entries: GcVec::with_capacity_in(capacity, ctx),
+            hasher
+        }
+    }
+        
+    /// Allocate a new hashmap with the specified hasher,
+    /// inside the specified collector
+    #[inline]
+    pub fn with_hasher_in(hasher: S, ctx: &'gc Id::Context) -> Self {
+        Self::with_capacity_and_hasher_in(0, hasher, ctx)
+    }
     /// Return the number of entries in the map
     #[inline]
     pub fn len(&self) -> usize {
