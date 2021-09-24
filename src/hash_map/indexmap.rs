@@ -204,10 +204,10 @@ macro_rules! define_iterator {
         #[doc = concat!("An iterator over the ", $item_name, " of a [GcIndexMap]")]
         pub struct $name<'a, K: 'a, V: 'a>(core::slice::$wrapped<'a, Bucket<K, V>>);
         impl<'a, K: 'a, V: 'a> Iterator for $name<'a, K, V> {
-            type Item = (&'a K, &'a V);
+            type Item = $item;
             #[inline]
             fn next(&mut self) -> Option<Self::Item> {
-                self.0.next().map(|$bucket| (&$bucket.key, &$bucket.value))
+                self.0.next().map(|$bucket| $map)
             }
             #[inline]
             fn size_hint(&self) -> (usize, Option<usize>) {
@@ -217,7 +217,7 @@ macro_rules! define_iterator {
         impl<'a, K, V> DoubleEndedIterator for $name<'a, K, V> {
             #[inline]
             fn next_back(&mut self) -> Option<Self::Item> {
-                self.0.next_back().map(|$bucket| (&$bucket.key, &$bucket.value))
+                self.0.next_back().map(|$bucket| $map)
             }
         }
         impl<'a, K, V> core::iter::ExactSizeIterator for $name<'a, K, V> {}
