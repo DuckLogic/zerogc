@@ -17,7 +17,7 @@ serde = { version = "1" }
 
 [dependencies]
 # Proc macros
-syn = { version = "1.0.55", features = ["full", "extra-traits", "fold"] }
+syn = { version = "1.0.55", features = ["full", "extra-traits", "visit", "fold"] }
 quote = "1.0.8"
 darling = "0.13"
 proc-macro2 = "1"

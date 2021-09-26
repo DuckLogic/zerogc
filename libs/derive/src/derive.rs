@@ -189,6 +189,43 @@ struct TraceField {
     /// to be traced.
     #[darling(default)]
     unsafe_skip_trace: bool,
+    /// Avoid cycles in the computation of 'Trace::NEEDS_TRACE'.
+    ///
+    /// This overrides the default value of the 'Trace::NEEDS_TRACE'.
+    /// It may be necessary to avoid cycles in const evaluation.
+    /// For example,
+    /// ```no_run
+    /// # use zerogc_derive::Trace;
+    /// #[derive(Trace)]
+    /// struct FooIndirect(Foo);
+    /// #[derive(Trace)]
+    /// struct Foo {
+    ///     #[zerogc(avoid_const_cycle)]
+    ///     foo: Option<Box<FooIndirect>>
+    /// }
+    /// ```
+    /// the default generated value of 'Trace::NEEDS_TRACE'
+    /// would be equal to 'const NEEDS_TRACE = Option<Box<FooIndirect>>::NEEDS_TRACE'.
+    /// This would cause an infinite cycle, leading to a compiler error.
+    ///
+    /// NOTE: The macro has builtin cycle-protection for `Box<Foo>`.
+    /// It's only the existence of 'FooIndirect' that causes a problem.
+    /// 
+    /// For example, the following works fine without an explicit attribute:
+    /// ```no_run
+    /// # use zerogc_derive::Trace;
+    /// #[derive(Trace)]
+    /// // NOTE: No explicit attribute needed ;)
+    /// struct Foo {
+    ///     foo: Box<Foo>
+    /// }
+    /// ```
+    ///
+    /// If this is false, it overrides and disables the automatic cycle detection.
+    ///
+    /// Both options are completely safe.
+    #[darling(default)]
+    avoid_const_cycle: Option<bool>,
     #[darling(default, rename = "serde")]
     serde_opts: Option<SerdeFieldOpts>,
     #[darling(forward_attrs(serde))]
@@ -906,17 +943,32 @@ impl TraceDeriveInput {
         } else {
             quote!(false)
         };
-        let traced_field_types = self.determine_field_types(false);
-        let all_field_types = self.determine_field_types(true);
-        let needs_trace = traced_field_types.iter().map(|ty| quote_spanned!(ty.span() => <#ty as zerogc::Trace>::NEEDS_TRACE));
+        let all_fields = self.all_fields();
+        let needs_trace = all_fields.iter()
+            .filter(|field| !field.unsafe_skip_trace)
+            .map(|field| {
+                let avoid_cycle = field.avoid_const_cycle.unwrap_or_else(|| {
+                    detect_cycle(&field.ty, target_type.clone())
+                });
+                let ty = &field.ty;
+                if avoid_cycle {
+                    quote!(true)
+                } else {
+                    quote_spanned!(ty.span() => <#ty as zerogc::Trace>::NEEDS_TRACE)
+                }
+            });
         let needs_drop = if self.is_copy {
             vec![quote!(false)]
         } else {
-            all_field_types.iter().map(|ty| {
-                if traced_field_types.contains(ty) {
-                    quote_spanned!(ty.span() => <#ty as zerogc::Trace>::NEEDS_DROP)
-                } else {
+            all_fields.iter().map(|field| {
+                let avoid_cycle = field.avoid_const_cycle.unwrap_or_else(|| {
+                    detect_cycle(&field.ty, target_type.clone())
+                });
+                let ty = &field.ty;
+                if field.unsafe_skip_trace || avoid_cycle {
                     quote_spanned!(ty.span() => core::mem::needs_drop::<#ty>())
+                } else {
+                    quote_spanned!(ty.span() => <#ty as zerogc::Trace>::NEEDS_DROP)                    
                 }
             }).collect::<Vec<_>>()
         };
@@ -1132,6 +1184,26 @@ impl TraceDeriveInput {
     }
 }
 
+fn detect_cycle(target: &syn::Type, potential_cycle: impl Into<syn::Path>) -> bool {
+    struct CycleDetector {
+        potential_cycle: Path,
+        found: bool
+    }
+    impl<'ast> syn::visit::Visit<'ast> for CycleDetector {
+        fn visit_path(&mut self, path: &'ast Path) {
+            if *path == self.potential_cycle {
+                self.found = true;
+            }
+            syn::visit::visit_path(self, path);
+        }
+    }
+    let mut visitor = CycleDetector {
+        potential_cycle: potential_cycle.into(),
+        found: false
+    };
+    syn::visit::visit_type(&mut visitor, target);
+    visitor.found
+}
 pub enum FieldAccess {
     None,
     SelfMember {
