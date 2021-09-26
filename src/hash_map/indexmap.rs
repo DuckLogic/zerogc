@@ -198,7 +198,7 @@ impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S:
     ///
     /// See also: [GcVec::context]
     #[inline]
-    pub fn context(&self) -> &'_ Id::Context {
+    pub fn context(&self) -> &'gc Id::Context {
         self.entries.context()
     }
 }
