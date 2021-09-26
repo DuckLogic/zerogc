@@ -80,7 +80,6 @@ impl<'gc, T: Serialize, Id: CollectorId> Serialize for Gc<'gc, T, Id> {
     }
 }
 
-
 impl<'gc, T: Serialize, Id: CollectorId> Serialize for GcArray<'gc, T, Id> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>  where
         S: serde::Serializer {
@@ -105,6 +104,22 @@ impl<'gc, 'de, T, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for PhantomData<T
         Ok(PhantomData)
     }
 }
+
+impl<T: Serialize + Trace + Copy> Serialize for GcCell<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>  where
+        S: serde::Serializer {
+        self.get().serialize(serializer)
+    }
+}
+
+impl<'gc, 'de, T, Id> GcDeserialize<'gc, 'de, Id> for GcCell<T>
+    where T: Copy + GcDeserialize<'gc, 'de, Id>, Id: CollectorId {
+    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deser: D) -> Result<Self, D::Error> {
+        Ok(GcCell::new(T::deserialize_gc(ctx, deser)?))
+    }
+}
+
+
 
 impl<'gc, 'de, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for () {
     fn deserialize_gc<D: Deserializer<'de>>(_ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error> {
