@@ -91,10 +91,18 @@ impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S:
             &mut self.entries[index].value
         })
     }
+    /// Remove the entry associated with 'key' and return its value.
+    ///
+    /// NOTE: This is equivalent to `swap_remove` and does *not* preserver ordering.
+    pub fn remove<Q: ?Sized>(&mut self, key: &Q) -> Option<V>
+        where K: Borrow<Q>, Q: Hash + Eq {
+        self.swap_remove(key)
+    }
+
     /// Remove the value associated with the specified key.
     ///
     /// This does **not** preserve ordering.
-    /// It is equivalent to [Vec::swap_remove],
+    /// It is similar to [Vec::swap_remove],
     /// or more specifically [IndexMap::swap_remove](https://docs.rs/indexmap/1.7.0/indexmap/map/struct.IndexMap.html#method.swap_remove).
     pub fn swap_remove<Q: ?Sized>(&mut self, key: &Q) -> Option<V>
         where K: Borrow<Q>, Q: Hash + Eq {
