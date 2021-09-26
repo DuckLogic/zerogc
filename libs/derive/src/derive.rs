@@ -982,6 +982,8 @@ impl TraceDeriveInput {
         };
         let mutability = if !immutable { Some(<syn::Token![mut]>::default()) } else { None };
         Ok(quote! {
+            #[allow(clippy::eq_op)] // NOTE: clippy doesn't like duplicates in 'NEEDS_TRACE'
+            #[automatically_derived]
             unsafe impl #impl_generics #trait_name for #target_type #ty_generics #where_clause {
                 #assoc_constants
                 fn #method_name<TargetVisitor: zerogc::GcVisitor>(&#mutability self, gc_visitor: &mut TargetVisitor) -> Result<(), TargetVisitor::Err> {
