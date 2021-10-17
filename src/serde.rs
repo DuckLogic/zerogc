@@ -35,6 +35,14 @@ pub trait GcDeserialize<'gc, 'de, Id: CollectorId>: GcSafe<'gc, Id> + Sized {
     fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error>;
 }
 
+/// A garbage collected type that can be deserialized without borrowing any data.
+///
+/// [GcDeserialize] is to [`serde::de::Deserialize`]
+/// as [GcDeserializeOwned] is to [`serde::de::DeserializeOwned`] 
+pub trait GcDeserializeOwned<'gc, Id: CollectorId>: for<'de> GcDeserialize<'gc, 'de, Id> {}
+impl<'gc, Id, T> GcDeserializeOwned<'gc, Id> for T
+    where Id: CollectorId, T: for<'de> GcDeserialize<'gc, 'de, Id> {}
+
 impl<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserialize<'gc, 'de, Id> for Gc<'gc, T, Id>
     where Id::Context: GcSimpleAlloc {
     #[inline]
