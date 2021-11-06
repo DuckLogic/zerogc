@@ -1,12 +1,10 @@
 #![feature(
-    const_panic, // RFC 2345 - Const asserts
     ptr_metadata, // RFC 2580 - Pointer meta
     coerce_unsized, // RFC 0982 - DST coercion
     unsize,
     trait_alias, // RFC 1733 - Trait aliases
     generic_associated_types, // RFC 1598 - Generic associated types
     const_raw_ptr_deref, // Needed for const Gc::value
-    option_result_unwrap_unchecked, // Only used by the 'serde' implementation...
     // Needed for epsilon collector:
     once_cell, // RFC 2788 (Probably will be accepted)
     negative_impls, // More elegant than marker types

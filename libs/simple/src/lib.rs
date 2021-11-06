@@ -25,7 +25,6 @@
     negative_impls, // impl !Send is much cleaner than PhantomData<Rc<()>>
     exhaustive_patterns, // Allow exhaustive matching against never
     const_alloc_layout, // Used for StaticType
-    const_panic, // Const panic should be stable
     untagged_unions, // Why isn't this stable?
     new_uninit, // Until Rust has const generics, this is how we init arrays..
     ptr_metadata, // Needed to abstract over Sized/unsized types
