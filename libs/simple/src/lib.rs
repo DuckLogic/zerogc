@@ -29,8 +29,8 @@
     new_uninit, // Until Rust has const generics, this is how we init arrays..
     ptr_metadata, // Needed to abstract over Sized/unsized types
     // Used for const layout computation:
-    const_raw_ptr_deref,
     const_ptr_offset,
+    const_mut_refs,
     const_align_of_val,
     // Needed for field_offset!
     const_ptr_offset_from,
