@@ -34,7 +34,6 @@
     const_align_of_val,
     // Needed for field_offset!
     const_ptr_offset_from,
-    const_maybe_uninit_as_ptr,
     const_refs_to_cell,
     const_fn_trait_bound,
     generic_associated_types
