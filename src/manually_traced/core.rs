@@ -223,7 +223,7 @@ unsafe_gc_impl! {
  */
 unsafe_gc_impl! {
     target => &'a T,
-    params => ['a, T: 'a],
+    params => ['a, T: ?Sized + 'a],
     bounds => {
         Trace => { where T: TraceImmutable },
         TraceImmutable => { where T: TraceImmutable },
@@ -406,7 +406,7 @@ mod test {
         assert!(!<Option<(i32, char)> as Trace>::NEEDS_TRACE);
         // PhantomData is NullTrace regardless of inside
         assert!(!<PhantomData<Gc<'gc, i32>> as Trace>::NEEDS_TRACE);
-
+        assert!(!<&'static [u32] as Trace>::NEEDS_TRACE);
     }
     #[derive(Trace)]
     #[zerogc(collector_ids(EpsilonCollectorId))]
