@@ -1,6 +1,6 @@
 [package]
 name = "zerogc"
-version = "0.2.0-alpha.5"
+version = "0.2.0-alpha.6"
 authors = ["Techcable <Techcable@techcable.net>"]
 description = "Zero overhead tracing garbage collection for rust"
 repository = "https://github.com/DuckLogic/zerogc"
@@ -21,7 +21,7 @@ anyhow = { version = "1", optional = true }
 # Serde support (optional)
 serde = { version = "1", optional = true, features = ["derive"] }
 # Used for macros
-zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.5" }
+zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.6" }
 # Used for the "epsilon" no-op collector
 bumpalo = { version = "3", optional = true }
 # Used for our custom hashmap
