@@ -334,7 +334,7 @@ unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> IGcVec<'gc, T> for SimpleVe
 
     #[inline]
     pub fn with_capacity_in(capacity: usize, ctx: &'gc crate::SimpleCollectorContext) -> Self {
-        ctx.alloc_raw_vec_with_capacity(capacity)
+        ctx.alloc_raw_vec_with_capacity::<T>(capacity)
     }
 
     #[inline]

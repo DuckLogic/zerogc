@@ -592,7 +592,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     fn alloc_vec<'gc, T>(&'gc self) -> GcVec<'gc, T, Self::Id>
         where T: GcSafe<'gc, Self::Id> {
         unsafe {
-            crate::vec::GcVec::from_raw(self.alloc_raw_vec_with_capacity(0))
+            crate::vec::GcVec::from_raw(self.alloc_raw_vec_with_capacity::<T>(0))
         }
     }
     /// Allocate a new [GcVec] with the specified capacity
@@ -601,7 +601,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     fn alloc_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> GcVec<'gc, T, Self::Id>
         where T: GcSafe<'gc, Self::Id> {
         unsafe {
-            crate::vec::GcVec::from_raw(self.alloc_raw_vec_with_capacity(capacity))
+            crate::vec::GcVec::from_raw(self.alloc_raw_vec_with_capacity::<T>(capacity))
         }
     }
 }

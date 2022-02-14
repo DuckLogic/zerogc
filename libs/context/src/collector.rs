@@ -387,7 +387,7 @@ unsafe impl<C> GcSimpleAlloc for CollectorContext<C>
 
     #[inline]
     fn alloc_raw_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> C::RawVec<'gc, T> where T: GcSafe<'gc, CollectorId<C>> {
-        C::alloc_raw_vec_with_capacity(self, capacity)
+        C::alloc_raw_vec_with_capacity::<T>(self, capacity)
     }
 }
 

@@ -241,7 +241,7 @@ unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> IGcVec<'gc, T> for EpsilonR
 
     #[inline]
     pub fn with_capacity_in(capacity: usize, ctx: &'gc EpsilonContext) -> Self {
-        ctx.alloc_raw_vec_with_capacity(capacity)
+        ctx.alloc_raw_vec_with_capacity::<T>(capacity)
     }
 
     #[inline]

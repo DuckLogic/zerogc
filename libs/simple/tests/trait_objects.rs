@@ -1,4 +1,3 @@
-#![feature(thread_local_const_init)]
 use core::cell::Cell;
 
 use zerogc::{Trace, safepoint, DynTrace, trait_object_trace, GcSimpleAlloc};
