@@ -8,10 +8,8 @@
     once_cell, // RFC 2788 (Probably will be accepted)
     negative_impls, // More elegant than marker types
     alloc_layout_extra,
-    const_fn_fn_ptr_basics,
     const_mut_refs,
     const_option,
-    const_fn_trait_bound, // NOTE: Needed for the `epsilon_static_array` macro
     const_trait_impl, // EXPERIMENTAL: const Deref
     const_slice_from_raw_parts,
     const_transmute_copy,
