@@ -59,7 +59,8 @@ zerogc_derive::unsafe_gc_impl!(
 );
 
 unsafe impl HandleCollectorId for EpsilonCollectorId {
-    type Handle<T> = GcHandle<T> where T: GcSafe<'static, Self> + ?Sized;
+    type Handle<T> 
+        where T: GcSafe<'static, Self> + ?Sized = GcHandle<T>;
 
     fn create_handle<'gc, T>(_gc: Gc<'gc, T, Self>) -> Self::Handle<T::Branded>
         where T: GcSafe<'gc, Self> + GcRebrand<'static, Self> + ?Sized {
