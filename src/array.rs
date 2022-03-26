@@ -8,7 +8,7 @@ use core::fmt::{self, Formatter, Debug, Display};
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 
-use crate::{CollectorId, internals::ConstCollectorId, GcSafe, GcRebrand, Gc};
+use crate::{CollectorId, GcSafe, GcRebrand, Gc};
 use zerogc_derive::{Trace, unsafe_gc_impl};
 
 use self::repr::{GcArrayPtr};
@@ -62,29 +62,6 @@ impl<'gc, Id: CollectorId> GcString<'gc, Id> {
     #[inline]
     pub fn as_str(&self) -> &'gc str {
         unsafe { str::from_utf8_unchecked(self.as_bytes().as_slice()) }
-    }
-}
-/// Const access to [GcString]
-pub trait ConstStringAccess<'gc> {
-    /// Get this string as a slice of bytes
-    fn as_bytes_const(&self) -> &'gc [u8];
-    /// Convert this string to a `str` slice
-    fn as_str_const(&self) -> &'gc str;
-    /// Get the length of this string (in bytes)
-    fn len_const(&self) -> usize;
-}
-impl<'gc, Id: ~const ConstCollectorId> const ConstStringAccess<'gc> for GcString<'gc, Id> {
-    #[inline]
-    fn as_bytes_const(&self) -> &'gc [u8] {
-        self.bytes.as_slice_const()
-    }
-    #[inline]
-    fn as_str_const(&self) -> &'gc str {
-        unsafe { str::from_utf8_unchecked(self.as_bytes_const()) }
-    }
-    #[inline]
-    fn len_const(&self) -> usize {
-        self.bytes.len_const()
     }
 }
 impl<'gc, Id: CollectorId> Deref for GcString<'gc, Id> {
@@ -180,59 +157,6 @@ unsafe impl<'gc, T, Id> Sync for GcArray<'gc, T, Id>
     where T: Sync, Id: CollectorId + Sync {}
 unsafe impl<'gc, T, Id> Send for GcArray<'gc, T, Id>
     where T: Sync, Id: CollectorId + Sync {}
-/// Const access to [GcString]
-pub trait ConstArrayAccess<'gc, T> {
-    /// The value of the array as a slice
-    fn as_slice_const<'a>(&self) -> &'a [T] where 'gc: 'a;
-    /// Load a raw pointer to the array's value
-    fn as_raw_ptr_const(&self) -> *mut T;
-    /// The length of this array
-    fn len_const(&self) -> usize;
-}
-// Relax T: GcSafe bound
-impl<'gc, T, Id: ~const ConstCollectorId> const ConstArrayAccess<'gc, T> for GcArray<'gc, T, Id> {
-    #[inline]
-    fn as_slice_const<'a>(&self) -> &'a [T] where 'gc: 'a {
-        /*
-         * TODO: This is horrible, but currently nessicarry
-         * to do this in a const-fn context.
-         */
-        match Id::ArrayPtr::UNCHECKED_KIND {
-            repr::ArrayPtrKind::Fat => {
-                unsafe {
-                    core::mem::transmute_copy::<
-                        Id::ArrayPtr,
-                        &'a [T]
-                    >(&self.ptr)
-                }
-            },
-            repr::ArrayPtrKind::Thin => {
-                unsafe {
-                    let ptr = core::mem::transmute_copy::<
-                        Id::ArrayPtr,
-                        NonNull<T>
-                    >(&self.ptr);
-                    &*core::ptr::slice_from_raw_parts(
-                        ptr.as_ptr(),
-                        Id::resolve_array_len_const(
-                            self
-                        )
-                    )
-                }
-            },
-        }
-    }
-    /// Load a raw pointer to the array's value
-    #[inline]
-    fn as_raw_ptr_const(&self) -> *mut T {
-        self.as_slice_const().as_ptr() as *mut T
-    }
-    /// Load the length of the array
-    #[inline]
-    fn len_const(&self) -> usize {
-        self.as_slice_const().len()
-    }
-}
 impl<'gc, T, I, Id: CollectorId> Index<I> for GcArray<'gc, T, Id>
     where I: SliceIndex<[T]> {
     type Output = I::Output;

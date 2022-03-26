@@ -13,7 +13,7 @@ mod alloc;
 mod handle;
 
 
-use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, Trace, internals::ConstCollectorId};
+use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, Trace};
 use std::ptr::NonNull;
 use std::alloc::Layout;
 use std::rc::Rc;
@@ -382,12 +382,6 @@ pub struct EpsilonCollectorId {
     _priv: ()
 }
 crate::impl_nulltrace_for_static!(EpsilonCollectorId);
-unsafe impl const ConstCollectorId for EpsilonCollectorId {
-    #[inline]
-    fn resolve_array_len_const<T>(repr: &GcArray<'_, T>) -> usize {
-        unsafe { repr.as_internal_ptr_repr() }.len()
-    }
-}
 unsafe impl CollectorId for EpsilonCollectorId {
     type System = EpsilonSystem;
     type Context = EpsilonContext;

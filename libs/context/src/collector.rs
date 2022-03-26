@@ -336,12 +336,6 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
         &*(self as *const CollectorId<C> as *const CollectorRef<C>)
     }
 }
-unsafe impl<C: ~const ConstRawCollectorImpl> const zerogc::internals::ConstCollectorId for CollectorId<C> {
-    #[inline]
-    fn resolve_array_len_const<T>(repr: &GcArray<'_, T, CollectorId<C>>) -> usize {
-        C::resolve_array_len_const(repr)
-    }
-}
 zerogc::impl_nulltrace_for_static!(CollectorId<C>, params => [C: RawCollectorImpl]);
 
 pub struct WeakCollectorRef<C: RawCollectorImpl> {

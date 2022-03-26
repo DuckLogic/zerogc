@@ -10,7 +10,6 @@
     alloc_layout_extra,
     const_mut_refs,
     const_option,
-    const_trait_impl, // EXPERIMENTAL: const Deref
     const_slice_from_raw_parts,
     const_transmute_copy,
     slice_range, // Convenient for bounds checking :)
@@ -78,7 +77,6 @@ pub mod prelude;
 pub mod epsilon;
 pub mod array;
 pub mod vec;
-pub mod internals;
 #[cfg(feature = "errors")]
 pub mod errors;
 #[cfg(feature = "allocator-api")]
@@ -675,7 +673,7 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
     type RawVec<'gc, T: GcSafe<'gc, Self>>: crate::vec::raw::GcRawVec<'gc, T, Id=Self>;
     /// The raw representation of `GcArray` pointers
     /// in this collector.
-    type ArrayPtr: ~const crate::array::repr::GcArrayPtr<Id=Self>;
+    type ArrayPtr: crate::array::repr::GcArrayPtr<Id=Self>;
 
     /// Get the runtime id of the collector that allocated the [Gc]
     ///
@@ -869,7 +867,7 @@ unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> Trace for Gc<'gc,
         }
     }
 }
-impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> const Deref for Gc<'gc, T, Id> {
+impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Deref for Gc<'gc, T, Id> {
     type Target = T;
 
     #[inline(always)]
