@@ -414,7 +414,7 @@ pub struct GcHandle<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImp
     metadata: <T as Pointee>::Metadata,
     marker: PhantomData<*mut T>
 }
-impl<T: ?Sized + GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> GcHandle<T, C> {
+impl<T: GcSafe<'static, CollectorId<C>>, C: RawHandleImpl> GcHandle<T, C> {
     #[inline]
     pub(crate) unsafe fn new(
         inner: NonNull<GcRawHandle<C>>,

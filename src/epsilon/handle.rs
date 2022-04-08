@@ -5,13 +5,13 @@ use crate::{HandleCollectorId, prelude::*};
 
 use super::{EpsilonCollectorId, EpsilonContext, EpsilonSystem, State};
 
-pub struct GcHandle<T: ?Sized + GcSafe<'static, EpsilonCollectorId>> {
+pub struct GcHandle<T: GcSafe<'static, EpsilonCollectorId>> {
     /// The reference to the state,
     /// which keeps our data alive
     state: Rc<State>,
     ptr: *const T
 }
-impl<T: ?Sized + GcSafe<'static, EpsilonCollectorId>> Clone for GcHandle<T> {
+impl<T: GcSafe<'static, EpsilonCollectorId>> Clone for GcHandle<T> {
     fn clone(&self) -> Self {
         GcHandle {
             state: Rc::clone(&self.state),
@@ -19,7 +19,7 @@ impl<T: ?Sized + GcSafe<'static, EpsilonCollectorId>> Clone for GcHandle<T> {
         }
     }
 }
-unsafe impl<T: ?Sized + GcSafe<'static, EpsilonCollectorId>> zerogc::GcHandle<T> for GcHandle<T> {
+unsafe impl<T: GcSafe<'static, EpsilonCollectorId>> zerogc::GcHandle<T> for GcHandle<T> {
     type System = EpsilonSystem;
     type Id = EpsilonCollectorId;
 
@@ -46,12 +46,12 @@ zerogc_derive::unsafe_gc_impl!(
     target => GcHandle<T>,
     params => [T: GcSafe<'static, EpsilonCollectorId>],
     bounds => {
-        Trace => { where T: ?Sized },
-        TraceImmutable => { where T: ?Sized },
-        TrustedDrop => { where T: ?Sized },
-        GcSafe => { where T: ?Sized },
+        Trace => { where T: Sized },
+        TraceImmutable => { where T: Sized },
+        TrustedDrop => { where T: Sized },
+        GcSafe => { where T: Sized },
     },
-    null_trace => { where T: ?Sized },
+    null_trace => always,
     NEEDS_DROP => true,
     NEEDS_TRACE => false,
     branded_type => Self,
@@ -59,10 +59,10 @@ zerogc_derive::unsafe_gc_impl!(
 );
 
 unsafe impl HandleCollectorId for EpsilonCollectorId {
-    type Handle<T> = GcHandle<T> where T: GcSafe<'static, Self> + ?Sized;
+    type Handle<T> = GcHandle<T> where T: GcSafe<'static, Self>;
 
     fn create_handle<'gc, T>(_gc: Gc<'gc, T, Self>) -> Self::Handle<T::Branded>
-        where T: GcSafe<'gc, Self> + GcRebrand<'static, Self> + ?Sized {
+        where T: GcSafe<'gc, Self> + GcRebrand<'static, Self>, T::Branded: Sized {
         unimplemented!("epsilon collector can't convert Gc -> GcContext")
     }
 }

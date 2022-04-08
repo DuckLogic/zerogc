@@ -480,10 +480,8 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     #[cold]
     fn alloc_error<'gc, T>(&'gc self, src: T) -> crate::errors::GcError<Self::Id>
         where T: crate::errors::GcErrorType<'gc, Self::Id>,
-            <T as GcRebrand<'static, Self::Id>>::Branded: 'static,
             Self::Id: HandleCollectorId {
-        crate::errors::GcError::from_gc_allocated(self.alloc(src))
-
+        crate::errors::GcError::from_gc_ptr(self.alloc(self.alloc(src) as Gc<'gc, dyn crate::errors::DynGcErrorType<'gc, Self::Id>, Self::Id>))
     }
 
     /// Allocate a slice with the specified length,
@@ -636,7 +634,7 @@ pub unsafe trait HandleCollectorId: CollectorId {
     /// This is parameterized by the *erased* type,
     /// not by the original type.
     type Handle<T>: GcHandle<T, System=Self::System, Id=Self>
-        where T: GcSafe<'static, Self> + ?Sized;
+        where T: GcSafe<'static, Self>;
 
     /// Create a handle to the specified GC pointer,
     /// which can be used without a context
@@ -646,7 +644,7 @@ pub unsafe trait HandleCollectorId: CollectorId {
     /// The system is implicit in the [Gc]
     #[doc(hidden)]
     fn create_handle<'gc, T>(gc: Gc<'gc, T, Self>) -> Self::Handle<T::Branded>
-        where T: GcSafe<'gc, Self> + GcRebrand<'static, Self> + ?Sized;
+        where T: GcSafe<'gc, Self> + GcRebrand<'static, Self>, T::Branded: Sized;
 }
 
 /// Uniquely identifies the collector in case there are
@@ -793,7 +791,7 @@ impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
     /// Requires that the collector [supports handles](`HandleCollectorId`)
     #[inline]
     pub fn create_handle(&self) -> Id::Handle<T::Branded>
-        where Id: HandleCollectorId, T: GcRebrand<'static, Id>  {
+        where Id: HandleCollectorId, T: GcRebrand<'static, Id> + Sized, T::Branded: Sized {
         Id::create_handle(*self)
     }
 
@@ -1000,7 +998,7 @@ unsafe impl<T: NullTrace> ImplicitWriteBarrier for T {}
 /*
  * TODO: Should we drop the Clone requirement?
  */
-pub unsafe trait GcHandle<T: GcSafe<'static, Self::Id> + ?Sized>: Sized + Clone + NullTrace
+pub unsafe trait GcHandle<T: GcSafe<'static, Self::Id>>: Sized + Clone + NullTrace
      + for<'gc> GcSafe<'gc, Self::Id> {
     /// The type of the system used with this handle
     type System: GcSystem<Id=Self::Id>;
