@@ -1,7 +1,5 @@
 #![feature(
     negative_impls, // !Send is much cleaner than `PhantomData<Rc>`
-    untagged_unions, // I want to avoid ManuallyDrop in unions
-    generic_associated_types, // Finally!
     ptr_metadata
 )]
 #![allow(

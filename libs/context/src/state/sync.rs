@@ -232,7 +232,7 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
         let shadow_stack = &*self.shadow_stack.get();
         let ptr = self as *const RawContext<C> as *mut RawContext<C>;
         debug_assert!(state.known_contexts.get_mut().contains(&ptr));
-        let mut pending = state.pending.as_mut().unwrap();
+        let pending: &mut _ = state.pending.as_mut().unwrap();
         // Change our state to mark we are now waiting at a safepoint
         assert_eq!(self.state.replace(ContextState::SafePoint {
             collection_id: pending.id

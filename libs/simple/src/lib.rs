@@ -25,16 +25,13 @@
     negative_impls, // impl !Send is much cleaner than PhantomData<Rc<()>>
     exhaustive_patterns, // Allow exhaustive matching against never
     const_alloc_layout, // Used for StaticType
-    untagged_unions, // Why isn't this stable?
     new_uninit, // Until Rust has const generics, this is how we init arrays..
     ptr_metadata, // Needed to abstract over Sized/unsized types
     // Used for const layout computation:
     const_mut_refs,
     const_align_of_val,
     // Needed for field_offset!
-    const_ptr_offset_from,
     const_refs_to_cell,
-    generic_associated_types
 )]
 #![feature(drain_filter)]
 #![allow(

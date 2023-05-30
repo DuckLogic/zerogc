@@ -3,14 +3,11 @@
     coerce_unsized, // RFC 0982 - DST coercion
     unsize,
     trait_alias, // RFC 1733 - Trait aliases
-    generic_associated_types, // RFC 1598 - Generic associated types
     // Needed for epsilon collector:
-    once_cell, // RFC 2788 (Probably will be accepted)
     negative_impls, // More elegant than marker types
     alloc_layout_extra,
     const_mut_refs,
     const_option,
-    const_slice_from_raw_parts,
     const_transmute_copy,
     slice_range, // Convenient for bounds checking :)
 )]

@@ -17,8 +17,7 @@ use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, Trace};
 use std::ptr::NonNull;
 use std::alloc::Layout;
 use std::rc::Rc;
-use std::cell::Cell;
-use std::lazy::OnceCell;
+use std::cell::{Cell, OnceCell};
 
 use self::alloc::{EpsilonAlloc};
 use self::layout::EpsilonRawVec;

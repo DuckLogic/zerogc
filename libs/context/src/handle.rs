@@ -4,6 +4,7 @@
 use core::ptr::{self, NonNull, Pointee};
 use core::marker::PhantomData;
 use core::sync::atomic::{self, AtomicPtr, AtomicUsize, Ordering};
+use core::mem::ManuallyDrop;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -323,8 +324,8 @@ impl<C: RawHandleImpl> GcHandleBucket<C> {
 /// depending on whether the value pointer is null.
 #[repr(C)]
 pub union HandleSlot<C: RawHandleImpl> {
-    freed: FreedHandleSlot<C>,
-    valid: GcRawHandle<C>
+    freed: ManuallyDrop<FreedHandleSlot<C>>,
+    valid: ManuallyDrop<GcRawHandle<C>>
 }
 impl<C: RawHandleImpl> HandleSlot<C> {
     /// Load the current value of this pointer
