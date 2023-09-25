@@ -8,7 +8,6 @@
     alloc_layout_extra,
     const_mut_refs,
     const_option,
-    const_transmute_copy,
     slice_range, // Convenient for bounds checking :)
 )]
 #![cfg_attr(feature="error", backtrace)]

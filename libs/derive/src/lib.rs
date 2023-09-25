@@ -240,7 +240,7 @@ fn span_file_loc(span: Span) -> String {
         .map(std::ffi::OsStr::to_string_lossy)
         .map(String::from)
         .unwrap_or_else(|| String::from("<fake>"));
-    let lineno = internal.start().line;
+    let lineno = internal.start().line();
     format!("{}:{}", file_name, lineno)
 }
 
