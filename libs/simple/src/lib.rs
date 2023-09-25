@@ -32,8 +32,9 @@
     const_align_of_val,
     // Needed for field_offset!
     const_refs_to_cell,
+    // Used instead of drain_filter
+    extract_if,
 )]
-#![feature(drain_filter)]
 #![allow(
     /*
      * TODO: Should we be relying on vtable address stability?
@@ -525,7 +526,7 @@ impl SimpleAlloc {
         let mut actual_size = 0;
         // Clear small arenas
         let was_mark_inverted = self.mark_inverted.load(Ordering::SeqCst);
-        self.small_objects.lock().drain_filter(|&mut common_header| {
+        self.small_objects.lock().extract_if(|&mut common_header| {
             let total_size = (*common_header).type_info.determine_total_size(common_header);
             match (*common_header).raw_mark_state().resolve(was_mark_inverted) {
                 MarkState::White => {
@@ -556,7 +557,7 @@ impl SimpleAlloc {
         });
         // Clear large objects
         debug_assert_eq!(was_mark_inverted, self.mark_inverted());
-        self.big_objects.lock().drain_filter(|big_item| {
+        self.big_objects.lock().extract_if(|big_item| {
             let total_size = big_item.header().type_info.determine_total_size(big_item.header.as_ptr());
             match big_item.header().mark_data.load_snapshot().state.resolve(was_mark_inverted) {
                 MarkState::White => {
