@@ -1,7 +1,7 @@
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::{prelude::*, HandleCollectorId};
+use crate::prelude::*;
 
 use super::{EpsilonCollectorId, EpsilonContext, EpsilonSystem, State};
 

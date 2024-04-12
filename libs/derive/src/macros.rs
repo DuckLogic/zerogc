@@ -28,15 +28,13 @@ fn empty_clause() -> WhereClause {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum CollectorIdInfo {
+    #[default]
     Any,
-    Specific { map: IndexMap<Path, Lifetime> },
-}
-impl Default for CollectorIdInfo {
-    fn default() -> Self {
-        CollectorIdInfo::Any
-    }
+    Specific {
+        map: IndexMap<Path, Lifetime>,
+    },
 }
 impl CollectorIdInfo {
     /// Create info from a single `CollectorId`,
@@ -154,7 +152,7 @@ impl MacroInput {
             if let Some(closure) = self
                 .trace_immutable_closure
                 .as_ref()
-                .or_else(|| self.trace_mut_closure.as_ref())
+                .or(self.trace_mut_closure.as_ref())
             {
                 return Err(Error::new(
                     closure.0.body.span(),
@@ -1066,8 +1064,7 @@ fn rewrite_type(
             *qself = qself
                 .clone()
                 .map::<Result<_, Error>, _>(|mut qself| {
-                    qself.ty =
-                        Box::new(rewrite_type(&*qself.ty, target_type_name, &mut *rewriter)?);
+                    qself.ty = Box::new(rewrite_type(&qself.ty, target_type_name, &mut *rewriter)?);
                     Ok(qself)
                 })
                 .transpose()?;

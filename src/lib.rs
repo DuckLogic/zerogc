@@ -15,6 +15,9 @@
 #![feature(maybe_uninit_slice)]
 #![feature(new_uninit)]
 #![deny(missing_docs)]
+#![allow(
+    clippy::missing_safety_doc, // TODO: Add missing safety docs and make this #[deny(...)]
+)]
 #![cfg_attr(not(feature = "std"), no_std)]
 //! Zero overhead tracing garbage collection for rust,
 //! by abusing the borrow checker.

@@ -105,7 +105,7 @@ impl<Id: CollectorId> FatArrayPtr<Id> {
     /// Get the length of this fat array (stored inline)
     #[inline]
     pub const fn len(&self) -> usize {
-        unsafe { (&*self.slice.as_ptr()).len() }
+        unsafe { (*self.slice.as_ptr()).len() }
     }
 }
 impl<Id: CollectorId> Copy for FatArrayPtr<Id> {}

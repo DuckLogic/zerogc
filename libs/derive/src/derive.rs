@@ -14,6 +14,13 @@ use syn::{
 
 use crate::{FromLitStr, MetaList};
 
+type ExpandFunc<'a> = &'a mut dyn FnMut(
+    TraceDeriveKind,
+    Option<Generics>,
+    &Path,
+    &Lifetime,
+) -> Result<TokenStream, Error>;
+
 #[derive(Copy, Clone, Debug)]
 pub enum TraceDeriveKind {
     NullTrace,
@@ -792,12 +799,7 @@ impl TraceDeriveInput {
         generics: Generics,
         kind: TraceDeriveKind,
         gc_lifetime: Lifetime,
-        func: &mut dyn FnMut(
-            TraceDeriveKind,
-            Option<Generics>,
-            &Path,
-            &Lifetime,
-        ) -> Result<TokenStream, Error>,
+        func: ExpandFunc<'_>,
     ) -> Result<TokenStream, Error> {
         let mut has_explicit_collector_ids = false;
         let mut impls = Vec::new();

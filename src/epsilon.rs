@@ -153,7 +153,7 @@ unsafe impl GcContext for EpsilonContext {
             state: self.state,
             root: false,
         };
-        func(&mut child, &mut *value)
+        func(&mut child, *value)
     }
 
     #[inline]
