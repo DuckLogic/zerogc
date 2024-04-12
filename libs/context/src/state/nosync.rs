@@ -5,17 +5,17 @@
 //!
 //! Also, there is `#![no_std]` support
 
-use core::cell::{Cell, UnsafeCell, RefCell};
-use core::mem::ManuallyDrop;
+use core::cell::{Cell, RefCell, UnsafeCell};
 use core::fmt::{self, Debug, Formatter};
 use core::marker::PhantomData;
+use core::mem::ManuallyDrop;
 
 use alloc::boxed::Box;
 
-use slog::{Logger, FnValue, trace, o};
+use slog::{o, trace, FnValue, Logger};
 
-use crate::{CollectorRef, ShadowStack, ContextState};
 use crate::collector::RawCollectorImpl;
+use crate::{CollectorRef, ContextState, ShadowStack};
 
 /// Manages coordination of garbage collections
 ///
@@ -35,7 +35,9 @@ pub struct CollectionManager<C: RawCollectorImpl> {
 }
 impl<C: RawCollectorImpl> super::sealed::Sealed for CollectionManager<C> {}
 unsafe impl<C> super::CollectionManager<C> for CollectionManager<C>
-    where C: RawCollectorImpl<Manager=Self, RawContext=RawContext<C>> {
+where
+    C: RawCollectorImpl<Manager = Self, RawContext = RawContext<C>>,
+{
     type Context = RawContext<C>;
 
     fn new() -> Self {
@@ -44,7 +46,7 @@ unsafe impl<C> super::CollectionManager<C> for CollectionManager<C>
             _marker: PhantomData,
             state: RefCell::new(CollectorState::new()),
             collecting: Cell::new(false),
-            has_existing_context: Cell::new(false)
+            has_existing_context: Cell::new(false),
         }
     }
     #[inline]
@@ -94,19 +96,16 @@ pub struct RawContext<C: RawCollectorImpl> {
     pub(super) shadow_stack: UnsafeCell<ShadowStack<C>>,
     // TODO: Does the collector access this async?
     pub(super) state: Cell<ContextState>,
-    logger: Logger
+    logger: Logger,
 }
 impl<C: RawCollectorImpl> Debug for RawContext<C> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.debug_struct("RawContext")
-            .field(
-                "collector",
-                &format_args!("{:p}", &self.collector)
-            )
+            .field("collector", &format_args!("{:p}", &self.collector))
             .field(
                 "shadow_stacks",
                 // We're assuming this is valid....
-                unsafe { &*self.shadow_stack.get() }
+                unsafe { &*self.shadow_stack.get() },
             )
             .field("state", &self.state.get())
             .finish()
@@ -114,12 +113,17 @@ impl<C: RawCollectorImpl> Debug for RawContext<C> {
 }
 impl<C: RawCollectorImpl> super::sealed::Sealed for RawContext<C> {}
 unsafe impl<C> super::RawContext<C> for RawContext<C>
-    where C: RawCollectorImpl<RawContext=Self, Manager=CollectionManager<C>> {
+where
+    C: RawCollectorImpl<RawContext = Self, Manager = CollectionManager<C>>,
+{
     unsafe fn register_new(collector: &CollectorRef<C>) -> ManuallyDrop<Box<Self>> {
         assert!(!C::SYNC);
         // NOTE: Nosync collector must have only **ONE** context
         assert!(
-            !collector.as_raw().manager().has_existing_context
+            !collector
+                .as_raw()
+                .manager()
+                .has_existing_context
                 .replace(true),
             "Already created a context for the collector!"
         );
@@ -127,11 +131,12 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
         let collector = collector.clone_internal();
         let logger = collector.as_raw().logger().new(o!());
         let context = ManuallyDrop::new(Box::new(RawContext {
-            logger: logger.clone(), collector,
+            logger: logger.clone(),
+            collector,
             shadow_stack: UnsafeCell::new(ShadowStack {
                 last: core::ptr::null_mut(),
             }),
-            state: Cell::new(ContextState::Active)
+            state: Cell::new(ContextState::Active),
         }));
         trace!(
             logger, "Initializing context";
@@ -152,7 +157,12 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
          */
         assert!(!self.collector.as_raw().manager().collecting.get());
         self.collector.as_raw().manager().collecting.set(true);
-        let collection_id = self.collector.as_raw().manager().state.borrow_mut()
+        let collection_id = self
+            .collector
+            .as_raw()
+            .manager()
+            .state
+            .borrow_mut()
             .next_pending_id();
         trace!(
             self.logger,
@@ -163,9 +173,11 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
         let shadow_stack = &*self.shadow_stack.get();
         let ptr = self as *const RawContext<C> as *mut RawContext<C>;
         // Change our state to mark we are now waiting at a safepoint
-        assert_eq!(self.state.replace(ContextState::SafePoint {
-            collection_id,
-        }), ContextState::Active);
+        assert_eq!(
+            self.state
+                .replace(ContextState::SafePoint { collection_id }),
+            ContextState::Active
+        );
         trace!(
             self.logger, "Beginning collection";
             "ptr" => ?ptr,
@@ -205,20 +217,16 @@ unsafe impl<C> super::RawContext<C> for RawContext<C>
 /// This must be held under a write lock for a collection to happen.
 /// This must be held under a read lock to prevent collections.
 pub struct CollectorState {
-    next_pending_id: u64
+    next_pending_id: u64,
 }
 #[allow(clippy::new_without_default)]
 impl CollectorState {
     pub fn new() -> Self {
-        CollectorState {
-            next_pending_id: 0
-        }
+        CollectorState { next_pending_id: 0 }
     }
     fn next_pending_id(&mut self) -> u64 {
         let id = self.next_pending_id;
-        self.next_pending_id = id.checked_add(1)
-            .expect("Overflow");
+        self.next_pending_id = id.checked_add(1).expect("Overflow");
         id
     }
 }
-

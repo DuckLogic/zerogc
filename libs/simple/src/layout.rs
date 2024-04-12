@@ -8,19 +8,19 @@
 //!
 //! However, `zerogc-simple` is committed to a stable ABI, so this should (hopefully)
 //! be relatively well documented.
-use std::mem::{self, };
-use std::marker::PhantomData;
+use std::alloc::Layout;
 use std::cell::Cell;
 use std::ffi::c_void;
-use std::alloc::Layout;
+use std::marker::PhantomData;
+use std::mem::{self};
 
+use zerogc::vec::raw::{GcRawVec, IGcVec};
 use zerogc::{GcSafe, GcSimpleAlloc, Trace};
-use zerogc::vec::raw::{IGcVec, GcRawVec};
 
 use zerogc_context::field_offset;
-use zerogc_derive::{NullTrace, unsafe_gc_impl};
+use zerogc_derive::{unsafe_gc_impl, NullTrace};
 
-use crate::{RawMarkState, CollectorId, DynTrace, MarkVisitor};
+use crate::{CollectorId, DynTrace, MarkVisitor, RawMarkState};
 use std::ptr::NonNull;
 
 /// Everything but the lower 2 bits of mark data are unused
@@ -39,7 +39,7 @@ pub struct SimpleMarkData {
     /// We're assuming that the collector is single threaded (which is true for now)
     data: Cell<usize>,
     #[zerogc(unsafe_skip_trace)]
-    fmt: PhantomData<CollectorId>
+    fmt: PhantomData<CollectorId>,
 }
 
 /// Marker type for an unknown header
@@ -53,7 +53,7 @@ pub struct HeaderLayout<H> {
     /// The offset of the 'common' header,
     /// starting from the start of the real header
     pub common_header_offset: usize,
-    marker: PhantomData<*mut H>
+    marker: PhantomData<*mut H>,
 }
 impl<H> Copy for HeaderLayout<H> {}
 impl<H> Clone for HeaderLayout<H> {
@@ -73,7 +73,7 @@ impl<H> HeaderLayout<H> {
         HeaderLayout {
             header_size: self.header_size,
             common_header_offset: self.common_header_offset,
-            marker: PhantomData
+            marker: PhantomData,
         }
     }
     /// The alignment of the header
@@ -102,9 +102,7 @@ impl<H> HeaderLayout<H> {
     /// Get the in-memory layout of the header (doesn't include the value)
     #[inline]
     pub const fn layout(&self) -> Layout {
-        unsafe {
-            Layout::from_size_align_unchecked(self.header_size, Self::ALIGN)
-        }
+        unsafe { Layout::from_size_align_unchecked(self.header_size, Self::ALIGN) }
     }
     /// Get the offset of the value from the start of the header,
     /// given the alignment of its value
@@ -121,7 +119,7 @@ impl SimpleMarkData {
     pub fn from_snapshot(snapshot: SimpleMarkDataSnapshot) -> Self {
         SimpleMarkData {
             data: Cell::new(snapshot.packed()),
-            fmt: PhantomData
+            fmt: PhantomData,
         }
     }
     #[inline]
@@ -144,14 +142,19 @@ impl SimpleMarkData {
 pub struct SimpleMarkDataSnapshot {
     pub(crate) state: RawMarkState,
     #[cfg(feature = "multiple-collectors")]
-    pub(crate) collector_id_ptr: *mut CollectorId
+    pub(crate) collector_id_ptr: *mut CollectorId,
 }
 impl SimpleMarkDataSnapshot {
     pub(crate) fn new(state: RawMarkState, collector_id_ptr: *mut CollectorId) -> Self {
-        #[cfg(feature = "multiple-collectors")] {
-            SimpleMarkDataSnapshot { state, collector_id_ptr }
+        #[cfg(feature = "multiple-collectors")]
+        {
+            SimpleMarkDataSnapshot {
+                state,
+                collector_id_ptr,
+            }
         }
-        #[cfg(not(feature = "multiple-collectors"))] {
+        #[cfg(not(feature = "multiple-collectors"))]
+        {
             drop(collector_id_ptr); // avoid warnings
             SimpleMarkDataSnapshot { state }
         }
@@ -159,10 +162,12 @@ impl SimpleMarkDataSnapshot {
     #[inline]
     fn packed(&self) -> usize {
         let base: usize;
-        #[cfg(feature = "multiple-collectors")] {
+        #[cfg(feature = "multiple-collectors")]
+        {
             base = self.collector_id_ptr as *const CollectorId as usize;
         }
-        #[cfg(not(feature = "multiple-collectors"))] {
+        #[cfg(not(feature = "multiple-collectors"))]
+        {
             base = 0;
         }
         debug_assert_eq!(base & STATE_MASK, 0);
@@ -172,11 +177,16 @@ impl SimpleMarkDataSnapshot {
     unsafe fn from_packed(packed: usize) -> Self {
         let state = RawMarkState::from_byte((packed & STATE_MASK) as u8);
         let id_bytes: usize = packed & !STATE_MASK;
-        #[cfg(feature="multiple-collectors")] {
+        #[cfg(feature = "multiple-collectors")]
+        {
             let collector_id_ptr = id_bytes as *mut CollectorId;
-            SimpleMarkDataSnapshot { state, collector_id_ptr }
+            SimpleMarkDataSnapshot {
+                state,
+                collector_id_ptr,
+            }
         }
-        #[cfg(not(feature = "multiple-collectors"))] {
+        #[cfg(not(feature = "multiple-collectors"))]
+        {
             SimpleMarkDataSnapshot { state }
         }
     }
@@ -198,7 +208,7 @@ unsafe_gc_impl!(
 
 #[repr(C)]
 pub(crate) struct BigGcObject {
-    pub(crate) header: NonNull<GcHeader>
+    pub(crate) header: NonNull<GcHeader>,
 }
 impl BigGcObject {
     #[inline]
@@ -208,7 +218,9 @@ impl BigGcObject {
     #[inline]
     pub unsafe fn from_ptr(header: *mut GcHeader) -> BigGcObject {
         debug_assert!(!header.is_null());
-        BigGcObject { header: NonNull::new_unchecked(header) }
+        BigGcObject {
+            header: NonNull::new_unchecked(header),
+        }
     }
 }
 impl Drop for BigGcObject {
@@ -216,12 +228,15 @@ impl Drop for BigGcObject {
         unsafe {
             let type_info = self.header().type_info;
             if let Some(func) = type_info.drop_func {
-                func((self.header.as_ptr() as *const u8 as *mut u8)
-                    .add(type_info.value_offset_from_common_header)
-                    .cast());
+                func(
+                    (self.header.as_ptr() as *const u8 as *mut u8)
+                        .add(type_info.value_offset_from_common_header)
+                        .cast(),
+                );
             }
             let layout = type_info.determine_total_layout(self.header.as_ptr());
-            let actual_header = type_info.header_layout()
+            let actual_header = type_info
+                .header_layout()
                 .from_common_header(self.header.as_ptr());
             std::alloc::dealloc(actual_header.cast(), layout);
         }
@@ -231,13 +246,13 @@ impl Drop for BigGcObject {
 #[repr(C)]
 pub struct GcArrayHeader {
     pub(crate) len: usize,
-    pub(crate) common_header: GcHeader
+    pub(crate) common_header: GcHeader,
 }
 impl GcArrayHeader {
     pub(crate) const LAYOUT: HeaderLayout<Self> = HeaderLayout {
         header_size: std::mem::size_of::<Self>(),
         common_header_offset: field_offset!(GcArrayHeader, common_header),
-        marker: PhantomData
+        marker: PhantomData,
     };
 }
 /// A header for a Gc vector
@@ -249,13 +264,13 @@ pub struct GcVecHeader {
      * in order for `steal_as_array_unchecked` to work
      */
     pub(crate) len: Cell<usize>,
-    pub(crate) common_header: GcHeader
+    pub(crate) common_header: GcHeader,
 }
 impl GcVecHeader {
     pub(crate) const LAYOUT: HeaderLayout<Self> = HeaderLayout {
         common_header_offset: field_offset!(GcVecHeader, common_header),
         header_size: std::mem::size_of::<GcVecHeader>(),
-        marker: PhantomData
+        marker: PhantomData,
     };
 }
 
@@ -266,12 +281,19 @@ impl GcVecHeader {
 pub struct SimpleVecRepr<'gc, T: Sized> {
     marker: PhantomData<crate::Gc<'gc, [T]>>,
     header: NonNull<GcVecHeader>,
-    ctx: &'gc crate::SimpleCollectorContext
+    ctx: &'gc crate::SimpleCollectorContext,
 }
 impl<'gc, T> SimpleVecRepr<'gc, T> {
     #[inline]
-    pub(crate) unsafe fn from_raw_parts(header: NonNull<GcVecHeader>, ctx: &'gc crate::SimpleCollectorContext) -> Self {
-        SimpleVecRepr { header, ctx, marker: PhantomData }
+    pub(crate) unsafe fn from_raw_parts(
+        header: NonNull<GcVecHeader>,
+        ctx: &'gc crate::SimpleCollectorContext,
+    ) -> Self {
+        SimpleVecRepr {
+            header,
+            ctx,
+            marker: PhantomData,
+        }
     }
     #[inline]
     pub(crate) fn header(&self) -> *const GcVecHeader {
@@ -310,10 +332,11 @@ unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> GcRawVec<'gc, T> for Simple
         zerogc::GcArray::from_raw_ptr(NonNull::new_unchecked(self.as_mut_ptr()), self.len())
     }
     pub fn iter(&self) -> zerogc::vec::raw::RawVecIter<'gc, T, Self>
-        where T: Copy;
+    where
+        T: Copy;
 }
 #[inherent::inherent]
-unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> IGcVec<'gc, T> for SimpleVecRepr<'gc ,T> {
+unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> IGcVec<'gc, T> for SimpleVecRepr<'gc, T> {
     type Id = crate::CollectorId;
 
     #[inline]
@@ -338,7 +361,10 @@ unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> IGcVec<'gc, T> for SimpleVe
     }
 
     #[inline]
-    pub fn reserve_in_place(&mut self, _additional: usize) -> Result<(), zerogc::vec::raw::ReallocFailedError> {
+    pub fn reserve_in_place(
+        &mut self,
+        _additional: usize,
+    ) -> Result<(), zerogc::vec::raw::ReallocFailedError> {
         // TODO: Can we reasonably implement this?
         Err(zerogc::vec::raw::ReallocFailedError::Unsupported)
     }
@@ -360,7 +386,8 @@ unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> IGcVec<'gc, T> for SimpleVe
     pub fn replace(&mut self, index: usize, val: T) -> T;
     pub fn set(&mut self, index: usize, val: T);
     pub fn extend_from_slice(&mut self, src: &[T])
-        where T: Copy;
+    where
+        T: Copy;
     pub fn push(&mut self, val: T);
     pub fn pop(&mut self) -> Option<T>;
     pub fn swap_remove(&mut self, index: usize) -> T;
@@ -368,10 +395,12 @@ unsafe impl<'gc, T: GcSafe<'gc, crate::CollectorId>> IGcVec<'gc, T> for SimpleVe
     pub fn is_empty(&self) -> bool;
     pub fn new_in(ctx: &'gc crate::SimpleCollectorContext) -> Self;
     pub fn copy_from_slice(src: &[T], ctx: &'gc crate::SimpleCollectorContext) -> Self
-        where T: Copy;
+    where
+        T: Copy;
     pub fn from_vec(src: Vec<T>, ctx: &'gc crate::SimpleCollectorContext) -> Self;
     pub fn get(&mut self, index: usize) -> Option<T>
-        where T: Copy;
+    where
+        T: Copy;
     pub unsafe fn as_slice_unchecked(&self) -> &[T];
 }
 unsafe_gc_impl!(
@@ -417,32 +446,35 @@ pub struct GcHeader {
     /// The type information
     pub type_info: &'static GcType,
     /// The mark data
-    pub mark_data: SimpleMarkData
+    pub mark_data: SimpleMarkData,
 }
 impl GcHeader {
     /// The layout of the header
     pub const LAYOUT: HeaderLayout<Self> = HeaderLayout {
         header_size: std::mem::size_of::<Self>(),
         common_header_offset: 0,
-        marker: PhantomData
+        marker: PhantomData,
     };
     /// Get the collector id associated with this object.
     #[inline]
     pub fn collector_id(&self) -> &'_ crate::CollectorId {
-        #[cfg(feature = "multiple-collectors")] {
-            unsafe {
-                &*self.mark_data.load_snapshot().collector_id_ptr
-            }
+        #[cfg(feature = "multiple-collectors")]
+        {
+            unsafe { &*self.mark_data.load_snapshot().collector_id_ptr }
         }
-        #[cfg(not(feature = "multiple-collectors"))] {
+        #[cfg(not(feature = "multiple-collectors"))]
+        {
             const ID: CollectorId = unsafe { CollectorId::from_raw(PhantomData) };
             &ID
-        } 
+        }
     }
     /// Create a new header
     #[inline]
     pub fn new(type_info: &'static GcType, mark_data: SimpleMarkData) -> Self {
-        GcHeader { type_info, mark_data }
+        GcHeader {
+            type_info,
+            mark_data,
+        }
     }
     /// A pointer to the header's value
     #[inline]
@@ -482,13 +514,13 @@ pub enum GcTypeLayout {
         ///
         /// The overall alignment of the array is equal to the alignment of each element,
         /// however the size may vary at runtime.
-        element_layout: Layout
+        element_layout: Layout,
     },
     /// A vector, whose capacity can vary from instance to instance
     Vec {
         /// The fixed layout of elements in the vector.
-        element_layout: Layout
-    }
+        element_layout: Layout,
+    },
 }
 
 /// A type used by GC
@@ -510,15 +542,16 @@ impl GcType {
     fn align(&self) -> usize {
         match self.layout {
             GcTypeLayout::Fixed(fixed) => fixed.align(),
-            GcTypeLayout::Array { element_layout } |
-            GcTypeLayout::Vec { element_layout } => element_layout.align()
+            GcTypeLayout::Array { element_layout } | GcTypeLayout::Vec { element_layout } => {
+                element_layout.align()
+            }
         }
     }
     pub(crate) fn header_layout(&self) -> HeaderLayout<UnknownHeader> {
         match self.layout {
             GcTypeLayout::Fixed(_) => GcHeader::LAYOUT.into_unknown(),
             GcTypeLayout::Array { .. } => GcArrayHeader::LAYOUT.into_unknown(),
-            GcTypeLayout::Vec { .. } => GcVecHeader::LAYOUT.into_unknown()
+            GcTypeLayout::Vec { .. } => GcVecHeader::LAYOUT.into_unknown(),
         }
     }
     #[inline]
@@ -528,7 +561,7 @@ impl GcType {
             GcTypeLayout::Array { element_layout } => {
                 let header = GcArrayHeader::LAYOUT.from_common_header(header);
                 element_layout.repeat((*header).len).unwrap().0.size()
-            },
+            }
             GcTypeLayout::Vec { element_layout } => {
                 let header = GcVecHeader::LAYOUT.from_common_header(header);
                 element_layout.repeat((*header).capacity).unwrap().0.size()
@@ -541,11 +574,15 @@ impl GcType {
     }
     #[inline]
     pub(crate) unsafe fn determine_total_layout(&self, header: *mut GcHeader) -> Layout {
-        self.header_layout().layout()
+        self.header_layout()
+            .layout()
             .extend(Layout::from_size_align_unchecked(
                 self.determine_size(header),
-                self.align()
-            )).unwrap().0.pad_to_align()
+                self.align(),
+            ))
+            .unwrap()
+            .0
+            .pad_to_align()
     }
     /// Get the [GcType] for the specified `Sized` type
     #[inline]
@@ -570,11 +607,10 @@ impl<'gc, T: GcSafe<'gc, crate::CollectorId>> StaticVecType for T {
         trace_func: if <T as Trace>::NEEDS_TRACE {
             Some({
                 unsafe fn visit<T: Trace>(val: *mut c_void, visitor: &mut MarkVisitor) {
-                    let len = (*GcVecHeader::LAYOUT.from_value_ptr(val as *mut T)).len.get();
-                    let slice = std::slice::from_raw_parts_mut(
-                        val as *mut T,
-                        len
-                    );
+                    let len = (*GcVecHeader::LAYOUT.from_value_ptr(val as *mut T))
+                        .len
+                        .get();
+                    let slice = std::slice::from_raw_parts_mut(val as *mut T, len);
                     let Ok(()) = <[T] as Trace>::trace(slice, visitor);
                 }
                 visit::<T> as unsafe fn(*mut c_void, &mut MarkVisitor)
@@ -585,17 +621,19 @@ impl<'gc, T: GcSafe<'gc, crate::CollectorId>> StaticVecType for T {
         drop_func: if T::NEEDS_DROP {
             Some({
                 unsafe fn drop_gc_vec<'gc, T: GcSafe<'gc, crate::CollectorId>>(val: *mut c_void) {
-                    let len = (*GcVecHeader::LAYOUT.from_value_ptr(val as *mut T)).len.get();
+                    let len = (*GcVecHeader::LAYOUT.from_value_ptr(val as *mut T))
+                        .len
+                        .get();
                     std::ptr::drop_in_place::<[T]>(std::ptr::slice_from_raw_parts_mut(
                         val as *mut T,
-                        len
+                        len,
                     ));
                 }
                 drop_gc_vec::<T> as unsafe fn(*mut c_void)
             })
         } else {
             None
-        }
+        },
     };
 }
 pub(crate) trait StaticGcType {
@@ -603,7 +641,9 @@ pub(crate) trait StaticGcType {
 }
 impl<'gc, T: GcSafe<'gc, crate::CollectorId>> StaticGcType for [T] {
     const STATIC_TYPE: &'static GcType = &GcType {
-        layout: GcTypeLayout::Array { element_layout: Layout::new::<T>() },
+        layout: GcTypeLayout::Array {
+            element_layout: Layout::new::<T>(),
+        },
         value_offset_from_common_header: {
             GcArrayHeader::LAYOUT.value_offset_from_common_header(std::mem::align_of::<T>())
         },
@@ -612,27 +652,28 @@ impl<'gc, T: GcSafe<'gc, crate::CollectorId>> StaticGcType for [T] {
                 unsafe fn visit<T: Trace>(val: *mut c_void, visitor: &mut MarkVisitor) {
                     let header = GcArrayHeader::LAYOUT.from_value_ptr(val as *mut T);
                     let len = (*header).len;
-                    let slice = std::slice::from_raw_parts_mut(
-                        val as *mut T,
-                        len
-                    );
+                    let slice = std::slice::from_raw_parts_mut(val as *mut T, len);
                     let Ok(()) = <[T] as Trace>::trace(slice, visitor);
                 }
                 visit::<T> as unsafe fn(*mut c_void, &mut MarkVisitor)
             })
-        } else { None },
+        } else {
+            None
+        },
         drop_func: if <T as Trace>::NEEDS_DROP {
             Some({
                 unsafe fn drop_gc_slice<'gc, T: GcSafe<'gc, crate::CollectorId>>(val: *mut c_void) {
                     let len = (*GcArrayHeader::LAYOUT.from_value_ptr(val as *mut T)).len;
                     std::ptr::drop_in_place::<[T]>(std::ptr::slice_from_raw_parts_mut(
                         val as *mut T,
-                        len
+                        len,
                     ));
                 }
                 drop_gc_slice::<T> as unsafe fn(*mut c_void)
             })
-        } else { None }
+        } else {
+            None
+        },
     };
 }
 impl<'gc, T: GcSafe<'gc, crate::CollectorId>> StaticGcType for T {
@@ -642,14 +683,22 @@ impl<'gc, T: GcSafe<'gc, crate::CollectorId>> StaticGcType for T {
             GcHeader::LAYOUT.value_offset_from_common_header(std::mem::align_of::<T>())
         },
         trace_func: if <T as Trace>::NEEDS_TRACE {
-            Some(unsafe { mem::transmute::<_, unsafe fn(*mut c_void, &mut MarkVisitor)>(
-                <T as DynTrace>::trace as fn(&mut T, &mut MarkVisitor),
-            ) })
-        } else { None },
+            Some(unsafe {
+                mem::transmute::<_, unsafe fn(*mut c_void, &mut MarkVisitor)>(
+                    <T as DynTrace>::trace as fn(&mut T, &mut MarkVisitor),
+                )
+            })
+        } else {
+            None
+        },
         drop_func: if <T as Trace>::NEEDS_DROP {
-            unsafe { Some(mem::transmute::<_, unsafe fn(*mut c_void)>(
-                std::ptr::drop_in_place::<T> as unsafe fn(*mut T)
-            )) }
-        } else { None }
+            unsafe {
+                Some(mem::transmute::<_, unsafe fn(*mut c_void)>(
+                    std::ptr::drop_in_place::<T> as unsafe fn(*mut T),
+                ))
+            }
+        } else {
+            None
+        },
     };
 }

@@ -5,18 +5,20 @@
 )]
 extern crate proc_macro;
 
-use quote::{quote, ToTokens};
-use syn::parse::Parse;
-use syn::punctuated::Punctuated;
-use syn::{DeriveInput, GenericParam, Generics, Token, Type, WhereClause, parse_macro_input, parse_quote};
-use proc_macro2::{TokenStream, Span};
+use crate::derive::TraceDeriveKind;
 use darling::{FromDeriveInput, FromMeta};
+use proc_macro2::{Span, TokenStream};
+use quote::{quote, ToTokens};
 use std::fmt::Display;
 use std::io::Write;
-use crate::derive::TraceDeriveKind;
+use syn::parse::Parse;
+use syn::punctuated::Punctuated;
+use syn::{
+    parse_macro_input, parse_quote, DeriveInput, GenericParam, Generics, Token, Type, WhereClause,
+};
 
-mod macros;
 mod derive;
+mod macros;
 
 /// Magic const that expands to either `::zerogc` or `crate::`
 /// depending on whether we are currently bootstrapping (compiling `zerogc` itself)
@@ -46,15 +48,14 @@ pub(crate) fn sort_params(generics: &mut Generics) {
         Type,
         Const,
     }
-    let mut pairs = std::mem::take(&mut generics.params).into_pairs()
+    let mut pairs = std::mem::take(&mut generics.params)
+        .into_pairs()
         .collect::<Vec<_>>();
     use syn::punctuated::Pair;
-    pairs.sort_by_key(|pair| {
-        match pair.value() {
-            syn::GenericParam::Lifetime(_) => ParamOrder::Lifetime,
-            syn::GenericParam::Type(_) => ParamOrder::Type,
-            syn::GenericParam::Const(_) => ParamOrder::Const,
-        }
+    pairs.sort_by_key(|pair| match pair.value() {
+        syn::GenericParam::Lifetime(_) => ParamOrder::Lifetime,
+        syn::GenericParam::Type(_) => ParamOrder::Type,
+        syn::GenericParam::Const(_) => ParamOrder::Const,
     });
     /*
      * NOTE: The `Pair::End` can only come at the end.
@@ -67,7 +68,10 @@ pub(crate) fn sort_params(generics: &mut Generics) {
     if let Some(old_ending_index) = pairs.iter().position(|p| p.punct().is_none()) {
         if old_ending_index != pairs.len() - 1 {
             let value = pairs.remove(old_ending_index).into_value();
-            pairs.insert(old_ending_index, Pair::Punctuated(value, Default::default()));
+            pairs.insert(
+                old_ending_index,
+                Pair::Punctuated(value, Default::default()),
+            );
         }
     }
     generics.params = pairs.into_iter().collect();
@@ -77,13 +81,12 @@ pub(crate) fn emit_warning(msg: impl ToString, span: Span) {
     let mut d = proc_macro::Diagnostic::new(proc_macro::Level::Warning, msg.to_string());
     d.set_spans(span.unwrap());
     d.emit();
-
 }
 
 pub(crate) fn move_bounds_to_where_clause(mut generics: Generics) -> Generics {
     let where_clause = generics.where_clause.get_or_insert_with(|| WhereClause {
         where_token: Default::default(),
-        predicates: Default::default()
+        predicates: Default::default(),
     });
     for param in &mut generics.params {
         match *param {
@@ -95,7 +98,7 @@ pub(crate) fn move_bounds_to_where_clause(mut generics: Generics) -> Generics {
                 }
                 lt.colon_token = None;
                 lt.bounds.clear();
-            },
+            }
             GenericParam::Type(ref mut tp) => {
                 let bounds = &tp.bounds;
                 let target = &tp.ident;
@@ -106,14 +109,18 @@ pub(crate) fn move_bounds_to_where_clause(mut generics: Generics) -> Generics {
                 tp.colon_token = None;
                 tp.default = None;
                 tp.bounds.clear();
-            },
+            }
             GenericParam::Const(ref mut c) => {
                 c.eq_token = None;
                 c.default = None;
             }
         }
     }
-    if generics.where_clause.as_ref().map_or(false, |clause| clause.predicates.is_empty()) {
+    if generics
+        .where_clause
+        .as_ref()
+        .map_or(false, |clause| clause.predicates.is_empty())
+    {
         generics.where_clause = None;
     }
     generics
@@ -122,11 +129,12 @@ pub(crate) fn move_bounds_to_where_clause(mut generics: Generics) -> Generics {
 #[proc_macro]
 pub fn unsafe_gc_impl(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let parsed = parse_macro_input!(input as macros::MacroInput);
-    let res = parsed.expand_output()
+    let res = parsed
+        .expand_output()
         .unwrap_or_else(|e| e.to_compile_error());
     let tp = match parsed.target_type {
         Type::Path(ref p) => Some(&p.path.segments.last().unwrap().ident),
-        _ => None
+        _ => None,
     };
     let span_loc = span_file_loc(Span::call_site());
     let f = if let Some(tp) = tp {
@@ -138,7 +146,7 @@ pub fn unsafe_gc_impl(input: proc_macro::TokenStream) -> proc_macro::TokenStream
         "unsafe_gc_impl!",
         &tp.map_or_else(|| span_loc.to_string(), |tp| tp.to_string()),
         &f,
-        &res
+        &res,
     );
     res.into()
 }
@@ -146,13 +154,14 @@ pub fn unsafe_gc_impl(input: proc_macro::TokenStream) -> proc_macro::TokenStream
 #[proc_macro_derive(NullTrace, attributes(zerogc))]
 pub fn derive_null_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let res = From::from(impl_derive_trace(&input,  TraceDeriveKind::NullTrace)
-        .unwrap_or_else(|e| e.write_errors()));
+    let res = From::from(
+        impl_derive_trace(&input, TraceDeriveKind::NullTrace).unwrap_or_else(|e| e.write_errors()),
+    );
     debug_derive(
         "derive(NullTrace)",
         &input.ident.to_string(),
         &format_args!("#[derive(NullTrace) for {}", input.ident),
-        &res
+        &res,
     );
     res
 }
@@ -160,13 +169,14 @@ pub fn derive_null_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStr
 #[proc_macro_derive(Trace, attributes(zerogc))]
 pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let res = From::from(impl_derive_trace(&input, TraceDeriveKind::Regular)
-        .unwrap_or_else(|e| e.write_errors()));
+    let res = From::from(
+        impl_derive_trace(&input, TraceDeriveKind::Regular).unwrap_or_else(|e| e.write_errors()),
+    );
     debug_derive(
         "derive(Trace)",
         &input.ident.to_string(),
         &format_args!("#[derive(Trace) for {}", input.ident),
-        &res
+        &res,
     );
     res
 }
@@ -176,18 +186,23 @@ pub(crate) const DESERIALIZE_ENABLED: bool = cfg!(feature = "__serde-internal");
 #[proc_macro_derive(GcDeserialize, attributes(zerogc))]
 pub fn gc_deserialize(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let res = From::from(impl_derive_trace(&input, TraceDeriveKind::Deserialize)
-        .unwrap_or_else(|e| e.write_errors()));
+    let res = From::from(
+        impl_derive_trace(&input, TraceDeriveKind::Deserialize)
+            .unwrap_or_else(|e| e.write_errors()),
+    );
     debug_derive(
         "derive(GcDeserialize)",
         &input.ident.to_string(),
         &format_args!("#[derive(GcDeserialize) for {}", input.ident),
-        &res
+        &res,
     );
     res
 }
 
-fn impl_derive_trace(input: &DeriveInput, kind: TraceDeriveKind) -> Result<TokenStream, darling::Error> {
+fn impl_derive_trace(
+    input: &DeriveInput,
+    kind: TraceDeriveKind,
+) -> Result<TokenStream, darling::Error> {
     let mut input = derive::TraceDeriveInput::from_derive_input(input)?;
     input.normalize(kind)?;
     input.expand(kind)
@@ -206,7 +221,6 @@ impl<T: Parse> FromMeta for MetaList<T> {
         let mut res: Punctuated<T, Token![,]> = Default::default();
         for item in items {
             res.push(syn::parse2(item.to_token_stream())?);
-
         }
         Ok(MetaList(res))
     }
@@ -249,25 +263,33 @@ fn debug_derive(key: &str, target: &dyn ToString, message: &dyn Display, value: 
     // TODO: Use proc_macro::tracked_env::var
     match ::proc_macro::tracked_env::var("DEBUG_DERIVE") {
         Ok(ref var) if var == "*" || var == "1" || var.is_empty() => {}
-        Ok(ref var) if var == "0" => { return /* disabled */ }
+        Ok(ref var) if var == "0" => {
+            return; /* disabled */
+        }
         Ok(var) => {
             let target_parts = std::iter::once(key)
-                .chain(target.split(':')).collect::<Vec<_>>();
+                .chain(target.split(':'))
+                .collect::<Vec<_>>();
             for pattern in var.split_terminator(',') {
                 let pattern_parts = pattern.split(':').collect::<Vec<_>>();
-                if pattern_parts.len() > target_parts.len() { continue }
-                for (&pattern_part, &target_part) in pattern_parts.iter()
-                    .chain(std::iter::repeat(&"*")).zip(&target_parts) {
+                if pattern_parts.len() > target_parts.len() {
+                    continue;
+                }
+                for (&pattern_part, &target_part) in pattern_parts
+                    .iter()
+                    .chain(std::iter::repeat(&"*"))
+                    .zip(&target_parts)
+                {
                     if pattern_part == "*" {
-                        continue // Wildcard matches anything: Keep checking
+                        continue; // Wildcard matches anything: Keep checking
                     }
                     if pattern_part != target_part {
-                        return // Pattern mismatch
+                        return; // Pattern mismatch
                     }
                 }
             }
             // Fallthrough -> enable this debug
-        },
+        }
         _ => return,
     }
     eprintln!("{}:", message);
@@ -290,13 +312,16 @@ fn debug_derive(key: &str, target: &dyn ToString, message: &dyn Display, value: 
             for line in formatted.lines() {
                 eprintln!("  {}", line);
             }
-        },
+        }
         // Fallthrough on failure
         Ok(output) => {
-            eprintln!("Rustfmt error [code={}]:", output.status.code().map_or_else(
-                || String::from("?"),
-                |i| format!("{}", i)
-            ));
+            eprintln!(
+                "Rustfmt error [code={}]:",
+                output
+                    .status
+                    .code()
+                    .map_or_else(|| String::from("?"), |i| format!("{}", i))
+            );
             let err_msg = String::from_utf8(output.stderr).unwrap();
             for line in err_msg.lines() {
                 eprintln!("  {}", line);

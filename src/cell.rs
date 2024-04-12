@@ -16,7 +16,7 @@ use core::cell::Cell;
 
 use zerogc_derive::unsafe_gc_impl;
 
-use crate::{Trace, NullTrace, GcDirectBarrier, CollectorId, GcRebrand, GcSafe};
+use crate::{CollectorId, GcDirectBarrier, GcRebrand, GcSafe, NullTrace, Trace};
 
 /// A `Cell` pointing to a garbage collected object.
 ///
@@ -63,12 +63,11 @@ impl<T: NullTrace + Copy> GcCell<T> {
     }
 }
 unsafe impl<'gc, OwningRef, Value> GcDirectBarrier<'gc, OwningRef> for GcCell<Value>
-    where Value: GcDirectBarrier<'gc, OwningRef> + Copy {
+where
+    Value: GcDirectBarrier<'gc, OwningRef> + Copy,
+{
     #[inline]
-    unsafe fn write_barrier(
-        &self, owner: &OwningRef,
-        field_offset: usize
-    ) {
+    unsafe fn write_barrier(&self, owner: &OwningRef, field_offset: usize) {
         // NOTE: We are direct write because `Value` is stored inline
         self.get().write_barrier(owner, field_offset)
     }

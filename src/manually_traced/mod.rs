@@ -75,8 +75,6 @@ macro_rules! unsafe_trace_lock {
     };
 }
 
-
-
 /// Unsafely implement `GarbageCollected` for the specified type,
 /// by assuming it's a 'primitive' and never needs to be traced.
 ///
@@ -127,16 +125,16 @@ macro_rules! unsafe_trace_primitive {
     };
 }
 
+#[cfg(feature = "anyhow")]
+mod anyhow;
+#[cfg(feature = "arrayvec")]
+mod arrayvec;
 mod core;
-#[cfg(any(feature = "alloc", feature = "std"))]
-mod stdalloc;
-#[cfg(feature = "std")]
-mod stdlib;
 #[cfg(feature = "indexmap")]
 mod indexmap;
 #[cfg(feature = "parking_lot")]
 mod parking_lot;
-#[cfg(feature = "arrayvec")]
-mod arrayvec;
-#[cfg(feature = "anyhow")]
-mod anyhow;
+#[cfg(any(feature = "alloc", feature = "std"))]
+mod stdalloc;
+#[cfg(feature = "std")]
+mod stdlib;

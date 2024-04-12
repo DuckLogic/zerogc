@@ -1,24 +1,24 @@
 use slog::Logger;
 
-use zerogc::GcSimpleAlloc;
 use zerogc::safepoint;
+use zerogc::GcSimpleAlloc;
 use zerogc_derive::Trace;
 
-use zerogc_simple::{SimpleCollector, GcArray, GcVec, Gc, CollectorId as SimpleCollectorId, GcConfig};
+use zerogc_simple::{
+    CollectorId as SimpleCollectorId, Gc, GcArray, GcConfig, GcVec, SimpleCollector,
+};
 
 fn test_collector() -> SimpleCollector {
     let mut config = GcConfig::default();
     config.always_force_collect = true; // Force collections for predictability
-    SimpleCollector::with_config(
-        config, Logger::root(::slog::Discard, ::slog::o!())
-    )
+    SimpleCollector::with_config(config, Logger::root(::slog::Discard, ::slog::o!()))
 }
 
 #[derive(Trace, Copy, Clone, Debug)]
 #[zerogc(copy, collector_ids(SimpleCollectorId))]
 struct Dummy<'gc> {
     val: usize,
-    inner: Option<Gc<'gc, Dummy<'gc>>>
+    inner: Option<Gc<'gc, Dummy<'gc>>>,
 }
 
 #[test]
@@ -34,14 +34,14 @@ fn array() {
     for val in array_none.as_slice() {
         assert_eq!(*val, None);
     }
-    let array_text = safepoint!(context,  array_text);
+    let array_text = safepoint!(context, array_text);
     assert_eq!(array_text.as_slice(), TEXT);
     let mut nested_trace = Vec::new();
     let mut last = None;
     for i in 0..16 {
         let obj = context.alloc(Dummy {
             val: i,
-            inner: last
+            inner: last,
         });
         nested_trace.push(obj);
         last = Some(obj);
@@ -78,20 +78,24 @@ fn vec() {
         assert_eq!(*val, None);
     }
     drop(vec_none);
-    let vec_text: GcVec<u8> = GcVec::copy_from_slice(safepoint!(context, vec_text).as_slice(), &context);
+    let vec_text: GcVec<u8> =
+        GcVec::copy_from_slice(safepoint!(context, vec_text).as_slice(), &context);
     assert_eq!(vec_text.as_slice(), TEXT);
     let mut nested_trace: GcVec<Gc<Dummy>> = context.alloc_vec_with_capacity(3);
     let mut last = None;
     for i in 0..16 {
         let obj = context.alloc(Dummy {
             val: i,
-            inner: last
+            inner: last,
         });
         nested_trace.push(obj);
         last = Some(obj);
     }
     drop(vec_text);
-    let nested_trace: GcVec<Gc<Dummy>> = GcVec::from_vec(safepoint!(context, nested_trace).into_iter().collect(), &context);
+    let nested_trace: GcVec<Gc<Dummy>> = GcVec::from_vec(
+        safepoint!(context, nested_trace).into_iter().collect(),
+        &context,
+    );
     for (idx, val) in nested_trace.iter().enumerate() {
         assert_eq!(val.val, idx, "Invalid val: {:?}", val);
         if let Some(last) = val.inner {

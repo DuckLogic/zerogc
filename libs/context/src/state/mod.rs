@@ -1,22 +1,24 @@
 use crate::collector::RawCollectorImpl;
-use crate::{ContextState, ShadowStack, CollectorRef};
+use crate::{CollectorRef, ContextState, ShadowStack};
 
-use core::mem::ManuallyDrop;
 use core::fmt::Debug;
+use core::mem::ManuallyDrop;
 
 use alloc::boxed::Box;
 
+pub mod nosync;
 /// The internal state of the collector
 ///
 /// Has a thread-safe and thread-unsafe implementation.
 
 #[cfg(feature = "sync")]
 pub mod sync;
-pub mod nosync;
 
 /// Manages coordination of garbage collections
 pub unsafe trait CollectionManager<C>: self::sealed::Sealed
-    where C: RawCollectorImpl<Manager=Self, RawContext=Self::Context> {
+where
+    C: RawCollectorImpl<Manager = Self, RawContext = Self::Context>,
+{
     type Context: RawContext<C>;
     fn new() -> Self;
     fn is_collecting(&self) -> bool;
@@ -54,7 +56,9 @@ pub unsafe trait CollectionManager<C>: self::sealed::Sealed
 /// Each context is bound to one and only one thread,
 /// even if the collector supports multi-threading.
 pub unsafe trait RawContext<C>: Debug + self::sealed::Sealed
-    where C: RawCollectorImpl<RawContext=Self> {
+where
+    C: RawCollectorImpl<RawContext = Self>,
+{
     unsafe fn register_new(collector: &CollectorRef<C>) -> ManuallyDrop<Box<Self>>;
     /// Trigger a safepoint for this context.
     ///
@@ -79,7 +83,7 @@ pub unsafe trait RawContext<C>: Debug + self::sealed::Sealed
     unsafe fn assume_valid_shadow_stack(&self) -> &ShadowStack<C> {
         match self.state() {
             ContextState::Active => unreachable!("active context: {:?}", self),
-            ContextState::SafePoint { .. } | ContextState::Frozen { .. } => {},
+            ContextState::SafePoint { .. } | ContextState::Frozen { .. } => {}
         }
         &*self.shadow_stack_ptr()
     }

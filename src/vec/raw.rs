@@ -1,7 +1,7 @@
 //! The underlying representation of a [GcVec](`crate::vec::GcVec`)
 
-use core::marker::PhantomData;
 use core::iter::Iterator;
+use core::marker::PhantomData;
 
 use crate::{CollectorId, GcRebrand, GcSafe};
 
@@ -25,7 +25,7 @@ pub enum ReallocFailedError {
 ///
 /// This can be changed by calling `detatch`,
 /// although this is currently unimplemented.
-/// 
+///
 /// ## Safety
 /// Undefined behavior if the methods
 /// violate their contracts.
@@ -54,7 +54,9 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     /// allocating it in the specified context
     #[inline]
     fn copy_from_slice(src: &[T], ctx: &'gc <Self::Id as CollectorId>::Context) -> Self
-        where T: Copy {
+    where
+        T: Copy,
+    {
         let len = src.len();
         let mut res = Self::with_capacity_in(len, ctx);
         unsafe {
@@ -103,7 +105,7 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     ///
     /// If this type is a [GcVecCell](`crate::vec::cell::GcVecCell`) and there are outstanding borrows references,
     /// then this will panic as if calling [`RefCell::borrow_mut`](`core::cell::RefCell::borrow_mut`).
-    /// 
+    ///
     /// ## Safety
     /// This method is safe.
     ///
@@ -179,12 +181,15 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     /// Extend the vector with elements copied from the specified slice
     #[inline]
     fn extend_from_slice(&mut self, src: &[T])
-        where T: Copy {
+    where
+        T: Copy,
+    {
         let old_len = self.len();
         self.reserve(src.len());
         // TODO: Write barriers?
         unsafe {
-            self.as_mut_ptr().add(old_len)
+            self.as_mut_ptr()
+                .add(old_len)
                 .copy_from_nonoverlapping(src.as_ptr(), src.len());
             self.set_len(old_len + src.len());
         }
@@ -195,7 +200,10 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     /// This returns a copy of the value.
     /// As such it requires `T: Copy`
     #[inline]
-    fn get(&self, idx: usize) -> Option<T> where T: Copy {
+    fn get(&self, idx: usize) -> Option<T>
+    where
+        T: Copy,
+    {
         unsafe { self.as_slice_unchecked().get(idx).copied() }
     }
     /// Set the item at the specified index
@@ -216,14 +224,12 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     #[inline]
     fn replace(&mut self, index: usize, val: T) -> T {
         assert!(index < self.len());
-        unsafe {
-            core::ptr::replace(self.as_mut_ptr(), val)
-        }
+        unsafe { core::ptr::replace(self.as_mut_ptr(), val) }
     }
     /// Get a pointer to this vector's
     /// underling data.
     ///
-    /// This is unsafe for the same 
+    /// This is unsafe for the same
     ///
     /// ## Safety
     /// Undefined behavior if the pointer is used
@@ -232,7 +238,7 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     /// Get a mutable pointer to the vector's underlying data.
     ///
     /// This is unsafe for the same reason [IGcVec::as_ptr]
-    /// and 
+    /// and
     ///
     /// ## Safety
     /// Undefined behavior if the pointer is used
@@ -245,7 +251,7 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
         self.as_ptr() as *mut T
     }
     /// Get a slice of this vector's elements.
-    /// 
+    ///
     /// ## Safety
     /// If this type has shared references (multiple owners),
     /// then it is undefined behavior to mutate the length
@@ -278,28 +284,32 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
 /// Slow-case for `reserve`, when reallocation is actually needed
 #[cold]
 fn grow_vec<'gc, T, V>(vec: &mut V, amount: usize)
-    where V: IGcVec<'gc, T>, T: GcSafe<'gc, V::Id> {
+where
+    V: IGcVec<'gc, T>,
+    T: GcSafe<'gc, V::Id>,
+{
     match vec.reserve_in_place(amount) {
         Ok(()) => {
             return; // success
-        },
+        }
         Err(ReallocFailedError::OutOfMemory) => panic!("Out of memory"),
-        Err(ReallocFailedError::Unsupported) |
-        Err(ReallocFailedError::SizeUnsupported) => {
+        Err(ReallocFailedError::Unsupported) | Err(ReallocFailedError::SizeUnsupported) => {
             // fallthrough to realloc
         }
     }
     let requested_capacity = vec.len().checked_add(amount).unwrap();
-    let new_capacity = vec.capacity().checked_mul(2).unwrap()
+    let new_capacity = vec
+        .capacity()
+        .checked_mul(2)
+        .unwrap()
         .max(requested_capacity);
     // Just allocate a new one, copying from the old
     let mut new_mem = V::with_capacity_in(new_capacity, vec.context());
     // TODO: Write barriers
     unsafe {
-        new_mem.as_mut_ptr().copy_from_nonoverlapping(
-            vec.as_ptr(),
-            vec.len()
-        );
+        new_mem
+            .as_mut_ptr()
+            .copy_from_nonoverlapping(vec.as_ptr(), vec.len());
         new_mem.set_len(vec.len());
         let mut old_mem = core::mem::replace(vec, new_mem);
         old_mem.set_len(0); // We don't want to drop the old elements
@@ -312,7 +322,7 @@ fn grow_vec<'gc, T, V>(vec: &mut V, amount: usize)
 ///
 /// See the [module docs](`zerogc::vec`) for
 /// more details on the distinctions between vector types.
-/// 
+///
 /// ## Interior Mutability
 /// TLDR: This is the [Cell](core::cell::Cell)
 /// equivalent of [GcVecCell](zerogc::vec::GcVecCell).
@@ -323,7 +333,7 @@ fn grow_vec<'gc, T, V>(vec: &mut V, amount: usize)
 /// Interior mutability is necessary because garbage collection
 /// allows shared references, and the length can be mutated
 /// by one reference while another reference is in use.
-/// 
+///
 /// Unlike `UnsafeCell`, not *all* accesses to this are `unsafe`.
 /// Calls to `get`, `set`, and `push` are perfectly safe because they take/return `T`, not `&T`.
 /// Only calls to `get_slice_unchecked` are `unsafe`.
@@ -371,13 +381,15 @@ pub unsafe trait GcRawVec<'gc, T: GcSafe<'gc, Self::Id>>: Copy + IGcVec<'gc, T> 
     /// it requires `T: Copy`
     #[inline]
     fn iter(&self) -> RawVecIter<'gc, T, Self>
-        where T: Copy {
+    where
+        T: Copy,
+    {
         RawVecIter {
             target: *self,
             marker: PhantomData,
             index: 0,
             end: self.len(),
-            original_len: self.len()
+            original_len: self.len(),
         }
     }
 }
@@ -422,7 +434,8 @@ impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> RawVecIter<'gc, T, 
     #[track_caller]
     fn check_unmodified_length(&self) {
         assert_eq!(
-            self.target.len(), self.original_len,
+            self.target.len(),
+            self.original_len,
             "Vector length mutated during iteration"
         );
     }
@@ -435,9 +448,7 @@ impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> Iterator for RawVec
         self.check_unmodified_length();
         if self.index < self.end {
             self.index += 1;
-            Some(unsafe {
-                self.target.get(self.index - 1).unwrap_unchecked()
-            })
+            Some(unsafe { self.target.get(self.index - 1).unwrap_unchecked() })
         } else {
             None
         }
@@ -457,22 +468,28 @@ impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> Iterator for RawVec
         self.len()
     }
 }
-impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> DoubleEndedIterator for RawVecIter<'gc, T, V> {
+impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> DoubleEndedIterator
+    for RawVecIter<'gc, T, V>
+{
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         self.check_unmodified_length();
         if self.end > self.index {
             self.end -= 1;
-            Some(unsafe {
-                self.target.get(self.end).unwrap_unchecked()
-            })
+            Some(unsafe { self.target.get(self.end).unwrap_unchecked() })
         } else {
             None
         }
     }
 }
-impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> ExactSizeIterator for RawVecIter<'gc, T, V> {}
-impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> core::iter::FusedIterator for RawVecIter<'gc, T, V> {}
+impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> ExactSizeIterator
+    for RawVecIter<'gc, T, V>
+{
+}
+impl<'gc, T: GcSafe<'gc, V::Id> + Copy, V: GcRawVec<'gc, T>> core::iter::FusedIterator
+    for RawVecIter<'gc, T, V>
+{
+}
 /// Dummy implementation of [GcRawVec] for collectors
 /// which do not support [GcVec](`crate::vec::GcVec`)
 pub struct Unsupported<'gc, T, Id: CollectorId> {
@@ -480,7 +497,7 @@ pub struct Unsupported<'gc, T, Id: CollectorId> {
     pub marker: PhantomData<crate::Gc<'gc, [T], Id>>,
     /// indicates this type should never exist at runtime
     // TODO: Replace with `!` once stabilized
-    pub never: core::convert::Infallible
+    pub never: core::convert::Infallible,
 }
 unsafe_gc_impl! {
     target => Unsupported<'gc, T, Id>,
@@ -556,19 +573,23 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for Unsuppo
 }
 
 /// Drains a [`GcRawVec`] by repeatedly calling `IGcVec::swap_remove`
-/// 
+///
 /// Panics if the length is modified while iteration is in progress.
 pub struct DrainRaw<'a, 'gc, T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>> {
     start: usize,
     expected_len: usize,
     target: &'a mut V,
-    marker: PhantomData<crate::Gc<'gc, T, V::Id>>
+    marker: PhantomData<crate::Gc<'gc, T, V::Id>>,
 }
 impl<'a, 'gc, T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>> Iterator for DrainRaw<'a, 'gc, T, V> {
     type Item = T;
     #[inline]
     fn next(&mut self) -> Option<T> {
-        assert_eq!(self.expected_len, self.target.len(), "Length changed while iteration was in progress");
+        assert_eq!(
+            self.expected_len,
+            self.target.len(),
+            "Length changed while iteration was in progress"
+        );
         if self.start < self.expected_len {
             self.expected_len -= 1;
             Some(self.target.swap_remove(self.start))
@@ -582,7 +603,9 @@ impl<'a, 'gc, T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>> Iterator for DrainRaw<
         (len, Some(len))
     }
 }
-impl<'a, 'gc, T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>> DoubleEndedIterator for DrainRaw<'a, 'gc, T, V> {
+impl<'a, 'gc, T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>> DoubleEndedIterator
+    for DrainRaw<'a, 'gc, T, V>
+{
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.start < self.expected_len {
             self.expected_len -= 1;
@@ -594,8 +617,8 @@ impl<'a, 'gc, T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>> DoubleEndedIterator fo
 }
 impl<'a, 'gc, T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>> Drop for DrainRaw<'a, 'gc, T, V> {
     fn drop(&mut self) {
-       for val in self.by_ref() {
-           drop(val);
-       }
+        for val in self.by_ref() {
+            drop(val);
+        }
     }
 }

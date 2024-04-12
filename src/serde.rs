@@ -10,12 +10,12 @@
 //! indicating an implementation of [serde::Deserialize]
 //! that requires a [GcContext].
 use std::collections::{HashMap, HashSet};
-use std::marker::PhantomData;
 use std::hash::{BuildHasher, Hash};
+use std::marker::PhantomData;
 
-use serde::Serialize;
-use serde::de::{self, Deserializer, Visitor, DeserializeSeed, MapAccess, SeqAccess};
+use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
+use serde::Serialize;
 
 #[cfg(feature = "indexmap")]
 use indexmap::{IndexMap, IndexSet};
@@ -32,48 +32,71 @@ pub mod hack;
 /// The type must be [GcSafe], so that it can actually be allocated.
 pub trait GcDeserialize<'gc, 'de, Id: CollectorId>: GcSafe<'gc, Id> + Sized {
     /// Deserialize the value given the specified context
-    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error>;
+    fn deserialize_gc<D: Deserializer<'de>>(
+        ctx: &'gc Id::Context,
+        deserializer: D,
+    ) -> Result<Self, D::Error>;
 }
 
 /// A garbage collected type that can be deserialized without borrowing any data.
 ///
 /// [GcDeserialize] is to [`serde::de::Deserialize`]
-/// as [GcDeserializeOwned] is to [`serde::de::DeserializeOwned`] 
+/// as [GcDeserializeOwned] is to [`serde::de::DeserializeOwned`]
 pub trait GcDeserializeOwned<'gc, Id: CollectorId>: for<'de> GcDeserialize<'gc, 'de, Id> {}
 impl<'gc, Id, T> GcDeserializeOwned<'gc, Id> for T
-    where Id: CollectorId, T: for<'de> GcDeserialize<'gc, 'de, Id> {}
+where
+    Id: CollectorId,
+    T: for<'de> GcDeserialize<'gc, 'de, Id>,
+{
+}
 
-impl<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserialize<'gc, 'de, Id> for Gc<'gc, T, Id>
-    where Id::Context: GcSimpleAlloc {
+impl<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserialize<'gc, 'de, Id>
+    for Gc<'gc, T, Id>
+where
+    Id::Context: GcSimpleAlloc,
+{
     #[inline]
-    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize_gc<D: Deserializer<'de>>(
+        ctx: &'gc Id::Context,
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
         Ok(ctx.alloc(T::deserialize_gc(ctx, deserializer)?))
     }
 }
 
-
-impl<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserialize<'gc, 'de, Id> for GcArray<'gc, T, Id>
-    where Id::Context: GcSimpleAlloc {
-    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error> {
-        Ok(ctx.alloc_array_from_vec(
-            Vec::<T>::deserialize_gc(ctx, deserializer)?
-        ))
+impl<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserialize<'gc, 'de, Id>
+    for GcArray<'gc, T, Id>
+where
+    Id::Context: GcSimpleAlloc,
+{
+    fn deserialize_gc<D: Deserializer<'de>>(
+        ctx: &'gc Id::Context,
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
+        Ok(ctx.alloc_array_from_vec(Vec::<T>::deserialize_gc(ctx, deserializer)?))
     }
 }
 
-
 impl<'gc, 'de, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for GcString<'gc, Id>
-    where Id::Context: GcSimpleAlloc {
-    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error> {
+where
+    Id::Context: GcSimpleAlloc,
+{
+    fn deserialize_gc<D: Deserializer<'de>>(
+        ctx: &'gc Id::Context,
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
         struct GcStrVisitor<'gc, A: GcSimpleAlloc> {
-            ctx: &'gc A
+            ctx: &'gc A,
         }
         impl<'de, 'gc, A: GcSimpleAlloc> de::Visitor<'de> for GcStrVisitor<'gc, A> {
             type Value = GcString<'gc, A::Id>;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 f.write_str("a string")
             }
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> where E: de::Error, {
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
                 Ok(self.ctx.alloc_str(v))
             }
         }
@@ -82,15 +105,19 @@ impl<'gc, 'de, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for GcString<'gc, Id
 }
 
 impl<'gc, T: Serialize, Id: CollectorId> Serialize for Gc<'gc, T, Id> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>  where
-        S: serde::Serializer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         self.value().serialize(serializer)
     }
 }
 
 impl<'gc, T: Serialize, Id: CollectorId> Serialize for GcArray<'gc, T, Id> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>  where
-        S: serde::Serializer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         let mut seq = serializer.serialize_seq(Some(self.len()))?;
         for val in self.as_slice().iter() {
             seq.serialize_element(val)?;
@@ -99,47 +126,61 @@ impl<'gc, T: Serialize, Id: CollectorId> Serialize for GcArray<'gc, T, Id> {
     }
 }
 
-
 impl<'gc, Id: CollectorId> Serialize for GcString<'gc, Id> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>  where
-        S: serde::Serializer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         serializer.serialize_str(self.as_str())
     }
 }
 
 impl<'gc, 'de, T, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for PhantomData<T> {
-    fn deserialize_gc<D: Deserializer<'de>>(_ctx: &'gc Id::Context, _deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize_gc<D: Deserializer<'de>>(
+        _ctx: &'gc Id::Context,
+        _deserializer: D,
+    ) -> Result<Self, D::Error> {
         Ok(PhantomData)
     }
 }
 
 impl<T: Serialize + Trace + Copy> Serialize for GcCell<T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>  where
-        S: serde::Serializer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         self.get().serialize(serializer)
     }
 }
 
 impl<'gc, 'de, T, Id> GcDeserialize<'gc, 'de, Id> for GcCell<T>
-    where T: Copy + GcDeserialize<'gc, 'de, Id>, Id: CollectorId {
-    fn deserialize_gc<D: Deserializer<'de>>(ctx: &'gc Id::Context, deser: D) -> Result<Self, D::Error> {
+where
+    T: Copy + GcDeserialize<'gc, 'de, Id>,
+    Id: CollectorId,
+{
+    fn deserialize_gc<D: Deserializer<'de>>(
+        ctx: &'gc Id::Context,
+        deser: D,
+    ) -> Result<Self, D::Error> {
         Ok(GcCell::new(T::deserialize_gc(ctx, deser)?))
     }
 }
 
-
-
 impl<'gc, 'de, Id: CollectorId> GcDeserialize<'gc, 'de, Id> for () {
-    fn deserialize_gc<D: Deserializer<'de>>(_ctx: &'gc Id::Context, deserializer: D) -> Result<Self, D::Error> {
-
+    fn deserialize_gc<D: Deserializer<'de>>(
+        _ctx: &'gc Id::Context,
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
         struct UnitVisitor;
         impl<'de> Visitor<'de> for UnitVisitor {
             type Value = ();
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str("a unit tuple")
             }
-            fn visit_unit<E>(self) -> Result<Self::Value, E> where
-                    E: de::Error, {
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
                 Ok(())
             }
         }
@@ -165,23 +206,30 @@ macro_rules! impl_delegating_deserialize {
     };
 }
 
-
 /// An implementation of [serde::de::DeserializeSeed] that wraps [GcDeserialize]
 pub struct GcDeserializeSeed<'gc, 'de, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> {
     context: &'gc Id::Context,
-    marker: PhantomData<fn(&'de ()) -> T>
+    marker: PhantomData<fn(&'de ()) -> T>,
 }
 impl<'de, 'gc, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> GcDeserializeSeed<'gc, 'de, Id, T> {
     /// Create a new wrapper for the specified context
     #[inline]
     pub fn new(context: &'gc Id::Context) -> Self {
-        GcDeserializeSeed { context, marker: PhantomData }
+        GcDeserializeSeed {
+            context,
+            marker: PhantomData,
+        }
     }
 }
-impl<'de, 'gc, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> DeserializeSeed<'de> for GcDeserializeSeed<'gc, 'de, Id, T> {
+impl<'de, 'gc, Id: CollectorId, T: GcDeserialize<'gc, 'de, Id>> DeserializeSeed<'de>
+    for GcDeserializeSeed<'gc, 'de, Id, T>
+{
     type Value = T;
 
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error> where D: Deserializer<'de> {
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
         T::deserialize_gc(self.context, deserializer)
     }
 }
@@ -282,7 +330,6 @@ macro_rules! impl_for_set {
     };
 }
 
-
 impl_for_map!(HashMap<K, V, S> where K: TraceImmutable, S: 'static);
 impl_for_set!(HashSet<T, S> where T: TraceImmutable, S: 'static);
 #[cfg(feature = "indexmap")]
@@ -292,8 +339,8 @@ impl_for_set!(IndexSet<T, S> where T: TraceImmutable, S: 'static);
 
 #[cfg(test)]
 mod test {
-    use crate::epsilon::{EpsilonSystem, EpsilonCollectorId};
     use super::*;
+    use crate::epsilon::{EpsilonCollectorId, EpsilonSystem};
     #[test]
     #[cfg(feature = "indexmap")]
     fn indexmap() {
@@ -303,7 +350,10 @@ mod test {
         let mut deser = serde_json::Deserializer::from_str(INPUT);
         let s = |s: &'static str| String::from(s);
         assert_eq!(
-            <IndexMap<String, Gc<String, EpsilonCollectorId>> as GcDeserialize<EpsilonCollectorId>>::deserialize_gc(&ctx, &mut deser).unwrap(),
+            <IndexMap<String, Gc<String, EpsilonCollectorId>> as GcDeserialize<
+                EpsilonCollectorId,
+            >>::deserialize_gc(&ctx, &mut deser)
+            .unwrap(),
             indexmap::indexmap!(
                 s("foo") => ctx.alloc(s("bar")),
                 s("eats") => ctx.alloc(s("turds"))
@@ -324,7 +374,10 @@ mod test {
         let ctx = system.new_context();
         let mut deser = serde_json::Deserializer::from_str(r#"128"#);
         assert_eq!(
-            <Gc<i32, EpsilonCollectorId> as GcDeserialize<EpsilonCollectorId>>::deserialize_gc(&ctx, &mut deser).unwrap(),
+            <Gc<i32, EpsilonCollectorId> as GcDeserialize<EpsilonCollectorId>>::deserialize_gc(
+                &ctx, &mut deser
+            )
+            .unwrap(),
             ctx.alloc(128)
         );
     }

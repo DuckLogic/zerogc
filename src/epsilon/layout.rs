@@ -1,11 +1,11 @@
+use std::alloc::Layout;
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-use std::alloc::Layout;
-use std::cell::Cell;
 
-use crate::{GcRebrand, GcSafe, GcSimpleAlloc, GcArray};
-use crate::vec::raw::{IGcVec, GcRawVec};
+use crate::vec::raw::{GcRawVec, IGcVec};
+use crate::{GcArray, GcRebrand, GcSafe, GcSimpleAlloc};
 
 use super::{EpsilonCollectorId, EpsilonContext};
 
@@ -18,7 +18,7 @@ pub struct EpsilonHeader {
     /// This object's `TypeInfo`, or `None` if it doesn't need any.
     pub type_info: &'static TypeInfo,
     /// The next allocated object, or `None` if this is the final object.
-    pub next: Option<NonNull<EpsilonHeader>>
+    pub next: Option<NonNull<EpsilonHeader>>,
 }
 /*
  * We are Send + Sync because once we are allocated
@@ -36,7 +36,9 @@ impl EpsilonHeader {
     /// Undefined behavior if the object isn't allocated in the epsilon collector.
     #[inline]
     pub unsafe fn assume_header<T: ?Sized>(header: *const T) -> *const EpsilonHeader {
-        let (_, offset) = Self::LAYOUT.extend(Layout::for_value(&*header)).unwrap_unchecked();
+        let (_, offset) = Self::LAYOUT
+            .extend(Layout::for_value(&*header))
+            .unwrap_unchecked();
         (header as *const c_void).sub(offset).cast()
     }
     #[inline]
@@ -45,8 +47,7 @@ impl EpsilonHeader {
         let tp = self.type_info;
         match tp.layout {
             LayoutInfo::Fixed(fixed) => fixed,
-            LayoutInfo::Array { element_layout } |
-            LayoutInfo::Vec { element_layout } => {
+            LayoutInfo::Array { element_layout } | LayoutInfo::Vec { element_layout } => {
                 let array_header = EpsilonArrayHeader::from_common_header(self);
                 let len = (*array_header).len;
                 element_layout.repeat(len).unwrap_unchecked().0
@@ -80,20 +81,24 @@ pub enum LayoutInfo {
     Fixed(Layout),
     /// A variable sized array
     Array {
-        element_layout: Layout
+        element_layout: Layout,
     },
     /// A variable sized vector
     Vec {
-        element_layout: Layout
-    }
+        element_layout: Layout,
+    },
 }
 impl LayoutInfo {
     #[inline]
     pub const fn align(&self) -> usize {
         match *self {
-            LayoutInfo::Fixed(layout) |
-            LayoutInfo::Array { element_layout: layout } |
-            LayoutInfo::Vec { element_layout: layout }  => layout.align()
+            LayoutInfo::Fixed(layout)
+            | LayoutInfo::Array {
+                element_layout: layout,
+            }
+            | LayoutInfo::Vec {
+                element_layout: layout,
+            } => layout.align(),
         }
     }
     #[inline]
@@ -101,21 +106,20 @@ impl LayoutInfo {
         match *self {
             LayoutInfo::Fixed(_) => 0,
             LayoutInfo::Array { .. } => EpsilonArrayHeader::COMMON_OFFSET,
-            LayoutInfo::Vec { .. } => EpsilonVecHeader::COMMON_OFFSET
+            LayoutInfo::Vec { .. } => EpsilonVecHeader::COMMON_OFFSET,
         }
     }
 }
 pub struct TypeInfo {
     /// The function to drop this object, or `None` if the object doesn't need to be dropped
     pub drop_func: Option<unsafe fn(*mut c_void)>,
-    pub layout: LayoutInfo
+    pub layout: LayoutInfo,
 }
 impl TypeInfo {
     #[inline]
     pub const fn may_ignore(&self) -> bool {
         // NOTE: We don't care about `size`
-        self.drop_func.is_none() &&
-            self.layout.align() <= std::mem::align_of::<usize>()
+        self.drop_func.is_none() && self.layout.align() <= std::mem::align_of::<usize>()
     }
     #[inline]
     pub const fn of<T>() -> &'static TypeInfo {
@@ -138,7 +142,11 @@ trait StaticTypeInfo {
 impl<T> StaticTypeInfo for T {
     const TYPE_INFO: &'static TypeInfo = &TypeInfo {
         drop_func: if std::mem::needs_drop::<T>() {
-            Some(unsafe { std::mem::transmute::<unsafe fn(*mut T), unsafe fn(*mut c_void)>(std::ptr::drop_in_place::<T>) })
+            Some(unsafe {
+                std::mem::transmute::<unsafe fn(*mut T), unsafe fn(*mut c_void)>(
+                    std::ptr::drop_in_place::<T>,
+                )
+            })
         } else {
             None
         },
@@ -151,30 +159,31 @@ impl<T> StaticTypeInfo for T {
             None
         },
         layout: LayoutInfo::Vec {
-            element_layout: Layout::new::<T>()
-        }
+            element_layout: Layout::new::<T>(),
+        },
     });
 }
 impl<T> StaticTypeInfo for [T] {
     const TYPE_INFO: &'static TypeInfo = &TypeInfo {
         drop_func: if std::mem::needs_drop::<T>() {
             Some(drop_array::<T>)
-        } else { None },
+        } else {
+            None
+        },
         layout: LayoutInfo::Array {
-            element_layout: Layout::new::<T>()
-        }
+            element_layout: Layout::new::<T>(),
+        },
     };
     const VEC_INFO: &'static Option<TypeInfo> = &None;
 }
 /// Drop an array or vector of the specified type
 unsafe fn drop_array<T>(ptr: *mut c_void) {
-    let header = EpsilonArrayHeader::from_common_header(
-        EpsilonHeader::assume_header(ptr as *const _ as *const T)
-    );
+    let header = EpsilonArrayHeader::from_common_header(EpsilonHeader::assume_header(
+        ptr as *const _ as *const T,
+    ));
     let len = (*header).len;
     std::ptr::drop_in_place(std::ptr::slice_from_raw_parts_mut(ptr as *mut T, len));
 }
-
 
 /// The raw representation of a vector in the "epsilon" collector
 /*
@@ -183,7 +192,7 @@ unsafe fn drop_array<T>(ptr: *mut c_void) {
 pub struct EpsilonRawVec<'gc, T> {
     header: NonNull<EpsilonVecHeader>,
     context: &'gc EpsilonContext,
-    marker: PhantomData<crate::Gc<'gc, [T], EpsilonCollectorId>>
+    marker: PhantomData<crate::Gc<'gc, [T], EpsilonCollectorId>>,
 }
 impl<'gc, T> Copy for EpsilonRawVec<'gc, T> {}
 impl<'gc, T> Clone for EpsilonRawVec<'gc, T> {
@@ -194,12 +203,14 @@ impl<'gc, T> Clone for EpsilonRawVec<'gc, T> {
 }
 impl<'gc, T> EpsilonRawVec<'gc, T> {
     #[inline]
-    pub(in super) unsafe fn from_raw_parts(
+    pub(super) unsafe fn from_raw_parts(
         header: NonNull<EpsilonVecHeader>,
-        context: &'gc EpsilonContext
+        context: &'gc EpsilonContext,
     ) -> Self {
         EpsilonRawVec {
-            header, context, marker: PhantomData
+            header,
+            context,
+            marker: PhantomData,
         }
     }
     #[inline]
@@ -233,7 +244,8 @@ unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> GcRawVec<'gc, T> for Epsilo
         GcArray::from_raw_ptr(NonNull::new_unchecked(self.as_mut_ptr()), self.len())
     }
     pub fn iter(&self) -> zerogc::vec::raw::RawVecIter<'gc, T, Self>
-        where T: Copy;
+    where
+        T: Copy;
 }
 #[inherent::inherent]
 unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> IGcVec<'gc, T> for EpsilonRawVec<'gc, T> {
@@ -246,9 +258,7 @@ unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> IGcVec<'gc, T> for EpsilonR
 
     #[inline]
     pub fn len(&self) -> usize {
-        unsafe {
-            (*self.header()).len.get()
-        }
+        unsafe { (*self.header()).len.get() }
     }
 
     #[inline]
@@ -262,15 +272,17 @@ unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> IGcVec<'gc, T> for EpsilonR
     }
 
     #[inline]
-    pub fn reserve_in_place(&mut self, _additional: usize) -> Result<(), crate::vec::raw::ReallocFailedError> {
+    pub fn reserve_in_place(
+        &mut self,
+        _additional: usize,
+    ) -> Result<(), crate::vec::raw::ReallocFailedError> {
         Err(crate::vec::raw::ReallocFailedError::Unsupported)
     }
 
     #[inline]
     pub unsafe fn as_ptr(&self) -> *const T {
         const LAYOUT: Layout = Layout::new::<EpsilonVecHeader>();
-        let offset = LAYOUT.size() + 
-            LAYOUT.padding_needed_for(core::mem::align_of::<T>());
+        let offset = LAYOUT.size() + LAYOUT.padding_needed_for(core::mem::align_of::<T>());
         (self.header() as *const u8).add(offset) as *const T
     }
 
@@ -284,7 +296,8 @@ unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> IGcVec<'gc, T> for EpsilonR
     pub fn replace(&mut self, index: usize, val: T) -> T;
     pub fn set(&mut self, index: usize, val: T);
     pub fn extend_from_slice(&mut self, src: &[T])
-        where T: Copy;
+    where
+        T: Copy;
     pub fn push(&mut self, val: T);
     pub fn pop(&mut self) -> Option<T>;
     pub fn swap_remove(&mut self, index: usize) -> T;
@@ -292,15 +305,17 @@ unsafe impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> IGcVec<'gc, T> for EpsilonR
     pub fn is_empty(&self) -> bool;
     pub fn new_in(ctx: &'gc EpsilonContext) -> Self;
     pub fn copy_from_slice(src: &[T], ctx: &'gc EpsilonContext) -> Self
-        where T: Copy;
+    where
+        T: Copy;
     pub fn from_vec(src: Vec<T>, ctx: &'gc EpsilonContext) -> Self;
     pub fn get(&mut self, index: usize) -> Option<T>
-        where T: Copy;
+    where
+        T: Copy;
     pub unsafe fn as_slice_unchecked(&self) -> &[T];
 }
 impl<'gc, T: GcSafe<'gc, EpsilonCollectorId>> Extend<T> for EpsilonRawVec<'gc, T> {
     #[inline]
-    fn extend<E: IntoIterator<Item=T>>(&mut self, iter: E) {
+    fn extend<E: IntoIterator<Item = T>>(&mut self, iter: E) {
         let iter = iter.into_iter();
         self.reserve(iter.size_hint().1.unwrap_or(0));
         for val in iter {

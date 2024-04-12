@@ -1,10 +1,10 @@
 //! Utilities for the context library
 //!
 //! Also used by some collector implementations.
-use core::fmt::{self, Debug, Formatter, Display};
-use core::mem;
 #[cfg(not(feature = "sync"))]
 use core::cell::Cell;
+use core::fmt::{self, Debug, Display, Formatter};
+use core::mem;
 
 /// Get the offset of the specified field within a structure
 #[macro_export]
@@ -18,7 +18,6 @@ macro_rules! field_offset {
         OFFSET
     }};
 }
-
 
 /// Transmute between two types,
 /// without verifying that there sizes are the same
@@ -56,7 +55,9 @@ impl<T: Copy> AtomicCell<T> {
         self.0.get()
     }
     pub fn compare_exchange(&self, expected: T, updated: T) -> Result<T, T>
-        where T: PartialEq {
+    where
+        T: PartialEq,
+    {
         let existing = self.0.get();
         if existing == expected {
             self.0.set(updated);
@@ -74,8 +75,8 @@ pub enum ThreadId {
     #[cfg(feature = "std")]
     Enabled {
         id: std::thread::ThreadId,
-        name: Option<String>
-    }
+        name: Option<String>,
+    },
 }
 impl ThreadId {
     #[cfg(feature = "std")]
@@ -84,7 +85,7 @@ impl ThreadId {
         let thread = std::thread::current();
         ThreadId::Enabled {
             id: thread.id(),
-            name: thread.name().map(String::from)
+            name: thread.name().map(String::from),
         }
     }
     #[cfg(not(feature = "std"))]
@@ -96,33 +97,27 @@ impl ThreadId {
 impl slog::Value for ThreadId {
     #[cfg(not(feature = "std"))]
     fn serialize(
-        &self, _record: &slog::Record,
+        &self,
+        _record: &slog::Record,
         _key: &'static str,
-        _serializer: &mut dyn slog::Serializer
+        _serializer: &mut dyn slog::Serializer,
     ) -> slog::Result<()> {
         Ok(()) // Nop
     }
     #[cfg(feature = "std")]
     fn serialize(
-        &self, _record: &slog::Record,
+        &self,
+        _record: &slog::Record,
         key: &'static str,
-        serializer: &mut dyn slog::Serializer
+        serializer: &mut dyn slog::Serializer,
     ) -> slog::Result<()> {
         let (id, name) = match *self {
             ThreadId::Nop => return Ok(()),
-            ThreadId::Enabled { ref id, ref name } => (id, name)
+            ThreadId::Enabled { ref id, ref name } => (id, name),
         };
         match *name {
-            Some(ref name) => {
-                serializer.emit_arguments(key, &format_args!(
-                    "{}: {:?}", *name, id
-                ))
-            },
-            None => {
-                serializer.emit_arguments(key, &format_args!(
-                    "{:?}", id
-                ))
-            },
+            Some(ref name) => serializer.emit_arguments(key, &format_args!("{}: {:?}", *name, id)),
+            None => serializer.emit_arguments(key, &format_args!("{:?}", id)),
         }
     }
 }
@@ -133,21 +128,19 @@ impl Debug for ThreadId {
             #[cfg(feature = "std")]
             ThreadId::Enabled { id, name: None } => {
                 write!(f, "{:?}", id)
-            },
-            #[cfg(feature = "std")]
-            ThreadId::Enabled { id, name: Some(ref name) } => {
-                f.debug_tuple("ThreadId")
-                    .field(&id)
-                    .field(name)
-                    .finish()
             }
+            #[cfg(feature = "std")]
+            ThreadId::Enabled {
+                id,
+                name: Some(ref name),
+            } => f.debug_tuple("ThreadId").field(&id).field(name).finish(),
         }
     }
 }
 /// The size of memory in bytes
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct MemorySize {
-    pub bytes: usize
+    pub bytes: usize,
 }
 impl Display for MemorySize {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {

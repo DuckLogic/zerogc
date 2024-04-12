@@ -103,25 +103,25 @@
 //! It has been called the [stretchy vector problem](https://www.ravenbrook.com/project/mps/master/manual/html/guide/vector.html)
 //! by some. This is less of a problem for `zerogc`, because collections can only
 //! happen at explicit safepoints.
+use core::cell::UnsafeCell;
+use core::convert::{AsMut, AsRef};
+use core::fmt::{self, Debug, Formatter};
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
-use core::slice::SliceIndex;
-use core::convert::{AsRef, AsMut};
-use core::cell::UnsafeCell;
-use core::fmt::{self, Debug, Formatter};
 use core::ptr::NonNull;
+use core::slice::SliceIndex;
 
 use inherent::inherent;
-use zerogc_derive::{unsafe_gc_impl};
+use zerogc_derive::unsafe_gc_impl;
 
+use crate::vec::raw::ReallocFailedError;
 use crate::{CollectorId, GcRebrand, GcSafe, Trace};
-use crate::vec::raw::{ReallocFailedError};
 
 pub mod cell;
 pub mod raw;
 
-pub use self::raw::{IGcVec, GcRawVec};
 pub use self::cell::GcVecCell;
+pub use self::raw::{GcRawVec, IGcVec};
 
 /// A uniquely owned [Vec] for use with garbage collectors.
 ///
@@ -135,9 +135,12 @@ pub struct GcVec<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
      * NOTE: This must be `UnsafeCell`
      * so that we can implement `TraceImmutable`
      */
-    raw: UnsafeCell<Id::RawVec<'gc, T>>
+    raw: UnsafeCell<Id::RawVec<'gc, T>>,
 }
-unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> crate::ImplicitWriteBarrier for GcVec<'gc, T, Id> {}
+unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> crate::ImplicitWriteBarrier
+    for GcVec<'gc, T, Id>
+{
+}
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
     /// Create a [GcVec] from a [GcRawVec].
     ///
@@ -145,7 +148,9 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
     /// There must be no other references to the specified raw vector.
     #[inline]
     pub unsafe fn from_raw(raw: Id::RawVec<'gc, T>) -> Self {
-        GcVec { raw: UnsafeCell::new(raw) }
+        GcVec {
+            raw: UnsafeCell::new(raw),
+        }
     }
     /// Consume ownership of this vector, converting it into its corresponding [`GcArray`](`zerogc::array::GcArray`)
     ///
@@ -169,7 +174,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
     /// NOTE: The borrow is bound to the lifetime
     /// of this vector, and not `&'gc [T]`
     /// because of the possibility of calling `as_mut_slice`
-    /// 
+    ///
     /// ## Safety
     /// Because this vector is uniquely owned,
     /// its length cannot be mutated while it is still borrowed.
@@ -189,18 +194,13 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
     /// while another reference is in use (because there are no other references)
     #[inline]
     pub fn as_mut_slice(&mut self) -> &'_ mut [T] {
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                self.as_mut_raw().as_mut_ptr(),
-                self.len()
-            )
-        }
+        unsafe { core::slice::from_raw_parts_mut(self.as_mut_raw().as_mut_ptr(), self.len()) }
     }
     /// Get a reference to the underlying [GcRawVec](`zerogc::vec::raw::GcRawVec`),
     /// bypassing restrictions on unique ownership.
     ///
     /// ## Safety
-    /// It is undefined behavior to change the length of the 
+    /// It is undefined behavior to change the length of the
     /// raw vector while this vector is in use.
     #[inline]
     pub unsafe fn as_raw(&self) -> &Id::RawVec<'gc, T> {
@@ -220,7 +220,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
     pub unsafe fn as_mut_raw(&mut self) -> &mut Id::RawVec<'gc, T> {
         self.raw.get_mut()
     }
-    /// Iterate over the vector's contents. 
+    /// Iterate over the vector's contents.
     ///
     /// ## Safety
     /// This is safe for the same reason [GcVec::as_mut_slice] is.
@@ -229,7 +229,7 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
         self.as_slice().iter()
     }
 
-    /// Mutably iterate over the vector's contents. 
+    /// Mutably iterate over the vector's contents.
     ///
     /// ## Safety
     /// This is safe for the same reason [GcVec::as_mut_slice] is.
@@ -261,21 +261,20 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> GcVec<'gc, T, Id> {
          */
         unsafe {
             self.set_len(range.start);
-            let r = core::slice::from_raw_parts(
-                self.as_ptr().add(range.start),
-                range.len()
-            );
+            let r = core::slice::from_raw_parts(self.as_ptr().add(range.start), range.len());
             Drain {
                 tail_start: range.end,
                 tail_len: old_len - range.end,
                 iter: r.iter(),
-                vec: NonNull::from(self)
+                vec: NonNull::from(self),
             }
         }
     }
 }
 impl<'gc, T: GcSafe<'gc, Id>, I, Id: CollectorId> Index<I> for GcVec<'gc, T, Id>
-    where I: SliceIndex<[T]> {
+where
+    I: SliceIndex<[T]>,
+{
     type Output = I::Output;
     #[inline]
     fn index(&self, idx: I) -> &I::Output {
@@ -283,7 +282,9 @@ impl<'gc, T: GcSafe<'gc, Id>, I, Id: CollectorId> Index<I> for GcVec<'gc, T, Id>
     }
 }
 impl<'gc, T: GcSafe<'gc, Id>, I, Id: CollectorId> IndexMut<I> for GcVec<'gc, T, Id>
-    where I: SliceIndex<[T]> {
+where
+    I: SliceIndex<[T]>,
+{
     #[inline]
     fn index_mut(&mut self, index: I) -> &mut Self::Output {
         &mut self.as_mut_slice()[index]
@@ -309,11 +310,11 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> DerefMut for GcVec<'gc, T, Id> {
     }
 }
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Debug for GcVec<'gc, T, Id>
-    where T: Debug {
+where
+    T: Debug,
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_list()
-            .entries(self.iter())
-            .finish()
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> AsRef<[T]> for GcVec<'gc, T, Id> {
@@ -334,9 +335,7 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for GcVec<'
 
     #[inline]
     pub fn with_capacity_in(capacity: usize, ctx: &'gc Id::Context) -> Self {
-        unsafe {
-            Self::from_raw(Id::RawVec::<'gc, T>::with_capacity_in(capacity, ctx))
-        }
+        unsafe { Self::from_raw(Id::RawVec::<'gc, T>::with_capacity_in(capacity, ctx)) }
     }
 
     #[inline]
@@ -373,7 +372,8 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for GcVec<'
     pub fn replace(&mut self, index: usize, val: T) -> T;
     pub fn set(&mut self, index: usize, val: T);
     pub fn extend_from_slice(&mut self, src: &[T])
-        where T: Copy;
+    where
+        T: Copy;
     pub fn push(&mut self, val: T);
     pub fn pop(&mut self) -> Option<T>;
     pub fn swap_remove(&mut self, index: usize) -> T;
@@ -381,7 +381,8 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for GcVec<'
     pub fn is_empty(&self) -> bool;
     pub fn new_in(ctx: &'gc Id::Context) -> Self;
     pub fn copy_from_slice(src: &[T], ctx: &'gc Id::Context) -> Self
-        where T: Copy;
+    where
+        T: Copy;
     pub fn from_vec(src: Vec<T>, ctx: &'gc Id::Context) -> Self;
 
     /*
@@ -413,7 +414,11 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IntoIterator for GcVec<'gc, T, Id
             let start = self.as_ptr();
             let end = start.add(len);
             self.set_len(0);
-            IntoIter { start, end, marker: PhantomData }
+            IntoIter {
+                start,
+                end,
+                marker: PhantomData,
+            }
         }
     }
 }
@@ -429,7 +434,9 @@ pub struct Drain<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
 }
 impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Drain<'a, 'gc, T, Id> {
     unsafe fn cleanup(&mut self) {
-        if self.tail_len == 0 { return }
+        if self.tail_len == 0 {
+            return;
+        }
         /*
          * Copy `tail` back to vec.
          */
@@ -437,7 +444,8 @@ impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Drain<'a, 'gc, T, Id> {
         let old_len = v.len();
         debug_assert!(old_len <= self.tail_start);
         if old_len != self.tail_start {
-            v.as_ptr().add(self.tail_start)
+            v.as_ptr()
+                .add(self.tail_start)
                 .copy_to(v.as_mut_ptr().add(old_len), self.tail_len);
         }
         v.set_len(old_len + self.tail_len);
@@ -459,7 +467,9 @@ impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Drop for Drain<'a, 'gc, T, Id
     fn drop(&mut self) {
         while let Some(val) = self.iter.next() {
             let _guard = scopeguard::guard(&mut *self, |s| unsafe { s.cleanup() });
-            unsafe { core::ptr::drop_in_place(val as *const T as *mut T); }
+            unsafe {
+                core::ptr::drop_in_place(val as *const T as *mut T);
+            }
             core::mem::forget(_guard);
         }
         unsafe { self.cleanup() };
@@ -471,14 +481,20 @@ impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> DoubleEndedIterator for Drain
         self.iter.next_back().map(|e| unsafe { core::ptr::read(e) })
     }
 }
-impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::ExactSizeIterator for Drain<'a, 'gc, T, Id> {}
-impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::FusedIterator for Drain<'a, 'gc, T, Id> {}
+impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::ExactSizeIterator
+    for Drain<'a, 'gc, T, Id>
+{
+}
+impl<'a, 'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::FusedIterator
+    for Drain<'a, 'gc, T, Id>
+{
+}
 
 /// The [GcVec] analogue of [std::vec::IntoIter]
 pub struct IntoIter<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> {
     start: *const T,
     end: *const T,
-    marker: PhantomData<GcVec<'gc, T, Id>>
+    marker: PhantomData<GcVec<'gc, T, Id>>,
 }
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Iterator for IntoIter<'gc, T, Id> {
     type Item = T;
@@ -513,7 +529,10 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> DoubleEndedIterator for IntoIter<
         }
     }
 }
-impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::ExactSizeIterator for IntoIter<'gc, T, Id> {}
+impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::ExactSizeIterator
+    for IntoIter<'gc, T, Id>
+{
+}
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> core::iter::FusedIterator for IntoIter<'gc, T, Id> {}
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Drop for IntoIter<'gc, T, Id> {
     fn drop(&mut self) {

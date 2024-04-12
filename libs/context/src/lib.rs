@@ -16,13 +16,13 @@
  * 1. `Box` for each handle
  * 2. `Vec` for listing buckets of handles
  * 3. `Arc` and `Box` for boxing context state
- * 
+ *
  * TODO: Should we drop these uses entirely?
  */
 extern crate alloc;
 
-use core::mem::ManuallyDrop;
 use core::fmt::{self, Debug, Formatter};
+use core::mem::ManuallyDrop;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -36,9 +36,9 @@ pub mod utils;
 pub mod collector;
 pub mod handle;
 
-use crate::collector::{RawCollectorImpl};
+use crate::collector::RawCollectorImpl;
 
-pub use crate::collector::{WeakCollectorRef, CollectorRef, CollectorId};
+pub use crate::collector::{CollectorId, CollectorRef, WeakCollectorRef};
 pub use crate::state::{CollectionManager, RawContext};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -62,7 +62,7 @@ pub enum ContextState {
     /// the actual set of thread roots.
     SafePoint {
         /// The id of the collection we are waiting for
-        collection_id: u64
+        collection_id: u64,
     },
     /// The context is frozen.
     /// Allocation or mutation can't happen
@@ -74,7 +74,8 @@ pub enum ContextState {
     /// Because no allocation or mutation can happen,
     /// its shadow_stack stack is guarenteed to
     /// accurately reflect the roots of the context.
-    #[cfg_attr(not(feature = "sync"), allow(unused))] // TODO: Implement frozen for simple contexts?
+    #[cfg_attr(not(feature = "sync"), allow(unused))]
+    // TODO: Implement frozen for simple contexts?
     Frozen,
 }
 impl ContextState {
@@ -115,14 +116,14 @@ pub struct CollectorContext<C: RawCollectorImpl> {
     ///
     /// Only the root actually owns the `Arc`
     /// and is responsible for dropping it
-    root: bool
+    root: bool,
 }
 impl<C: RawCollectorImpl> CollectorContext<C> {
     pub(crate) unsafe fn register_root(collector: &CollectorRef<C>) -> Self {
         CollectorContext {
-            raw: Box::into_raw(ManuallyDrop::into_inner(
-                C::RawContext::register_new(collector)
-            )),
+            raw: Box::into_raw(ManuallyDrop::into_inner(C::RawContext::register_new(
+                collector,
+            ))),
             root: true, // We are responsible for unregistering
         }
     }
@@ -132,19 +133,18 @@ impl<C: RawCollectorImpl> CollectorContext<C> {
     }
     #[inline(always)]
     unsafe fn with_shadow_stack<R, T: Trace>(
-        &self, value: *mut &mut T, func: impl FnOnce() -> R
+        &self,
+        value: *mut &mut T,
+        func: impl FnOnce() -> R,
     ) -> R {
         let old_link = (*(*self.raw).shadow_stack_ptr()).last;
         let new_link = ShadowStackLink {
             element: C::as_dyn_trace_pointer(value),
-            prev: old_link
+            prev: old_link,
         };
         (*(*self.raw).shadow_stack_ptr()).last = &new_link;
         let result = func();
-        debug_assert_eq!(
-            (*(*self.raw).shadow_stack_ptr()).last,
-            &new_link
-        );
+        debug_assert_eq!((*(*self.raw).shadow_stack_ptr()).last, &new_link);
         (*(*self.raw).shadow_stack_ptr()).last = new_link.prev;
         result
     }
@@ -183,12 +183,18 @@ unsafe impl<C: RawCollectorImpl> GcContext for CollectorContext<C> {
     }
 
     unsafe fn unfreeze(&mut self) {
-        (*self.raw).collector().manager().unfreeze_context(&*self.raw);
+        (*self.raw)
+            .collector()
+            .manager()
+            .unfreeze_context(&*self.raw);
     }
 
     #[inline]
     unsafe fn recurse_context<T, F, R>(&self, value: &mut &mut T, func: F) -> R
-        where T: Trace, F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R {
+    where
+        T: Trace,
+        F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R,
+    {
         debug_assert_eq!((*self.raw).state(), ContextState::Active);
         self.with_shadow_stack(value, || {
             let mut sub_context = ManuallyDrop::new(CollectorContext {
@@ -198,7 +204,7 @@ unsafe impl<C: RawCollectorImpl> GcContext for CollectorContext<C> {
                  * the closure.
                  */
                 raw: self.raw,
-                root: false /* don't drop our pointer!!! */
+                root: false, /* don't drop our pointer!!! */
             });
             let result = func(&mut *sub_context, value);
             debug_assert!(!sub_context.root);
@@ -239,7 +245,7 @@ pub(crate) struct ShadowStackLink<T> {
     pub element: T,
     /// The previous link in the chain,
     /// or NULL if there isn't any
-    pub prev: *const ShadowStackLink<T>
+    pub prev: *const ShadowStackLink<T>,
 }
 
 impl<C: RawCollectorImpl> Debug for ShadowStack<C> {
@@ -253,7 +259,7 @@ impl<C: RawCollectorImpl> Debug for ShadowStack<C> {
 pub struct ShadowStack<C: RawCollectorImpl> {
     /// The last element in the shadow stack,
     /// or NULL if it's empty
-    pub(crate) last: *const ShadowStackLink<C::DynTracePtr>
+    pub(crate) last: *const ShadowStackLink<C::DynTracePtr>,
 }
 impl<C: RawCollectorImpl> ShadowStack<C> {
     unsafe fn as_vec(&self) -> Vec<C::DynTracePtr> {
@@ -262,10 +268,8 @@ impl<C: RawCollectorImpl> ShadowStack<C> {
         result
     }
     #[inline]
-    pub unsafe fn reverse_iter(&self) -> impl Iterator<Item=C::DynTracePtr> + '_ {
-        core::iter::successors(
-            self.last.as_ref(),
-            |link| link.prev.as_ref()
-        ).map(|link| link.element)
+    pub unsafe fn reverse_iter(&self) -> impl Iterator<Item = C::DynTracePtr> + '_ {
+        core::iter::successors(self.last.as_ref(), |link| link.prev.as_ref())
+            .map(|link| link.element)
     }
 }

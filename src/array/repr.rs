@@ -8,11 +8,11 @@
 #![allow(
     clippy::len_without_is_empty, // This is really an internal interface...
 )]
+use core::ffi::c_void;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
-use core::ffi::c_void;
 
-use crate::{CollectorId};
+use crate::CollectorId;
 
 /// The type of [GcArrayPtr] impl
 #[derive(Copy, Clone, Debug)]
@@ -20,7 +20,7 @@ pub enum ArrayPtrKind {
     /// A `FatArrayRepr`, which can be transmuted <-> to `&[T]`
     Fat,
     /// A `ThinArrayRepr`, which can be transmuted <-> to `NonNull<T>`
-    Thin
+    Thin,
 }
 
 /// The raw, untyped representation of a GcArray pointer.
@@ -63,7 +63,7 @@ pub unsafe trait GcArrayPtr: Copy + sealed::Sealed {
     /// This is the garbage collected equivalent of [std::slice::from_raw_parts]
     ///
     /// ## Safety
-    /// The combination of pointer + length must be valid. 
+    /// The combination of pointer + length must be valid.
     ///
     /// The pointer must be the correct type (the details are erased at runtime).
     unsafe fn from_raw_parts<T>(ptr: NonNull<T>, len: usize) -> Self;
@@ -75,7 +75,7 @@ pub unsafe trait GcArrayPtr: Copy + sealed::Sealed {
     /// or `None` if it's not stored in the pointer (it's a thin pointer).
     ///
     /// If this type is a fat pointer it will return
-    /// `Some`. 
+    /// `Some`.
     /// If this is a thin pointer, then it must return `None`.
     ///
     /// NOTE: Despite the fact that `as_raw_ptr` returns `c_void`,
@@ -98,7 +98,7 @@ pub struct FatArrayPtr<Id: CollectorId> {
     ///
     /// It is (probably) an under-estimation
     slice: NonNull<[c_void]>,
-    marker: PhantomData<Id>
+    marker: PhantomData<Id>,
 }
 impl<Id: CollectorId> self::sealed::Sealed for FatArrayPtr<Id> {}
 impl<Id: CollectorId> FatArrayPtr<Id> {
@@ -123,12 +123,11 @@ unsafe impl<Id: CollectorId> GcArrayPtr for FatArrayPtr<Id> {
     #[inline]
     unsafe fn from_raw_parts<T>(ptr: NonNull<T>, len: usize) -> Self {
         FatArrayPtr {
-            slice: NonNull::new_unchecked(
-                core::ptr::slice_from_raw_parts(
-                    ptr.as_ptr() as *const T, len
-                ) as *mut [T] as *mut [c_void]
-            ),
-            marker: PhantomData
+            slice: NonNull::new_unchecked(core::ptr::slice_from_raw_parts(
+                ptr.as_ptr() as *const T,
+                len,
+            ) as *mut [T] as *mut [c_void]),
+            marker: PhantomData,
         }
     }
 
@@ -153,7 +152,7 @@ unsafe impl<Id: CollectorId> GcArrayPtr for FatArrayPtr<Id> {
 #[repr(transparent)]
 pub struct ThinArrayPtr<Id: CollectorId> {
     elements: NonNull<c_void>,
-    marker: PhantomData<Id>
+    marker: PhantomData<Id>,
 }
 impl<Id: CollectorId> Copy for ThinArrayPtr<Id> {}
 impl<Id: CollectorId> Clone for ThinArrayPtr<Id> {
@@ -168,7 +167,10 @@ unsafe impl<Id: CollectorId> GcArrayPtr for ThinArrayPtr<Id> {
     const UNCHECKED_KIND: ArrayPtrKind = ArrayPtrKind::Thin;
     #[inline]
     unsafe fn from_raw_parts<T>(ptr: NonNull<T>, _len: usize) -> Self {
-        ThinArrayPtr { elements: ptr.cast(), marker: PhantomData }
+        ThinArrayPtr {
+            elements: ptr.cast(),
+            marker: PhantomData,
+        }
     }
     #[inline]
     fn as_raw_ptr(&self) -> *mut c_void {
@@ -179,7 +181,6 @@ unsafe impl<Id: CollectorId> GcArrayPtr for ThinArrayPtr<Id> {
         None
     }
 }
-
 
 mod sealed {
     pub trait Sealed {}

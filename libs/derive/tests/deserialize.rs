@@ -2,21 +2,21 @@ use std::marker::PhantomData;
 
 use zerogc_derive::{GcDeserialize, NullTrace, Trace};
 
-use zerogc::SimpleAllocCollectorId;
-use zerogc::prelude::*;
-use zerogc::epsilon::{EpsilonCollectorId};
 use serde::Deserialize;
+use zerogc::epsilon::EpsilonCollectorId;
+use zerogc::prelude::*;
+use zerogc::SimpleAllocCollectorId;
 
 #[derive(Trace, GcDeserialize)]
 #[zerogc(collector_ids(EpsilonCollectorId))]
 struct BasicDeserialize<'gc> {
-    test: Gc<'gc, String, EpsilonCollectorId>
+    test: Gc<'gc, String, EpsilonCollectorId>,
 }
 
 #[derive(Trace, GcDeserialize)]
 #[zerogc(collector_ids(Id))]
 struct DeserializeParameterized<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> {
-    test: Gc<'gc, Vec<T>, Id>
+    test: Gc<'gc, Vec<T>, Id>,
 }
 
 #[derive(NullTrace, GcDeserialize, Deserialize)]
@@ -28,7 +28,6 @@ struct DelegatingDeserialize {
     doesnt: DoesntImplGcDeserialize,
 }
 
-
 #[derive(Trace, GcDeserialize)]
 #[allow(unused)]
 #[zerogc(collector_ids(Id))]
@@ -39,20 +38,20 @@ struct DeserializeWith<'gc, Id: CollectorId> {
     #[zerogc(serde(deserialize_with = "but_its_a_unit", bound(deserialize = "")))]
     doesnt_deser_at_all: DoesntDeserAtAll,
     marker: PhantomData<&'gc Id>,
-    deser: Gc<'gc, String, Id>
+    deser: Gc<'gc, String, Id>,
 }
 
 #[derive(NullTrace, serde::Deserialize)]
 #[allow(unused)]
 struct DoesntImplGcDeserialize {
-    foo: String
+    foo: String,
 }
 
-fn but_its_a_unit<'de, D: serde::Deserializer<'de>>(_deser: D) -> Result<DoesntDeserAtAll, D::Error> {
+fn but_its_a_unit<'de, D: serde::Deserializer<'de>>(
+    _deser: D,
+) -> Result<DoesntDeserAtAll, D::Error> {
     Ok(DoesntDeserAtAll {})
 }
 
 #[derive(NullTrace)]
-struct DoesntDeserAtAll {
-
-}
+struct DoesntDeserAtAll {}

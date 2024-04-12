@@ -1,5 +1,5 @@
-use std::ptr::NonNull;
 use std::alloc::Layout;
+use std::ptr::NonNull;
 
 use bumpalo::Bump;
 

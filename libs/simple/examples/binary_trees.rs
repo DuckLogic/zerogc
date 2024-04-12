@@ -2,10 +2,12 @@
     arbitrary_self_types, // Unfortunately this is required for methods on Gc refs
 )]
 use zerogc::prelude::*;
-use zerogc_simple::{SimpleCollector, SimpleCollectorContext, Gc, CollectorId as SimpleCollectorId};
 use zerogc_derive::Trace;
+use zerogc_simple::{
+    CollectorId as SimpleCollectorId, Gc, SimpleCollector, SimpleCollectorContext,
+};
 
-use slog::{Logger, Drain, o};
+use slog::{o, Drain, Logger};
 
 #[derive(Trace)]
 #[zerogc(collector_ids(SimpleCollectorId))]
@@ -22,9 +24,10 @@ fn item_check(tree: &Tree) -> i32 {
     }
 }
 
-fn bottom_up_tree<'gc>(collector: &'gc SimpleCollectorContext, depth: i32)
-                       -> Gc<'gc, Tree<'gc>> {
-    let tree = collector.alloc(Tree { children: GcCell::new(None) });
+fn bottom_up_tree<'gc>(collector: &'gc SimpleCollectorContext, depth: i32) -> Gc<'gc, Tree<'gc>> {
+    let tree = collector.alloc(Tree {
+        children: GcCell::new(None),
+    });
     if depth > 0 {
         let right = bottom_up_tree(collector, depth - 1);
         let left = bottom_up_tree(collector, depth - 1);
@@ -33,21 +36,22 @@ fn bottom_up_tree<'gc>(collector: &'gc SimpleCollectorContext, depth: i32)
     tree
 }
 
-fn inner(
-    gc: &mut SimpleCollectorContext,
-    depth: i32, iterations: u32
-) -> String {
-    let chk: i32 = (0 .. iterations).into_iter().map(|_| {
-        safepoint_recurse!(gc, |gc| {
-            let a = bottom_up_tree(&gc, depth);
-            item_check(&a)
+fn inner(gc: &mut SimpleCollectorContext, depth: i32, iterations: u32) -> String {
+    let chk: i32 = (0..iterations)
+        .into_iter()
+        .map(|_| {
+            safepoint_recurse!(gc, |gc| {
+                let a = bottom_up_tree(&gc, depth);
+                item_check(&a)
+            })
         })
-    }).sum();
+        .sum();
     format!("{}\t trees of depth {}\t check: {}", iterations, depth, chk)
 }
 
 fn main() {
-    let n = std::env::args().nth(1)
+    let n = std::env::args()
+        .nth(1)
         .and_then(|n| n.parse().ok())
         .unwrap_or(10);
     let min_depth = 4;
@@ -56,29 +60,38 @@ fn main() {
     let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
     let logger = Logger::root(
         slog_term::FullFormat::new(plain).build().fuse(),
-        o!("bench" => file!())
+        o!("bench" => file!()),
     );
     let collector = SimpleCollector::with_logger(logger);
     let mut gc = collector.into_context();
     {
         let depth = max_depth + 1;
         let tree = bottom_up_tree(&gc, depth);
-        println!("stretch tree of depth {}\t check: {}", depth, item_check(&tree));
+        println!(
+            "stretch tree of depth {}\t check: {}",
+            depth,
+            item_check(&tree)
+        );
     }
     safepoint!(gc, ());
 
     let long_lived_tree = bottom_up_tree(&gc, max_depth);
 
     let (long_lived_tree, ()) = safepoint_recurse!(gc, long_lived_tree, |gc, _long_lived_tree| {
-        (min_depth / 2..max_depth / 2 + 1).into_iter().for_each(|half_depth| {
-            let depth = half_depth * 2;
-            let iterations = 1 << ((max_depth - depth + min_depth) as u32);
-            let message = safepoint_recurse!(gc, |new_gc| {
-                inner(&mut new_gc, depth, iterations)
-            });
-            println!("{}", message);
-        })
+        (min_depth / 2..max_depth / 2 + 1)
+            .into_iter()
+            .for_each(|half_depth| {
+                let depth = half_depth * 2;
+                let iterations = 1 << ((max_depth - depth + min_depth) as u32);
+                let message =
+                    safepoint_recurse!(gc, |new_gc| { inner(&mut new_gc, depth, iterations) });
+                println!("{}", message);
+            })
     });
 
-    println!("long lived tree of depth {}\t check: {}", max_depth, item_check(&long_lived_tree));
+    println!(
+        "long lived tree of depth {}\t check: {}",
+        max_depth,
+        item_check(&long_lived_tree)
+    );
 }

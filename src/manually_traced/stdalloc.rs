@@ -2,11 +2,11 @@
 //!
 //! These can be used in `#![no_std]` crates without requiring
 //! the entire standard library.
+use alloc::boxed::Box;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::boxed::Box;
-use alloc::string::String;
 
 use crate::prelude::*;
 

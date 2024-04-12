@@ -1,11 +1,14 @@
 #![feature(
     arbitrary_self_types, // Used for `zerogc(mutable)`
 )]
-use zerogc::{Gc, CollectorId, Trace, GcSafe, NullTrace, epsilon::{self, EpsilonCollectorId}};
+use zerogc::{
+    epsilon::{self, EpsilonCollectorId},
+    CollectorId, Gc, GcSafe, NullTrace, Trace,
+};
 
-use zerogc::cell::GcCell;
-use std::marker::PhantomData;
 use std::fmt::Debug;
+use std::marker::PhantomData;
+use zerogc::cell::GcCell;
 
 #[derive(Trace)]
 #[zerogc(collector_ids(EpsilonCollectorId))]
@@ -13,7 +16,7 @@ pub struct SpecificCollector<'gc> {
     gc: Gc<'gc, i32, EpsilonCollectorId>,
     rec: Gc<'gc, SpecificCollector<'gc>, EpsilonCollectorId>,
     #[zerogc(mutable)]
-    cell: GcCell<Gc<'gc, SpecificCollector<'gc>, EpsilonCollectorId>>
+    cell: GcCell<Gc<'gc, SpecificCollector<'gc>, EpsilonCollectorId>>,
 }
 
 #[derive(Trace)]
@@ -23,7 +26,7 @@ pub struct Basic<'gc, Id: CollectorId> {
     children: Vec<Gc<'gc, Basic<'gc, Id>, Id>>,
     value: String,
     #[zerogc(mutable)]
-    cell: GcCell<Option<Gc<'gc, Basic<'gc, Id>, Id>>>
+    cell: GcCell<Option<Gc<'gc, Basic<'gc, Id>, Id>>>,
 }
 
 #[derive(Copy, Clone, Trace)]
@@ -31,9 +34,8 @@ pub struct Basic<'gc, Id: CollectorId> {
 pub struct BasicCopy<'gc, Id: CollectorId> {
     test: i32,
     value: i32,
-    basic: Option<Gc<'gc, Basic<'gc, Id>, Id>>
+    basic: Option<Gc<'gc, Basic<'gc, Id>, Id>>,
 }
-
 
 #[derive(Copy, Clone, Trace)]
 #[zerogc(copy, collector_ids(Id))]
@@ -41,20 +43,17 @@ pub enum BasicEnum<'gc, Id: CollectorId> {
     Unit,
     Tuple(i32),
     First {
-        all: i32
+        all: i32,
     },
     Second {
         you: Gc<'gc, String, Id>,
-        need: bool
+        need: bool,
     },
     Third {
         is: (),
-        love: Gc<'gc, BasicEnum<'gc, Id>, Id>
+        love: Gc<'gc, BasicEnum<'gc, Id>, Id>,
     },
-    Fifth(
-        Gc<'gc, BasicEnum<'gc, Id>, Id>,
-        Gc<'gc, Basic<'gc, Id>, Id>
-    )
+    Fifth(Gc<'gc, BasicEnum<'gc, Id>, Id>, Gc<'gc, Basic<'gc, Id>, Id>),
 }
 
 /// A testing type that has no destructor
@@ -69,7 +68,7 @@ pub enum BasicEnum<'gc, Id: CollectorId> {
 struct NoDestructorNullTrace {
     val: i32,
     s: &'static str,
-    f: f32
+    f: f32,
 }
 
 fn assert_copy<T: Copy>() {}
@@ -88,7 +87,7 @@ fn check_id<'gc, Id: CollectorId>() {
 struct NopTrace {
     s: String,
     i: i32,
-    wow: Box<NopTrace>
+    wow: Box<NopTrace>,
 }
 
 #[derive(Trace)]
@@ -100,9 +99,8 @@ struct UnsafeSkipped<'gc> {
     #[zerogc(unsafe_skip_trace)]
     wow: Gc<'gc, i32, EpsilonCollectorId>,
     #[zerogc(unsafe_skip_trace)]
-    not_impld: NotImplTrace
+    not_impld: NotImplTrace,
 }
-
 
 /// A type that doesn't implement `Trace`
 struct NotImplTrace;
@@ -116,7 +114,7 @@ struct LifetimeTrace<'a: 'gc, 'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'a> {
     wow: Box<NopTrace>,
     other: &'a u32,
     generic: Box<T>,
-    marker: PhantomData<&'gc ()>
+    marker: PhantomData<&'gc ()>,
 }
 
 #[derive(Trace)]
@@ -132,13 +130,13 @@ fn basic<'gc>() {
         value: String::new(),
         parent: None,
         children: vec![],
-        cell: GcCell::new(None)
+        cell: GcCell::new(None),
     };
     assert!(<Basic::<epsilon::EpsilonCollectorId> as Trace>::NEEDS_TRACE);
     assert!(<BasicCopy::<epsilon::EpsilonCollectorId> as Trace>::NEEDS_TRACE);
     assert!(<Basic::<epsilon::EpsilonCollectorId> as Trace>::NEEDS_DROP);
     assert!(!<BasicCopy::<epsilon::EpsilonCollectorId> as Trace>::NEEDS_DROP);
-    assert_copy::<BasicCopy::<epsilon::EpsilonCollectorId>>();
+    assert_copy::<BasicCopy<epsilon::EpsilonCollectorId>>();
     assert_null_trace::<NopTrace>();
     assert!(!<NopTrace as Trace>::NEEDS_TRACE);
 
@@ -164,5 +162,4 @@ fn basic<'gc>() {
     assert_null_trace::<NoDestructorNullTrace>();
     assert!(!<NoDestructorNullTrace as Trace>::NEEDS_DROP);
     assert!(!std::mem::needs_drop::<NoDestructorNullTrace>());
-
 }

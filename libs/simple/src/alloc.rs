@@ -1,8 +1,8 @@
 #![allow(clippy::vec_box)] // We must Box<Chunk> for a stable address
 use std::alloc::Layout;
 use std::mem;
-use std::ptr::NonNull;
 use std::mem::MaybeUninit;
+use std::ptr::NonNull;
 
 #[cfg(feature = "sync")]
 use once_cell::sync::OnceCell;
@@ -49,18 +49,10 @@ mod debug {
         assert!(super::DEBUG_INTERNAL_ALLOCATOR);
         let start = ptr.sub(PADDING_BYTES);
         let end = ptr.add(size);
-        let start_padding = std::slice::from_raw_parts(
-            start as *const u8 as *const u32,
-            PADDING_TIMES
-        );
-        let region = std::slice::from_raw_parts(
-            ptr as *const u8,
-            size
-        );
-        let end_padding = std::slice::from_raw_parts(
-            end as *const u8 as *const u32,
-            PADDING_TIMES
-        );
+        let start_padding =
+            std::slice::from_raw_parts(start as *const u8 as *const u32, PADDING_TIMES);
+        let region = std::slice::from_raw_parts(ptr as *const u8, size);
+        let end_padding = std::slice::from_raw_parts(end as *const u8 as *const u32, PADDING_TIMES);
         let print_memory_region = || {
             use std::fmt::Write;
             let mut res = String::new();
@@ -79,18 +71,24 @@ mod debug {
         };
         // Closest to farthest
         for (idx, &block) in start_padding.iter().rev().enumerate() {
-            if block == PADDING { continue }
+            if block == PADDING {
+                continue;
+            }
             assert_eq!(
-                block, PADDING,
+                block,
+                PADDING,
                 "Unexpected start padding (offset -{}) w/ {}",
                 idx * 4,
                 print_memory_region()
             );
         }
         for (idx, &block) in end_padding.iter().enumerate() {
-            if block == PADDING { continue }
+            if block == PADDING {
+                continue;
+            }
             assert_eq!(
-                block, PADDING,
+                block,
+                PADDING,
                 "Unexpected end padding (offset {}) w/ {}",
                 idx * 4,
                 print_memory_region()
@@ -121,7 +119,7 @@ pub const fn fits_small_object(layout: Layout) -> bool {
 pub(crate) struct Chunk {
     pub start: *mut u8,
     current: AtomicCell<*mut u8>,
-    pub end: *mut u8
+    pub end: *mut u8,
 }
 impl Chunk {
     fn alloc(capacity: usize) -> Box<Self> {
@@ -131,8 +129,9 @@ impl Chunk {
         std::mem::forget(result);
         let current = AtomicCell::new(start);
         Box::new(Chunk {
-            start, current,
-            end: unsafe { start.add(capacity) }
+            start,
+            current,
+            end: unsafe { start.add(capacity) },
         })
     }
 
@@ -145,13 +144,13 @@ impl Chunk {
                 unsafe {
                     let updated = old_current.add(amount);
                     if self.current.compare_exchange(old_current, updated).is_ok() {
-                        return Some(NonNull::new_unchecked(old_current))
+                        return Some(NonNull::new_unchecked(old_current));
                     } else {
-                        continue
+                        continue;
                     }
                 }
             } else {
-                return None
+                return None;
             }
         }
     }
@@ -162,12 +161,7 @@ impl Chunk {
 }
 impl Drop for Chunk {
     fn drop(&mut self) {
-        unsafe {
-            drop(Vec::from_raw_parts(
-                self.start, 0,
-                self.capacity()
-            ))
-        }
+        unsafe { drop(Vec::from_raw_parts(self.start, 0, self.capacity())) }
     }
 }
 
@@ -201,22 +195,24 @@ struct ArenaState {
     ///
     /// The pointers wont be invalidated,
     /// since the references are internally boxed.
-    current_chunk: AtomicCell<NonNull<Chunk>>
+    current_chunk: AtomicCell<NonNull<Chunk>>,
 }
 impl ArenaState {
     fn new(chunks: Vec<Box<Chunk>>) -> Self {
         assert!(!chunks.is_empty());
         let current_chunk = NonNull::from(&**chunks.last().unwrap());
         let chunk_lock;
-        #[cfg(feature = "sync")] {
+        #[cfg(feature = "sync")]
+        {
             chunk_lock = Mutex::new(chunks);
         }
-        #[cfg(not(feature = "sync"))] {
+        #[cfg(not(feature = "sync"))]
+        {
             chunk_lock = RefCell::new(chunks);
         }
         ArenaState {
             chunks: chunk_lock,
-            current_chunk: AtomicCell::new(current_chunk)
+            current_chunk: AtomicCell::new(current_chunk),
         }
     }
     #[inline]
@@ -243,7 +239,7 @@ impl ArenaState {
             let chunk = &*self.current_chunk().as_ptr();
             match chunk.try_alloc(element_size) {
                 Some(header) => header.cast(),
-                None => self.alloc_fallback(element_size)
+                None => self.alloc_fallback(element_size),
             }
         }
     }
@@ -254,8 +250,7 @@ impl ArenaState {
         let mut chunks = self.lock_chunks();
         // Now that we hold the lock, check the current chunk again
         unsafe {
-            if let Some(header) = self.current_chunk().as_ref()
-                .try_alloc(element_size) {
+            if let Some(header) = self.current_chunk().as_ref().try_alloc(element_size) {
                 return header.cast();
             }
         }
@@ -264,8 +259,10 @@ impl ArenaState {
         chunks.push(Chunk::alloc(last_capacity * 2));
         unsafe {
             self.force_current_chunk(NonNull::from(&**chunks.last().unwrap()));
-            self.current_chunk().as_ref()
-                .try_alloc(element_size).unwrap()
+            self.current_chunk()
+                .as_ref()
+                .try_alloc(element_size)
+                .unwrap()
                 .cast::<UnknownHeader>()
         }
     }
@@ -276,7 +273,7 @@ impl ArenaState {
 /// This is a lock-free linked list
 #[derive(Default)]
 pub(crate) struct FreeList {
-    next: AtomicCell<Option<NonNull<FreeSlot>>>
+    next: AtomicCell<Option<NonNull<FreeSlot>>>,
 }
 impl FreeList {
     unsafe fn add_free(&self, free: *mut UnknownHeader, size: usize) {
@@ -288,7 +285,10 @@ impl FreeList {
         let mut next = self.next.load();
         loop {
             (*new_slot).prev_free = next;
-            match self.next.compare_exchange(next, Some(NonNull::new_unchecked(new_slot))) {
+            match self
+                .next
+                .compare_exchange(next, Some(NonNull::new_unchecked(new_slot)))
+            {
                 Ok(_) => break,
                 Err(actual_next) => {
                     next = actual_next;
@@ -305,11 +305,14 @@ impl FreeList {
             };
             // Update free pointer
             unsafe {
-                if self.next.compare_exchange(
-                    Some(next_free),
-                    next_free.as_ref().prev_free
-                ).is_err() { continue /* retry */ }
-                return Some(next_free.cast())
+                if self
+                    .next
+                    .compare_exchange(Some(next_free), next_free.as_ref().prev_free)
+                    .is_err()
+                {
+                    continue; /* retry */
+                }
+                return Some(next_free.cast());
             }
         }
     }
@@ -333,7 +336,8 @@ impl SmallArena {
         let chunks = vec![Chunk::alloc(INITIAL_SIZE)];
         SmallArena {
             state: ArenaState::new(chunks),
-            element_size, free: Default::default(),
+            element_size,
+            free: Default::default(),
         }
     }
     #[inline]
@@ -342,7 +346,9 @@ impl SmallArena {
         if let Some(free) = self.free.take_free() {
             free.cast()
         } else if DEBUG_INTERNAL_ALLOCATOR {
-            let mem = self.state.alloc(self.element_size + debug::PADDING_BYTES * 2)
+            let mem = self
+                .state
+                .alloc(self.element_size + debug::PADDING_BYTES * 2)
                 .as_ptr() as *mut u8;
             unsafe {
                 let mem = mem.add(debug::PADDING_BYTES);
@@ -369,23 +375,18 @@ macro_rules! arena_match {
         })
     };
 }
-const SMALL_ARENA_SIZES: [usize; NUM_SMALL_ARENAS] =  [
-    2, 3, 4, 5, 6, 7, 8,
-    10, 12, 14, 16,
-    20, 24, 28, 32
-];
+const SMALL_ARENA_SIZES: [usize; NUM_SMALL_ARENAS] =
+    [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32];
 pub struct SmallArenaList {
     // NOTE: Internally boxed to avoid bloating main struct
-    arenas: Box<[OnceCell<SmallArena>; NUM_SMALL_ARENAS]>
+    arenas: Box<[OnceCell<SmallArena>; NUM_SMALL_ARENAS]>,
 }
 impl SmallArenaList {
     pub fn new() -> Self {
         // NOTE: Why does writing arrays have to be so difficult:?
         unsafe {
-            let mut arenas: Box<[
-                MaybeUninit<OnceCell<SmallArena>>;
-                NUM_SMALL_ARENAS
-            ]> = Box::new_uninit().assume_init();
+            let mut arenas: Box<[MaybeUninit<OnceCell<SmallArena>>; NUM_SMALL_ARENAS]> =
+                Box::new_uninit().assume_init();
             for i in 0..NUM_SMALL_ARENAS {
                 arenas[i].as_mut_ptr().write(OnceCell::new());
             }
@@ -393,20 +394,19 @@ impl SmallArenaList {
                 // NOTE: This is done because I want to explicitly specify types
                 arenas: mem::transmute::<
                     Box<[MaybeUninit<OnceCell<SmallArena>>; NUM_SMALL_ARENAS]>,
-                    Box<[OnceCell<SmallArena>; NUM_SMALL_ARENAS]>
-                >(arenas)
+                    Box<[OnceCell<SmallArena>; NUM_SMALL_ARENAS]>,
+                >(arenas),
             }
         }
     }
     #[inline] // This should hopefully be constant folded away (layout is const)
     pub fn find(&self, layout: Layout) -> Option<&SmallArena> {
         if !fits_small_object(layout) {
-            return None
+            return None;
         }
         // Divide round up
         let word_size = mem::size_of::<usize>();
-        let num_words = (layout.size() + (word_size - 1))
-            / word_size;
+        let num_words = (layout.size() + (word_size - 1)) / word_size;
         self.find_raw(num_words)
     }
     #[inline] // We want this constant-folded away......

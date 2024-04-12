@@ -3,9 +3,9 @@ use core::cell::RefCell;
 
 use inherent::inherent;
 
-use crate::SimpleAllocCollectorId;
-use crate::vec::raw::{IGcVec, ReallocFailedError};
 use crate::prelude::*;
+use crate::vec::raw::{IGcVec, ReallocFailedError};
+use crate::SimpleAllocCollectorId;
 
 /// A garbage collected vector,
 /// wrapped in a [RefCell] for interior mutability.
@@ -70,19 +70,23 @@ impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Copy for GcVecCell<'gc, T, Id> {}
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Clone for GcVecCell<'gc, T, Id> {
     #[inline]
     fn clone(&self) -> Self {
-       *self
+        *self
     }
 }
 /// Because vectors are associated with a [GcContext](`crate::GcContext`),
 /// they contain thread local data (and thus must be `!Send`
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> !Send for GcVecCell<'gc, T, Id> {}
 #[inherent]
-unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> IGcVec<'gc, T> for GcVecCell<'gc, T, Id> {
+unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> IGcVec<'gc, T>
+    for GcVecCell<'gc, T, Id>
+{
     type Id = Id;
 
     #[inline]
     pub fn with_capacity_in(capacity: usize, ctx: &'gc <Id as CollectorId>::Context) -> Self {
-        GcVecCell { inner: ctx.alloc(RefCell::new(GcVec::with_capacity_in(capacity, ctx))) }
+        GcVecCell {
+            inner: ctx.alloc(RefCell::new(GcVec::with_capacity_in(capacity, ctx))),
+        }
     }
 
     #[inline]
@@ -120,7 +124,8 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> IGcVec<'gc, T> 
     pub fn replace(&mut self, index: usize, val: T) -> T;
     pub fn set(&mut self, index: usize, val: T);
     pub fn extend_from_slice(&mut self, src: &[T])
-        where T: Copy;
+    where
+        T: Copy;
     pub fn push(&mut self, val: T);
     pub fn pop(&mut self) -> Option<T>;
     pub fn swap_remove(&mut self, index: usize) -> T;
@@ -128,14 +133,16 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> IGcVec<'gc, T> 
     pub fn is_empty(&self) -> bool;
     pub fn new_in(ctx: &'gc <Id as CollectorId>::Context) -> Self;
     pub fn copy_from_slice(src: &[T], ctx: &'gc <Id as CollectorId>::Context) -> Self
-        where T: Copy;
+    where
+        T: Copy;
     pub fn from_vec(src: Vec<T>, ctx: &'gc <Id as CollectorId>::Context) -> Self;
     pub fn get(&mut self, index: usize) -> Option<T>
-        where T: Copy;
+    where
+        T: Copy;
     pub unsafe fn as_slice_unchecked(&self) -> &[T];
 }
 impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> Extend<T> for GcVecCell<'gc, T, Id> {
-    fn extend<A: IntoIterator<Item=T>>(&mut self, iter: A) {
+    fn extend<A: IntoIterator<Item = T>>(&mut self, iter: A) {
         self.inner.borrow_mut().extend(iter);
     }
 }

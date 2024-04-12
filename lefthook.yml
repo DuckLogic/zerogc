@@ -1,0 +1,11 @@
+skip_output:
+  - meta
+  - success
+  - summary
+pre-commit:
+  commands:
+    rustfmt:
+      tags: formatter
+      glob: "*.rs"
+      run: cargo fmt --check -- {staged_files}
+

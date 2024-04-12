@@ -1,15 +1,15 @@
 //! Contains the implementation of [GcIndexMap]
 
-use core::mem;
-use core::hash::{Hash, Hasher, BuildHasher};
 use core::borrow::Borrow;
+use core::hash::{BuildHasher, Hash, Hasher};
+use core::mem;
 
 use hashbrown::raw::RawTable;
 
-use zerogc_derive::{NullTrace, Trace, unsafe_gc_impl};
+use zerogc_derive::{unsafe_gc_impl, NullTrace, Trace};
 
-use crate::SimpleAllocCollectorId;
 use crate::prelude::*;
+use crate::SimpleAllocCollectorId;
 
 /// A garbage collected hashmap that preserves insertion order.
 ///
@@ -18,7 +18,13 @@ use crate::prelude::*;
 ///
 /// Like a [GcVec], there can only be one owner at a time,
 /// simplifying mutability checking.
-pub struct GcIndexMap<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S: BuildHasher = super::DefaultHasher> {
+pub struct GcIndexMap<
+    'gc,
+    K: GcSafe<'gc, Id>,
+    V: GcSafe<'gc, Id>,
+    Id: SimpleAllocCollectorId,
+    S: BuildHasher = super::DefaultHasher,
+> {
     /// indices mapping from the entry hash to its index
     ///
     /// NOTE: This uses `std::alloc` instead of the garbage collector to allocate memory.
@@ -31,21 +37,30 @@ pub struct GcIndexMap<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAll
     /// in the original insertion order.
     entries: GcVec<'gc, Bucket<K, V>, Id>,
     /// The hasher used to hash elements
-    hasher: S
+    hasher: S,
 }
 unsafe impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S: BuildHasher>
-    crate::ImplicitWriteBarrier for GcIndexMap<'gc, K, V, Id, S> {}
-impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S: BuildHasher> GcIndexMap<'gc, K, V, Id, S> {
+    crate::ImplicitWriteBarrier for GcIndexMap<'gc, K, V, Id, S>
+{
+}
+impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S: BuildHasher>
+    GcIndexMap<'gc, K, V, Id, S>
+{
     /// Allocate a new hashmap inside the specified collector
     #[inline]
     pub fn new_in(ctx: &'gc Id::Context) -> Self
-        where S: Default {
+    where
+        S: Default,
+    {
         Self::with_capacity_in(0, ctx)
     }
     /// Allocate a new hashmap with the specified capacity,
     /// inside of the specified collector
     #[inline]
-    pub fn with_capacity_in(capacity: usize, ctx: &'gc Id::Context) -> Self where S: Default {
+    pub fn with_capacity_in(capacity: usize, ctx: &'gc Id::Context) -> Self
+    where
+        S: Default,
+    {
         Self::with_capacity_and_hasher_in(capacity, Default::default(), ctx)
     }
     /// Allocate a new hashmap with the specified capacity and hasher,
@@ -55,10 +70,10 @@ impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S:
         GcIndexMap {
             indices: RawTable::with_capacity(capacity),
             entries: GcVec::with_capacity_in(capacity, ctx),
-            hasher
+            hasher,
         }
     }
-        
+
     /// Allocate a new hashmap with the specified hasher,
     /// inside the specified collector
     #[inline]
@@ -78,24 +93,31 @@ impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S:
     /// Return a reference to the value associated with the specified key,
     /// or `None` if it isn't present in the map.
     pub fn get<Q: ?Sized>(&self, key: &Q) -> Option<&V>
-        where K: Borrow<Q>, Q: Hash + Eq {
-        self.get_index_of(key).map(|index| {
-            &self.entries[index].value
-        })
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq,
+    {
+        self.get_index_of(key)
+            .map(|index| &self.entries[index].value)
     }
     /// Return a mutable reference to the value associated with the specified key,
     /// or `None` if it isn't present in the map.
     pub fn get_mut<Q: ?Sized>(&mut self, key: &Q) -> Option<&mut V>
-        where K: Borrow<Q>, Q: Hash + Eq {
-        self.get_index_of(key).map(move |index| {
-            &mut self.entries[index].value
-        })
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq,
+    {
+        self.get_index_of(key)
+            .map(move |index| &mut self.entries[index].value)
     }
     /// Remove the entry associated with 'key' and return its value.
     ///
     /// NOTE: This is equivalent to `swap_remove` and does *not* preserver ordering.
     pub fn remove<Q: ?Sized>(&mut self, key: &Q) -> Option<V>
-        where K: Borrow<Q>, Q: Hash + Eq {
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq,
+    {
         self.swap_remove(key)
     }
 
@@ -105,21 +127,28 @@ impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S:
     /// It is similar to [Vec::swap_remove],
     /// or more specifically [IndexMap::swap_remove](https://docs.rs/indexmap/1.7.0/indexmap/map/struct.IndexMap.html#method.swap_remove).
     pub fn swap_remove<Q: ?Sized>(&mut self, key: &Q) -> Option<V>
-        where K: Borrow<Q>, Q: Hash + Eq {
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq,
+    {
         let hash = self.hash(key);
-        self.indices.remove_entry(hash.get(), equivalent(key, &self.entries)).map(|index| {
-            let entry = self.entries.swap_remove(index);
-            /*hash_builder
-             * correct the index that points to the moved entry
-             * It was at 'self.len()', now it's at
-             */
-            if let Some(entry) = self.entries.get(index) {
-                let last = self.entries.len();
-                *self.indices.get_mut(entry.hash.get(), move |&i| i == last)
-                    .expect("index not found") = index;
-            }
-            entry.value
-        })
+        self.indices
+            .remove_entry(hash.get(), equivalent(key, &self.entries))
+            .map(|index| {
+                let entry = self.entries.swap_remove(index);
+                /*hash_builder
+                 * correct the index that points to the moved entry
+                 * It was at 'self.len()', now it's at
+                 */
+                if let Some(entry) = self.entries.get(index) {
+                    let last = self.entries.len();
+                    *self
+                        .indices
+                        .get_mut(entry.hash.get(), move |&i| i == last)
+                        .expect("index not found") = index;
+                }
+                entry.value
+            })
     }
     /// Returns
     /// Insert a key value pair into the map, returning the previous value (if any(
@@ -127,7 +156,10 @@ impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S:
     /// If the key already exists, this replaces the existing pair
     /// and returns the previous value.
     #[inline]
-    pub fn insert(&mut self, key: K, value: V) -> Option<V> where K: Hash + Eq {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V>
+    where
+        K: Hash + Eq,
+    {
         self.insert_full(key, value).1
     }
     /// Insert a key value pair into the map, implicitly looking up its index.
@@ -138,21 +170,31 @@ impl<'gc, K: GcSafe<'gc, Id>, V: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId, S:
     /// If the key doesn't already exist,
     /// this returns a new entry.
     pub fn insert_full(&mut self, key: K, value: V) -> (usize, Option<V>)
-        where K: Hash + Eq {
+    where
+        K: Hash + Eq,
+    {
         let hash = self.hash(&key);
-        match self.indices.get(hash.get(), equivalent(&key, &*self.entries)) {
+        match self
+            .indices
+            .get(hash.get(), equivalent(&key, &*self.entries))
+        {
             Some(&i) => (i, Some(mem::replace(&mut self.entries[i].value, value))),
-            None => (self.push(hash, key, value), None)
+            None => (self.push(hash, key, value), None),
         }
     }
     /// Return the index of the item with the specified key.
     pub fn get_index_of<Q: ?Sized>(&self, key: &Q) -> Option<usize>
-        where Q: Hash + Eq, K: Borrow<Q> {
+    where
+        Q: Hash + Eq,
+        K: Borrow<Q>,
+    {
         if self.is_empty() {
             None
         } else {
             let hash = self.hash(key);
-            self.indices.get(hash.get(), equivalent(key, &*self.entries)).copied()
+            self.indices
+                .get(hash.get(), equivalent(key, &*self.entries))
+                .copied()
         }
     }
     fn hash<Q: ?Sized + Hash>(&self, value: &Q) -> HashValue {
@@ -290,8 +332,13 @@ unsafe_gc_impl!(
 
 #[inline]
 fn equivalent<'a, K, V, Q: ?Sized>(
-    key: &'a Q, entries: &'a [Bucket<K, V>]
-) -> impl Fn(&usize) -> bool + 'a where Q: Hash + Eq, K: Borrow<Q> {
+    key: &'a Q,
+    entries: &'a [Bucket<K, V>],
+) -> impl Fn(&usize) -> bool + 'a
+where
+    Q: Hash + Eq,
+    K: Borrow<Q>,
+{
     move |&other_index| entries[other_index].key.borrow() == key
 }
 
@@ -314,5 +361,5 @@ impl HashValue {
 struct Bucket<K, V> {
     hash: HashValue,
     key: K,
-    value: V
+    value: V,
 }

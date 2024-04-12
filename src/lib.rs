@@ -10,8 +10,8 @@
     const_option,
     slice_range, // Convenient for bounds checking :)
 )]
-#![cfg_attr(feature="error", backtrace)]
-#![cfg_attr(feature="allocator-api", feature(allocator_api))]
+#![cfg_attr(feature = "error", backtrace)]
+#![cfg_attr(feature = "allocator-api", feature(allocator_api))]
 #![feature(maybe_uninit_slice)]
 #![feature(new_uninit)]
 #![deny(missing_docs)]
@@ -45,21 +45,20 @@ extern crate self as zerogc;
  * I want this library to use 'mostly' stable features,
  * unless there's good justification to use an unstable feature.
  */
-use core::mem::{self};
-use core::ops::{Deref, DerefMut, CoerceUnsized};
-use core::ptr::{NonNull, Pointee, DynMetadata};
-use core::marker::{PhantomData, Unsize};
-use core::hash::{Hash, Hasher};
-use core::fmt::{self, Debug, Formatter, Display};
 use core::cmp::Ordering;
+use core::fmt::{self, Debug, Display, Formatter};
+use core::hash::{Hash, Hasher};
+use core::marker::{PhantomData, Unsize};
+use core::mem::{self};
+use core::ops::{CoerceUnsized, Deref, DerefMut};
+use core::ptr::{DynMetadata, NonNull, Pointee};
 
-use vec::raw::{GcRawVec};
+use vec::raw::GcRawVec;
 use zerogc_derive::unsafe_gc_impl;
-pub use zerogc_derive::{Trace, NullTrace};
+pub use zerogc_derive::{NullTrace, Trace};
 
-use crate::vec::{GcVec};
 pub use crate::array::GcArray;
-
+use crate::vec::GcVec;
 
 #[macro_use] // We have macros in here!
 #[cfg(feature = "serde1")]
@@ -68,17 +67,17 @@ pub mod serde;
 mod manually_traced;
 #[macro_use]
 mod macros;
-pub mod cell;
-pub mod prelude;
-pub mod epsilon;
-pub mod array;
-pub mod vec;
-#[cfg(feature = "errors")]
-pub mod errors;
 #[cfg(feature = "allocator-api")]
 pub mod allocator;
+pub mod array;
+pub mod cell;
+pub mod epsilon;
+#[cfg(feature = "errors")]
+pub mod errors;
 #[cfg(feature = "hashmap-impl")]
 pub mod hash_map;
+pub mod prelude;
+pub mod vec;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.
@@ -101,9 +100,9 @@ macro_rules! safepoint_recurse {
     }};
     ($context:ident, $root:expr, |$sub_context:ident, $new_root:ident| $closure:expr) => {{
         let mut root = $root;
-        let result = unsafe { __recurse_context!($context, &mut root, |$sub_context, $new_root| {
-            $closure
-        }) };
+        let result = unsafe {
+            __recurse_context!($context, &mut root, |$sub_context, $new_root| { $closure })
+        };
         /*
          * NOTE: We're assuming result is unmanaged here
          * The borrow checker will verify this is true (by marking this as a mutation).
@@ -113,15 +112,14 @@ macro_rules! safepoint_recurse {
         (updated_root, result)
     }};
     ($context:ident, $root:expr, @managed_result, |$sub_context:ident, $new_root:ident| $closure:expr) => {{
-        use $crate::{GcContext};
+        use $crate::GcContext;
         let mut root = $root;
-        let erased_result = unsafe { __recurse_context!(
-            $context, &mut root,
-            |$sub_context, $new_root| {
+        let erased_result = unsafe {
+            __recurse_context!($context, &mut root, |$sub_context, $new_root| {
                 let result = $closure;
                 $sub_context.rebrand_static(result)
-            }
-        ) };
+            })
+        };
         /*
          * Rebrand back to the current collector lifetime
          * It could have possibly been allocated from the sub-context inside the closure,
@@ -153,7 +151,7 @@ macro_rules! safepoint_recurse {
 #[doc(hidden)]
 macro_rules! __recurse_context {
     ($context:ident, $root:expr, |$sub_context:ident, $new_root:ident| $closure:expr) => {{
-        use $crate::{GcContext};
+        use $crate::GcContext;
         // TODO: Panic safety
         $context.recurse_context(&mut $root, |mut $sub_context, erased_root| {
             /*
@@ -190,18 +188,20 @@ macro_rules! __recurse_context {
 /// This macro is completely safe, although it expands to unsafe code internally.
 #[macro_export]
 macro_rules! safepoint {
-    ($context:ident, $value:expr) => {unsafe {
-        use $crate::{GcContext};
-        // TODO: What happens if we panic during a collection
-        /*
-         * Some collectors support multiple running instances
-         * with different ids, handing out different GC pointers.
-         * TODO: Should we be checking somehow that the ids match?
-         */
-        let mut erased = $context.rebrand_static($value);
-        $context.basic_safepoint(&mut &mut erased);
-        $context.rebrand_self(erased)
-    }};
+    ($context:ident, $value:expr) => {
+        unsafe {
+            use $crate::GcContext;
+            // TODO: What happens if we panic during a collection
+            /*
+             * Some collectors support multiple running instances
+             * with different ids, handing out different GC pointers.
+             * TODO: Should we be checking somehow that the ids match?
+             */
+            let mut erased = $context.rebrand_static($value);
+            $context.basic_safepoint(&mut &mut erased);
+            $context.rebrand_self(erased)
+        }
+    };
 }
 
 /// Indicate its safe to begin a garbage collection (like [safepoint!])
@@ -214,12 +214,14 @@ macro_rules! safepoint {
 /// This allows other threads to perform collections *without blocking this thread*.
 #[macro_export]
 macro_rules! freeze_context {
-    ($context:ident) => {unsafe {
-        use $crate::{GcContext, FrozenContext};
-        let mut context = $context;
-        context.freeze();
-        FrozenContext::new(context)
-    }};
+    ($context:ident) => {
+        unsafe {
+            use $crate::{FrozenContext, GcContext};
+            let mut context = $context;
+            context.freeze();
+            FrozenContext::new(context)
+        }
+    };
 }
 
 /// Unfreeze the context, allowing it to be used again
@@ -227,12 +229,14 @@ macro_rules! freeze_context {
 /// Returns a [GcContext] struct.
 #[macro_export]
 macro_rules! unfreeze_context {
-    ($frozen:ident) => {unsafe {
-        use $crate::{FrozenContext, GcContext};
-        let mut context = FrozenContext::into_context($frozen);
-        context.unfreeze();
-        context
-    }};
+    ($frozen:ident) => {
+        unsafe {
+            use $crate::{FrozenContext, GcContext};
+            let mut context = FrozenContext::into_context($frozen);
+            context.unfreeze();
+            context
+        }
+    };
 }
 
 /// A garbage collector implementation.
@@ -242,9 +246,8 @@ pub unsafe trait GcSystem {
     /// The type of collector IDs given by this system
     type Id: CollectorId;
     /// The type of contexts used in this sytem
-    type Context: GcContext<Id=Self::Id>;
+    type Context: GcContext<Id = Self::Id>;
 }
-
 
 /// The context of garbage collection,
 /// which can be frozen at a safepoint.
@@ -255,7 +258,7 @@ pub unsafe trait GcSystem {
 /// This context doesn't necessarily support allocation (see [GcSimpleAlloc] for that).
 pub unsafe trait GcContext: Sized {
     /// The system used with this context
-    type System: GcSystem<Context=Self, Id=Self::Id>;
+    type System: GcSystem<Context = Self, Id = Self::Id>;
     /// The type of ids used in the system
     type Id: CollectorId;
 
@@ -377,7 +380,10 @@ pub unsafe trait GcContext: Sized {
     /// It should only be used as part of the [safepoint!] macro.
     #[inline(always)]
     unsafe fn rebrand_static<T>(&self, value: T) -> T::Branded
-        where T: GcRebrand<'static, Self::Id>, T::Branded: Sized {
+    where
+        T: GcRebrand<'static, Self::Id>,
+        T::Branded: Sized,
+    {
         let branded = mem::transmute_copy(&value);
         mem::forget(value);
         branded
@@ -393,7 +399,10 @@ pub unsafe trait GcContext: Sized {
     /// It should only be used as part of the [safepoint!] macro.
     #[inline(always)]
     unsafe fn rebrand_self<'gc, T>(&'gc self, value: T) -> T::Branded
-        where T: GcRebrand<'gc, Self::Id>, T::Branded: Sized {
+    where
+        T: GcRebrand<'gc, Self::Id>,
+        T::Branded: Sized,
+    {
         let branded = mem::transmute_copy(&value);
         mem::forget(value);
         branded
@@ -419,7 +428,9 @@ pub unsafe trait GcContext: Sized {
     ///
     /// See the [safepoint_recurse!] macro for a safe wrapper
     unsafe fn recurse_context<T, F, R>(&self, root: &mut &mut T, func: F) -> R
-        where T: Trace, F: for <'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R;
+    where
+        T: Trace,
+        F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R;
 
     /// Get the [GcSystem] associated with this context
     fn system(&self) -> &'_ Self::System;
@@ -438,7 +449,8 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// The object **must** be initialized by the time the next collection
     /// rolls around, so that the collector can properly trace it
     unsafe fn alloc_uninit<'gc, T>(&'gc self) -> *mut T
-        where T: GcSafe<'gc, Self::Id>;
+    where
+        T: GcSafe<'gc, Self::Id>;
     /// Allocate the specified object in this garbage collector,
     /// binding it to the lifetime of this collector.
     ///
@@ -453,7 +465,9 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// Once allocated, the object can only be correctly modified with a `GcCell`
     #[inline]
     fn alloc<'gc, T>(&'gc self, value: T) -> Gc<'gc, T, Self::Id>
-        where T: GcSafe<'gc, Self::Id> {
+    where
+        T: GcSafe<'gc, Self::Id>,
+    {
         unsafe {
             let ptr = self.alloc_uninit::<T>();
             ptr.write(value);
@@ -475,11 +489,12 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     #[cfg(feature = "errors")]
     #[cold]
     fn alloc_error<'gc, T>(&'gc self, src: T) -> crate::errors::GcError<Self::Id>
-        where T: crate::errors::GcErrorType<'gc, Self::Id>,
-            <T as GcRebrand<'static, Self::Id>>::Branded: 'static,
-            Self::Id: HandleCollectorId {
+    where
+        T: crate::errors::GcErrorType<'gc, Self::Id>,
+        <T as GcRebrand<'static, Self::Id>>::Branded: 'static,
+        Self::Id: HandleCollectorId,
+    {
         crate::errors::GcError::from_gc_allocated(self.alloc(src))
-
     }
 
     /// Allocate a slice with the specified length,
@@ -493,17 +508,17 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// In particular, the traditional way to implement a [Vec] is wrong.
     /// It is unsafe to leave the range of memory `[len, capacity)` uninitialized.
     unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> *mut T
-        where T: GcSafe<'gc, Self::Id>;
+    where
+        T: GcSafe<'gc, Self::Id>;
     /// Allocate a slice, copied from the specified input
     fn alloc_slice_copy<'gc, T>(&'gc self, src: &[T]) -> GcArray<'gc, T, Self::Id>
-        where T: GcSafe<'gc, Self::Id> + Copy {
+    where
+        T: GcSafe<'gc, Self::Id> + Copy,
+    {
         unsafe {
             let res_ptr = self.alloc_uninit_slice::<T>(src.len());
             res_ptr.copy_from_nonoverlapping(src.as_ptr(), src.len());
-            GcArray::from_raw_ptr(
-                NonNull::new_unchecked(res_ptr),
-                src.len()
-            )
+            GcArray::from_raw_ptr(NonNull::new_unchecked(res_ptr), src.len())
         }
     }
     /// Allocate an array, taking ownership of the values in
@@ -511,7 +526,9 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     #[inline]
     #[cfg(feature = "alloc")]
     fn alloc_array_from_vec<'gc, T>(&'gc self, mut src: Vec<T>) -> GcArray<'gc, T, Self::Id>
-        where T: GcSafe<'gc, Self::Id> {
+    where
+        T: GcSafe<'gc, Self::Id>,
+    {
         unsafe {
             let ptr = src.as_ptr();
             let len = src.len();
@@ -529,10 +546,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
              */
             src.set_len(0);
             dest.copy_from_nonoverlapping(ptr, len);
-            let res = GcArray::from_raw_ptr(
-                NonNull::new_unchecked(ptr as *mut _),
-                len
-            );
+            let res = GcArray::from_raw_ptr(NonNull::new_unchecked(ptr as *mut _), len);
             drop(src);
             res
         }
@@ -546,55 +560,63 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     ///
     /// Otherwise, the gc may end up tracing the values even though they are uninitialized.
     #[inline]
-    unsafe fn alloc_slice_fill_with<'gc, T, F>(&'gc self, len: usize, mut func: F) -> GcArray<'gc, T, Self::Id>
-        where T: GcSafe<'gc, Self::Id>, F: FnMut(usize) -> T {
+    unsafe fn alloc_slice_fill_with<'gc, T, F>(
+        &'gc self,
+        len: usize,
+        mut func: F,
+    ) -> GcArray<'gc, T, Self::Id>
+    where
+        T: GcSafe<'gc, Self::Id>,
+        F: FnMut(usize) -> T,
+    {
         let res_ptr = self.alloc_uninit_slice::<T>(len);
         for i in 0..len {
             res_ptr.add(i).write(func(i));
         }
-        GcArray::from_raw_ptr(
-            NonNull::new_unchecked(res_ptr),
-            len
-        )
+        GcArray::from_raw_ptr(NonNull::new_unchecked(res_ptr), len)
     }
     /// Allocate a slice of the specified length,
     /// initializing everything to `None`
     #[inline]
     fn alloc_slice_none<'gc, T>(&'gc self, len: usize) -> GcArray<'gc, Option<T>, Self::Id>
-        where T: GcSafe<'gc, Self::Id> {
-        unsafe {
-            self.alloc_slice_fill_with(len, |_idx| None)
-        }
+    where
+        T: GcSafe<'gc, Self::Id>,
+    {
+        unsafe { self.alloc_slice_fill_with(len, |_idx| None) }
     }
     /// Allocate a slice by repeatedly copying a single value.
     #[inline]
     fn alloc_slice_fill_copy<'gc, T>(&'gc self, len: usize, val: T) -> GcArray<'gc, T, Self::Id>
-        where T: GcSafe<'gc, Self::Id> + Copy {
-        unsafe {
-            self.alloc_slice_fill_with(len, |_idx| val)
-        }
+    where
+        T: GcSafe<'gc, Self::Id> + Copy,
+    {
+        unsafe { self.alloc_slice_fill_with(len, |_idx| val) }
     }
     /// Create a new [GcRawVec] with the specified capacity
     /// and an implicit reference to this [GcContext].
-    fn alloc_raw_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> <Self::Id as CollectorId>::RawVec<'gc, T>
-        where T: GcSafe<'gc, Self::Id>;
+    fn alloc_raw_vec_with_capacity<'gc, T>(
+        &'gc self,
+        capacity: usize,
+    ) -> <Self::Id as CollectorId>::RawVec<'gc, T>
+    where
+        T: GcSafe<'gc, Self::Id>;
     /// Create a new [GcVec] with zero initial length,
     /// with an implicit reference to this [GcContext].
     #[inline]
     fn alloc_vec<'gc, T>(&'gc self) -> GcVec<'gc, T, Self::Id>
-        where T: GcSafe<'gc, Self::Id> {
-        unsafe {
-            crate::vec::GcVec::from_raw(self.alloc_raw_vec_with_capacity::<T>(0))
-        }
+    where
+        T: GcSafe<'gc, Self::Id>,
+    {
+        unsafe { crate::vec::GcVec::from_raw(self.alloc_raw_vec_with_capacity::<T>(0)) }
     }
     /// Allocate a new [GcVec] with the specified capacity
     /// and an implicit reference to this [GcContext]
     #[inline]
     fn alloc_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> GcVec<'gc, T, Self::Id>
-        where T: GcSafe<'gc, Self::Id> {
-        unsafe {
-            crate::vec::GcVec::from_raw(self.alloc_raw_vec_with_capacity::<T>(capacity))
-        }
+    where
+        T: GcSafe<'gc, Self::Id>,
+    {
+        unsafe { crate::vec::GcVec::from_raw(self.alloc_raw_vec_with_capacity::<T>(capacity)) }
     }
 }
 /// The internal representation of a frozen context
@@ -631,8 +653,9 @@ pub unsafe trait HandleCollectorId: CollectorId {
     ///
     /// This is parameterized by the *erased* type,
     /// not by the original type.
-    type Handle<T>: GcHandle<T, System=Self::System, Id=Self>
-        where T: GcSafe<'static, Self> + ?Sized;
+    type Handle<T>: GcHandle<T, System = Self::System, Id = Self>
+    where
+        T: GcSafe<'static, Self> + ?Sized;
 
     /// Create a handle to the specified GC pointer,
     /// which can be used without a context
@@ -642,7 +665,8 @@ pub unsafe trait HandleCollectorId: CollectorId {
     /// The system is implicit in the [Gc]
     #[doc(hidden)]
     fn create_handle<'gc, T>(gc: Gc<'gc, T, Self>) -> Self::Handle<T::Branded>
-        where T: GcSafe<'gc, Self> + GcRebrand<'static, Self> + ?Sized;
+    where
+        T: GcSafe<'gc, Self> + GcRebrand<'static, Self> + ?Sized;
 }
 
 /// Uniquely identifies the collector in case there are
@@ -658,31 +682,36 @@ pub unsafe trait HandleCollectorId: CollectorId {
 ///
 /// It should be safe to assume that a collector exists
 /// if any of its pointers still do!
-pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop + 'static + for<'gc> GcSafe<'gc, Self> {
+pub unsafe trait CollectorId:
+    Copy + Eq + Hash + Debug + NullTrace + TrustedDrop + 'static + for<'gc> GcSafe<'gc, Self>
+{
     /// The type of the garbage collector system
-    type System: GcSystem<Id=Self, Context=Self::Context>;
+    type System: GcSystem<Id = Self, Context = Self::Context>;
     /// The type of [GcContext] associated with this id.
-    type Context: GcContext<System=Self::System, Id=Self>;
+    type Context: GcContext<System = Self::System, Id = Self>;
     /// The implementation of [GcRawVec] for this type.
     ///
     /// May be [crate::vec::raw::Unsupported] if vectors are unsupported.
-    type RawVec<'gc, T: GcSafe<'gc, Self>>: crate::vec::raw::GcRawVec<'gc, T, Id=Self>;
+    type RawVec<'gc, T: GcSafe<'gc, Self>>: crate::vec::raw::GcRawVec<'gc, T, Id = Self>;
     /// The raw representation of `GcArray` pointers
     /// in this collector.
-    type ArrayPtr: crate::array::repr::GcArrayPtr<Id=Self>;
+    type ArrayPtr: crate::array::repr::GcArrayPtr<Id = Self>;
 
     /// Get the runtime id of the collector that allocated the [Gc]
     ///
     /// Assumes that `T: GcSafe<'gc, Self>`, although that can't be
     /// proven at compile time.
     fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self
-        where T: ?Sized, 'gc: 'a;
+    where
+        T: ?Sized,
+        'gc: 'a;
 
     /// Resolve the CollectorId for the specified [GcArray]'s representation.
     ///
     /// This is the [GcArray] counterpart of `from_gc_ptr`
     fn resolve_array_id<'a, 'gc, T>(array: &'a GcArray<'gc, T, Self>) -> &'a Self
-        where 'gc: 'a;
+    where
+        'gc: 'a;
 
     /// Resolve the length of the specified array
     fn resolve_array_len<T>(repr: &GcArray<'_, T, Self>) -> usize;
@@ -695,7 +724,7 @@ pub unsafe trait CollectorId: Copy + Eq + Hash + Debug + NullTrace + TrustedDrop
     unsafe fn gc_write_barrier<'gc, O: GcSafe<'gc, Self> + ?Sized, V: GcSafe<'gc, Self> + ?Sized>(
         owner: &Gc<'gc, O, Self>,
         value: &Gc<'gc, V, Self>,
-        field_offset: usize
+        field_offset: usize,
     );
 
     /// Assume the ID is valid and use it to access the [GcSystem]
@@ -780,7 +809,10 @@ impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
     /// and doesn't correspond to the appropriate id.
     #[inline]
     pub unsafe fn from_raw(value: NonNull<T>) -> Self {
-        Gc { collector_id: PhantomData, value }
+        Gc {
+            collector_id: PhantomData,
+            value,
+        }
     }
     /// Create a [GcHandle] referencing this object,
     /// allowing it to be used without a context
@@ -789,7 +821,10 @@ impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
     /// Requires that the collector [supports handles](`HandleCollectorId`)
     #[inline]
     pub fn create_handle(&self) -> Id::Handle<T::Branded>
-        where Id: HandleCollectorId, T: GcRebrand<'static, Id>  {
+    where
+        Id: HandleCollectorId,
+        T: GcRebrand<'static, Id>,
+    {
         Id::create_handle(*self)
     }
 
@@ -838,15 +873,20 @@ unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> TrustedDrop for G
 unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> GcSafe<'gc, Id> for Gc<'gc, T, Id> {
     #[inline]
     unsafe fn trace_inside_gc<V>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
-        where V: GcVisitor {
+    where
+        V: GcVisitor,
+    {
         // Double indirection is fine. It's just a `Sized` type
         visitor.trace_gc(gc)
     }
 }
 /// Rebrand
 unsafe impl<'gc, 'new_gc, T, Id> GcRebrand<'new_gc, Id> for Gc<'gc, T, Id>
-    where T: GcSafe<'gc, Id> + ?Sized + GcRebrand<'new_gc, Id>,
-          Id: CollectorId, Self: Trace {
+where
+    T: GcSafe<'gc, Id> + ?Sized + GcRebrand<'new_gc, Id>,
+    Id: CollectorId,
+    Self: Trace,
+{
     type Branded = Gc<'new_gc, <T as GcRebrand<'new_gc, Id>>::Branded, Id>;
 }
 unsafe impl<'gc, T: ?Sized + GcSafe<'gc, Id>, Id: CollectorId> Trace for Gc<'gc, T, Id> {
@@ -871,8 +911,12 @@ impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Deref for Gc<'gc, T, Id>
         self.value()
     }
 }
-unsafe impl<'gc, O, V, Id> GcDirectBarrier<'gc, Gc<'gc, O, Id>> for Gc<'gc, V,Id>
-    where O: GcSafe<'gc, Id> + 'gc, V: GcSafe<'gc, Id> + 'gc, Id: CollectorId {
+unsafe impl<'gc, O, V, Id> GcDirectBarrier<'gc, Gc<'gc, O, Id>> for Gc<'gc, V, Id>
+where
+    O: GcSafe<'gc, Id> + 'gc,
+    V: GcSafe<'gc, Id> + 'gc,
+    Id: CollectorId,
+{
     #[inline(always)]
     unsafe fn write_barrier(&self, owner: &Gc<'gc, O, Id>, field_offset: usize) {
         Id::gc_write_barrier(owner, self, field_offset)
@@ -950,7 +994,11 @@ impl<'gc, T: ?Sized + GcSafe<'gc, Id> + Display, Id: CollectorId> Display for Gc
 ///
 /// This is the same reason that `Arc<T>: Send` requires `T: Sync`
 unsafe impl<'gc, T, Id> Send for Gc<'gc, T, Id>
-    where T: GcSafe<'gc, Id> + ?Sized + Sync, Id: CollectorId + Sync {}
+where
+    T: GcSafe<'gc, Id> + ?Sized + Sync,
+    Id: CollectorId + Sync,
+{
+}
 
 /// If the underlying type is `Sync`, it's safe
 /// to share garbage collected references between threads.
@@ -958,7 +1006,11 @@ unsafe impl<'gc, T, Id> Send for Gc<'gc, T, Id>
 /// The safety of the collector itself depends on whether [CollectorId] is Sync.
 /// If it is, the whole garbage collection implementation should be as well.
 unsafe impl<'gc, T, Id> Sync for Gc<'gc, T, Id>
-    where T: GcSafe<'gc, Id> + ?Sized + Sync, Id: CollectorId + Sync {}
+where
+    T: GcSafe<'gc, Id> + ?Sized + Sync,
+    Id: CollectorId + Sync,
+{
+}
 
 /// Indicates that a mutable reference to a type
 /// is safe to use without triggering a write barrier.
@@ -996,10 +1048,11 @@ unsafe impl<T: NullTrace> ImplicitWriteBarrier for T {}
 /*
  * TODO: Should we drop the Clone requirement?
  */
-pub unsafe trait GcHandle<T: GcSafe<'static, Self::Id> + ?Sized>: Sized + Clone + NullTrace
-     + for<'gc> GcSafe<'gc, Self::Id> {
+pub unsafe trait GcHandle<T: GcSafe<'static, Self::Id> + ?Sized>:
+    Sized + Clone + NullTrace + for<'gc> GcSafe<'gc, Self::Id>
+{
     /// The type of the system used with this handle
-    type System: GcSystem<Id=Self::Id>;
+    type System: GcSystem<Id = Self::Id>;
     /// The type of [CollectorId] used with this sytem
     type Id: CollectorId;
 
@@ -1031,9 +1084,10 @@ pub unsafe trait GcHandle<T: GcSafe<'static, Self::Id> + ?Sized>: Sized + Clone 
     /// at the next safepoint.
     fn bind_to<'new_gc>(
         &self,
-        context: &'new_gc <Self::System as GcSystem>::Context
+        context: &'new_gc <Self::System as GcSystem>::Context,
     ) -> Gc<'new_gc, <T as GcRebrand<'new_gc, Self::Id>>::Branded, Self::Id>
-        where T: GcRebrand<'new_gc, Self::Id>;
+    where
+        T: GcRebrand<'new_gc, Self::Id>;
 }
 
 /// Safely trigger a write barrier before
@@ -1172,7 +1226,12 @@ pub unsafe trait GcSafe<'gc, Id: CollectorId>: Trace + TrustedDrop {
     ///
     /// Only used by procedural derive
     #[doc(hidden)]
-    fn assert_gc_safe() -> bool where Self: Sized { true }
+    fn assert_gc_safe() -> bool
+    where
+        Self: Sized,
+    {
+        true
+    }
     /// Trace this object behind a [Gc] pointer.
     ///
     /// This is **required** to delegate to one of the following methods on [GcVisitor]:
@@ -1186,7 +1245,8 @@ pub unsafe trait GcSafe<'gc, Id: CollectorId>: Trace + TrustedDrop {
     ///
     /// The user is required to supply an appropriate [Gc] pointer.
     unsafe fn trace_inside_gc<V>(gc: &mut Gc<'gc, Self, Id>, visitor: &mut V) -> Result<(), V::Err>
-        where V: GcVisitor;
+    where
+        V: GcVisitor;
 }
 
 /// A [GcSafe] type with all garbage-collected pointers
@@ -1403,8 +1463,11 @@ pub unsafe trait DynTrace<'gc, Id: CollectorId> {}
 unsafe impl<'gc, Id: CollectorId, T: ?Sized + Trace + GcSafe<'gc, Id>> DynTrace<'gc, Id> for T {}
 
 impl<'gc, T, U, Id> CoerceUnsized<Gc<'gc, U, Id>> for Gc<'gc, T, Id>
-    where T: ?Sized + GcSafe<'gc, Id> + Unsize<U>, U: ?Sized + GcSafe<'gc, Id>, Id: CollectorId {
-
+where
+    T: ?Sized + GcSafe<'gc, Id> + Unsize<U>,
+    U: ?Sized + GcSafe<'gc, Id>,
+    Id: CollectorId,
+{
 }
 
 /// Marker types for types that don't need to be traced
@@ -1414,7 +1477,10 @@ pub unsafe trait NullTrace: Trace + TraceImmutable {
     /// Dummy method for macros to verify that a type actually implements `NullTrace`
     #[doc(hidden)]
     #[inline]
-    fn verify_null_trace() where Self: Sized {
+    fn verify_null_trace()
+    where
+        Self: Sized,
+    {
     }
 }
 
@@ -1440,36 +1506,41 @@ pub unsafe trait GcVisitor: Sized {
     ///
     /// ## Safety
     /// Undefined behavior if the GC pointer isn't properly visited.
-    unsafe fn trace_gc<'gc, T, Id>(
-        &mut self, gc: &mut Gc<'gc, T, Id>
-    ) -> Result<(), Self::Err>
-        where T: GcSafe<'gc, Id>, Id: CollectorId;
+    unsafe fn trace_gc<'gc, T, Id>(&mut self, gc: &mut Gc<'gc, T, Id>) -> Result<(), Self::Err>
+    where
+        T: GcSafe<'gc, Id>,
+        Id: CollectorId;
 
     /// Visit a garbage collected trait object.
     ///
     /// ## Safety
     /// The trait object must point to a garbage collected object.
     unsafe fn trace_trait_object<'gc, T, Id>(
-        &mut self, gc: &mut Gc<'gc, T, Id>
+        &mut self,
+        gc: &mut Gc<'gc, T, Id>,
     ) -> Result<(), Self::Err>
-        where T: ?Sized + GcSafe<'gc, Id> + Pointee<Metadata=DynMetadata<T>> + DynTrace<'gc, Id>,
-              Id: CollectorId;
+    where
+        T: ?Sized + GcSafe<'gc, Id> + Pointee<Metadata = DynMetadata<T>> + DynTrace<'gc, Id>,
+        Id: CollectorId;
 
     /// Visit a garbage collected vector.
     ///
     /// ## Safety
     /// Undefined behavior if the vector is invalid.
-    unsafe fn trace_vec<'gc, T, V>(
-        &mut self, raw: &mut V
-    ) -> Result<(), Self::Err>
-        where T: GcSafe<'gc, V::Id>, V: GcRawVec<'gc, T>;
+    unsafe fn trace_vec<'gc, T, V>(&mut self, raw: &mut V) -> Result<(), Self::Err>
+    where
+        T: GcSafe<'gc, V::Id>,
+        V: GcRawVec<'gc, T>;
 
     /// Visit a garbage collected array.
     ///
     /// ## Safety
     /// Undefined behavior if the array is invalid.
     unsafe fn trace_array<'gc, T, Id>(
-        &mut self, array: &mut GcArray<'gc, T, Id>
+        &mut self,
+        array: &mut GcArray<'gc, T, Id>,
     ) -> Result<(), Self::Err>
-        where T: GcSafe<'gc, Id>, Id: CollectorId;
+    where
+        T: GcSafe<'gc, Id>,
+        Id: CollectorId;
 }

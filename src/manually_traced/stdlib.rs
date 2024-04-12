@@ -9,7 +9,6 @@ use zerogc_derive::unsafe_gc_impl;
 
 use crate::prelude::*;
 
-
 unsafe_gc_impl! {
     target => HashMap<K, V, S>,
     params => [K: TraceImmutable, V, S: 'static],
@@ -36,7 +35,6 @@ unsafe_gc_impl! {
     },
 }
 
-
 unsafe_gc_impl! {
     target => HashSet<T, S>,
     params => [T: TraceImmutable, S: 'static],
@@ -56,7 +54,7 @@ unsafe_gc_impl! {
     trace_template => |self, visitor| {
         for val in self.iter() {
             visitor.trace_immutable::<T>(val)?;
-        }       
+        }
         // NOTE: Because S: 'static, we can assume S: NullTrace
         Ok(())
     },

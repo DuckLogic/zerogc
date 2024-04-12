@@ -1,5 +1,5 @@
-use std::ptr::NonNull;
 use std::alloc::Layout;
+use std::ptr::NonNull;
 
 #[cfg(feature = "epsilon-arena-alloc")]
 mod arena;
@@ -44,4 +44,3 @@ impl EpsilonAlloc for StdEpsilonAlloc {
 
     const NEEDS_EXPLICIT_FREE: bool = true;
 }
-

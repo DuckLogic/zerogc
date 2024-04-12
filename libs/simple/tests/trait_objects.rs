@@ -1,16 +1,14 @@
 use core::cell::Cell;
 
-use zerogc::{Trace, safepoint, DynTrace, trait_object_trace, GcSimpleAlloc};
+use zerogc::{safepoint, trait_object_trace, DynTrace, GcSimpleAlloc, Trace};
 
-use zerogc_simple::{SimpleCollector, Gc, CollectorId as SimpleCollectorId, GcConfig};
 use slog::Logger;
+use zerogc_simple::{CollectorId as SimpleCollectorId, Gc, GcConfig, SimpleCollector};
 
 fn test_collector() -> SimpleCollector {
     let mut config = GcConfig::default();
     config.always_force_collect = true; // Force collections for predictability
-    SimpleCollector::with_config(
-        config, Logger::root(::slog::Discard, ::slog::o!())
-    )
+    SimpleCollector::with_config(config, Logger::root(::slog::Discard, ::slog::o!()))
 }
 
 trait Foo<'gc>: DynTrace<'gc, SimpleCollectorId> {
@@ -35,11 +33,11 @@ fn bar<'gc>(gc: Gc<'gc, dyn Foo<'gc> + 'gc>) -> i32 {
 #[zerogc(collector_ids(SimpleCollectorId), unsafe_skip_drop)]
 struct Bar<'gc> {
     inner: Option<Gc<'gc, Bar<'gc>>>,
-    val: Gc<'gc, i32>
+    val: Gc<'gc, i32>,
 }
 impl<'gc> Foo<'gc> for Bar<'gc> {
     fn method(&self) -> i32 {
-       *self.val
+        *self.val
     }
     fn validate(&self) {
         assert_eq!(*self.val, 12);
@@ -62,14 +60,28 @@ fn foo_bar() {
     let collector = test_collector();
     let mut context = collector.into_context();
     let val = context.alloc(12);
-    let inner = context.alloc(Bar { inner: None, val: context.alloc(4) });
-    let gc: Gc<'_, dyn Foo<'_>> = context.alloc(Bar { inner: Some(inner), val });
+    let inner = context.alloc(Bar {
+        inner: None,
+        val: context.alloc(4),
+    });
+    let gc: Gc<'_, dyn Foo<'_>> = context.alloc(Bar {
+        inner: Some(inner),
+        val,
+    });
     assert_eq!(bar(gc), 24);
     // Should be traced correctly
     let gc = safepoint!(context, gc);
-    assert_eq!(BAR_DROP_COUNT.with(Cell::get),  0, "Expected Bar to be retained");
+    assert_eq!(
+        BAR_DROP_COUNT.with(Cell::get),
+        0,
+        "Expected Bar to be retained"
+    );
     gc.validate();
     // Trace inner, should end up dropping Bar
     safepoint!(context, ());
-    assert_eq!(BAR_DROP_COUNT.with(Cell::get), 2, "Expected Bar to be dropped");
+    assert_eq!(
+        BAR_DROP_COUNT.with(Cell::get),
+        2,
+        "Expected Bar to be dropped"
+    );
 }

@@ -8,18 +8,17 @@
 //! at once (although references to it can be freely sent around once already allocated).
 #![cfg(feature = "epsilon")]
 
-mod layout;
 mod alloc;
 mod handle;
-
+mod layout;
 
 use crate::{CollectorId, GcContext, GcSafe, GcSimpleAlloc, GcSystem, Trace};
-use std::ptr::NonNull;
 use std::alloc::Layout;
-use std::rc::Rc;
 use std::cell::{Cell, OnceCell};
+use std::ptr::NonNull;
+use std::rc::Rc;
 
-use self::alloc::{EpsilonAlloc};
+use self::alloc::EpsilonAlloc;
 use self::layout::EpsilonRawVec;
 
 /// The implementation of [EpsilonRawVec]
@@ -55,7 +54,9 @@ pub const fn gc<'gc, T: ?Sized + GcSafe<'gc, EpsilonCollectorId> + 'gc>(ptr: &'g
 ///
 /// See also: [gc] for converting `&T` -> `Gc<T>`
 #[inline]
-pub const fn gc_array<'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'gc>(slice: &'gc [T]) -> GcArray<'gc, T> {
+pub const fn gc_array<'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'gc>(
+    slice: &'gc [T],
+) -> GcArray<'gc, T> {
     /*
      * SAFETY: Epsilon uses the 'fat' representation for GcArrays.
      * That means that repr(GcArray) == repr(&[T]).
@@ -64,7 +65,7 @@ pub const fn gc_array<'gc, T: GcSafe<'gc, EpsilonCollectorId> + 'gc>(slice: &'gc
      * back and forth between them
      */
     unsafe { std::mem::transmute::<&'gc [T], crate::GcArray<'gc, T, EpsilonCollectorId>>(slice) }
-} 
+}
 
 /// Coerce a `&str` into a `GcString`
 ///
@@ -122,7 +123,7 @@ pub type GcString<'gc> = crate::array::GcString<'gc, EpsilonCollectorId>;
 /// **WARNING**: This never actually collects any garbage.
 pub struct EpsilonContext {
     state: NonNull<State>,
-    root: bool
+    root: bool,
 }
 unsafe impl GcContext for EpsilonContext {
     type System = EpsilonSystem;
@@ -143,19 +144,27 @@ unsafe impl GcContext for EpsilonContext {
 
     #[inline]
     unsafe fn recurse_context<T, F, R>(&self, value: &mut &mut T, func: F) -> R
-        where T: Trace, F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R {
+    where
+        T: Trace,
+        F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R,
+    {
         // safepoints are a nop since there is nothing to track
-        let mut child = EpsilonContext { state: self.state, root: false };
+        let mut child = EpsilonContext {
+            state: self.state,
+            root: false,
+        };
         func(&mut child, &mut *value)
     }
 
     #[inline]
     fn system(&self) -> &'_ Self::System {
         // Pointer to a pointer
-        unsafe { NonNull::<NonNull<State>>::from(&self.state)
-            .cast::<EpsilonSystem>().as_ref() }
+        unsafe {
+            NonNull::<NonNull<State>>::from(&self.state)
+                .cast::<EpsilonSystem>()
+                .as_ref()
+        }
     }
-
 
     #[inline]
     fn id(&self) -> Self::Id {
@@ -177,7 +186,7 @@ struct State {
     alloc: alloc::Default,
     /// The head of the linked-list of allocated objects.
     head: Cell<Option<NonNull<layout::EpsilonHeader>>>,
-    empty_vec: OnceCell<NonNull<layout::EpsilonVecHeader>>
+    empty_vec: OnceCell<NonNull<layout::EpsilonVecHeader>>,
 }
 impl State {
     #[inline]
@@ -203,14 +212,19 @@ impl Drop for State {
                 let next = header.as_ref().next;
                 if self::alloc::Default::NEEDS_EXPLICIT_FREE {
                     let value_layout = header.as_ref().determine_layout();
-                    let original_header = NonNull::new_unchecked(header.cast::<u8>()
-                        .as_ptr()
-                        .sub(header.as_ref().type_info.layout.common_header_offset()));
-                    let header_size = value_ptr.cast::<u8>()
-                        .offset_from(original_header.as_ptr()) as usize;
+                    let original_header = NonNull::new_unchecked(
+                        header
+                            .cast::<u8>()
+                            .as_ptr()
+                            .sub(header.as_ref().type_info.layout.common_header_offset()),
+                    );
+                    let header_size =
+                        value_ptr.cast::<u8>().offset_from(original_header.as_ptr()) as usize;
                     let combined_layout = Layout::from_size_align_unchecked(
                         value_layout.size() + header_size,
-                        value_layout.align().max(layout::EpsilonHeader::LAYOUT.align())
+                        value_layout
+                            .align()
+                            .max(layout::EpsilonHeader::LAYOUT.align()),
                     );
                     self.alloc.free_alloc(original_header, combined_layout);
                 }
@@ -226,13 +240,13 @@ impl Drop for State {
 /// **WARNING**: This never actually collects any memory.
 pub struct EpsilonSystem {
     /// The raw state of the system
-    state: NonNull<State>
+    state: NonNull<State>,
 }
 impl EpsilonSystem {
     #[inline]
     fn from_state(state: Rc<State>) -> EpsilonSystem {
         EpsilonSystem {
-            state: unsafe { NonNull::new_unchecked(Rc::into_raw(state) as *mut _) }
+            state: unsafe { NonNull::new_unchecked(Rc::into_raw(state) as *mut _) },
         }
     }
 
@@ -249,7 +263,7 @@ impl EpsilonSystem {
         EpsilonSystem::from_state(Rc::new(State {
             alloc: self::alloc::Default::new(),
             head: Cell::new(None),
-            empty_vec: OnceCell::new()
+            empty_vec: OnceCell::new(),
         }))
     }
 
@@ -265,8 +279,8 @@ impl EpsilonSystem {
     #[inline]
     pub fn new_context(&self) -> EpsilonContext {
         EpsilonContext {
-            state: unsafe { NonNull::new_unchecked(Rc::into_raw(self.clone_rc()) as *mut _ ) },
-            root: true
+            state: unsafe { NonNull::new_unchecked(Rc::into_raw(self.clone_rc()) as *mut _) },
+            root: true,
         }
     }
 }
@@ -282,30 +296,39 @@ unsafe impl GcSystem for EpsilonSystem {
 }
 unsafe impl GcSimpleAlloc for EpsilonContext {
     #[inline]
-    unsafe fn alloc_uninit<'gc, T>(&'gc self) -> *mut T where T: GcSafe<'gc, EpsilonCollectorId> {
+    unsafe fn alloc_uninit<'gc, T>(&'gc self) -> *mut T
+    where
+        T: GcSafe<'gc, EpsilonCollectorId>,
+    {
         let tp = self::layout::TypeInfo::of::<T>();
-        let needs_header = self::alloc::Default::NEEDS_EXPLICIT_FREE
-            || !tp.may_ignore();
+        let needs_header = self::alloc::Default::NEEDS_EXPLICIT_FREE || !tp.may_ignore();
         let ptr = if needs_header {
             let (overall_layout, offset) = self::layout::EpsilonHeader::LAYOUT
-                .extend(Layout::new::<T>()).unwrap();
+                .extend(Layout::new::<T>())
+                .unwrap();
             let mem = self.system().state().alloc.alloc_layout(overall_layout);
             let header = mem.cast::<self::layout::EpsilonHeader>();
             header.as_ptr().write(self::layout::EpsilonHeader {
                 type_info: tp,
-                next: None
+                next: None,
             });
             self.system().state().push_state(header);
             mem.as_ptr().add(offset)
         } else {
-            self.system().state().alloc.alloc_layout(Layout::new::<T>()).as_ptr()
+            self.system()
+                .state()
+                .alloc
+                .alloc_layout(Layout::new::<T>())
+                .as_ptr()
         };
         ptr.cast()
     }
 
     #[inline]
     fn alloc<'gc, T>(&'gc self, value: T) -> crate::Gc<'gc, T, Self::Id>
-        where T: GcSafe<'gc, Self::Id> {
+    where
+        T: GcSafe<'gc, Self::Id>,
+    {
         unsafe {
             let ptr = self.alloc_uninit::<T>();
             ptr.write(value);
@@ -315,7 +338,9 @@ unsafe impl GcSimpleAlloc for EpsilonContext {
 
     #[inline]
     unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> *mut T
-        where T: GcSafe<'gc, Self::Id> {
+    where
+        T: GcSafe<'gc, Self::Id>,
+    {
         let type_info = self::layout::TypeInfo::of_array::<T>();
         let (overall_layout, offset) = Layout::new::<self::layout::EpsilonArrayHeader>()
             .extend(Layout::array::<T>(len).unwrap())
@@ -325,23 +350,24 @@ unsafe impl GcSimpleAlloc for EpsilonContext {
         header.as_ptr().write(self::layout::EpsilonArrayHeader {
             common_header: self::layout::EpsilonHeader {
                 type_info,
-                next: None
+                next: None,
             },
-            len
+            len,
         });
-        self.system().state().push_state(NonNull::from(&header.as_ref().common_header));
+        self.system()
+            .state()
+            .push_state(NonNull::from(&header.as_ref().common_header));
         mem.as_ptr().add(offset).cast()
     }
 
     #[inline]
     fn alloc_raw_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> EpsilonRawVec<'gc, T>
-    where T: GcSafe<'gc, Self::Id> {
+    where
+        T: GcSafe<'gc, Self::Id>,
+    {
         if capacity == 0 {
             if let Some(&empty_ptr) = self.system().state().empty_vec.get() {
-                return unsafe { self::layout::EpsilonRawVec::from_raw_parts(
-                    empty_ptr,
-                    self
-                ) };
+                return unsafe { self::layout::EpsilonRawVec::from_raw_parts(empty_ptr, self) };
             }
         }
         let type_info = layout::TypeInfo::of_vec::<T>();
@@ -354,17 +380,16 @@ unsafe impl GcSimpleAlloc for EpsilonContext {
             header.as_ptr().write(self::layout::EpsilonVecHeader {
                 common_header: self::layout::EpsilonHeader {
                     type_info,
-                    next: None
+                    next: None,
                 },
                 len: Cell::new(0),
-                capacity
+                capacity,
             });
-            self.system().state().push_state(NonNull::from(&header.as_ref().common_header));
+            self.system()
+                .state()
+                .push_state(NonNull::from(&header.as_ref().common_header));
             let value_ptr = mem.as_ptr().add(offset).cast::<T>();
-            let raw = self::layout::EpsilonRawVec::from_raw_parts(
-                header,
-                self
-            );
+            let raw = self::layout::EpsilonRawVec::from_raw_parts(header, self);
             debug_assert_eq!(raw.as_ptr(), value_ptr);
             raw
         }
@@ -378,7 +403,7 @@ unsafe impl GcSimpleAlloc for EpsilonContext {
 /// It is equivalent to [
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct EpsilonCollectorId {
-    _priv: ()
+    _priv: (),
 }
 crate::impl_nulltrace_for_static!(EpsilonCollectorId);
 unsafe impl CollectorId for EpsilonCollectorId {
@@ -390,13 +415,20 @@ unsafe impl CollectorId for EpsilonCollectorId {
     type ArrayPtr = zerogc::array::repr::FatArrayPtr<Self>;
 
     #[inline]
-    fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self where T: ?Sized, 'gc: 'a {
+    fn from_gc_ptr<'a, 'gc, T>(_gc: &'a Gc<'gc, T>) -> &'a Self
+    where
+        T: ?Sized,
+        'gc: 'a,
+    {
         const ID: EpsilonCollectorId = EpsilonCollectorId { _priv: () };
         &ID
     }
 
     #[inline]
-    fn resolve_array_id<'a, 'gc, T>(_array: &'a GcArray<'gc, T>) -> &'a Self where 'gc: 'a {
+    fn resolve_array_id<'a, 'gc, T>(_array: &'a GcArray<'gc, T>) -> &'a Self
+    where
+        'gc: 'a,
+    {
         const ID: EpsilonCollectorId = EpsilonCollectorId { _priv: () };
         &ID
     }
@@ -406,13 +438,16 @@ unsafe impl CollectorId for EpsilonCollectorId {
         repr.len()
     }
 
-
     #[inline]
     unsafe fn gc_write_barrier<'gc, T, V>(
         _owner: &Gc<'gc, T>,
         _value: &Gc<'gc, V>,
-        _field_offset: usize
-    ) where T: GcSafe<'gc, Self> + ?Sized, V: GcSafe<'gc, Self> + ?Sized {}
+        _field_offset: usize,
+    ) where
+        T: GcSafe<'gc, Self> + ?Sized,
+        V: GcSafe<'gc, Self> + ?Sized,
+    {
+    }
 
     unsafe fn assume_valid_system(&self) -> &Self::System {
         /*
@@ -430,12 +465,12 @@ mod test {
     #[test]
     fn lifetime_variance<'a>() {
         #[derive(Trace, Copy, Clone)]
-        #[zerogc(copy, collector_ids(EpsilonCollectorId))] 
+        #[zerogc(copy, collector_ids(EpsilonCollectorId))]
         enum ShouldBeVariant<'gc> {
             First(Gc<'gc, ShouldBeVariant<'gc>>),
             Second(u32),
             #[allow(unused)]
-            Array(GcArray<'gc, ShouldBeVariant<'gc>>)
+            Array(GcArray<'gc, ShouldBeVariant<'gc>>),
         }
         const STATIC: Gc<'static, u32> = gc(&32);
         const SECOND: &ShouldBeVariant<'static> = &ShouldBeVariant::Second(32);
@@ -448,6 +483,5 @@ mod test {
         assert_eq!(s.value(), &32);
         let k: Gc<'a, ShouldBeVariant<'a>> = covariant::<'a, ShouldBeVariant<'static>>(FIRST) as _;
         assert!(matches!(k.value(), ShouldBeVariant::First(_)));
-        
     }
 }

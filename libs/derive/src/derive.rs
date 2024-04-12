@@ -1,11 +1,16 @@
-use darling::{Error, FromMeta, FromGenerics, FromTypeParam, FromDeriveInput, FromVariant, FromField};
-use proc_macro2::{Ident, TokenStream, Span};
-use syn::{GenericArgument, GenericParam, Generics, Lifetime, LifetimeDef, LitStr, Meta, Path, PathArguments, Type, TypeParam, TypePath, parse_quote};
-use darling::util::{SpannedValue};
-use quote::{quote_spanned, quote, format_ident, ToTokens};
-use darling::ast::{Style, Data};
+use darling::ast::{Data, Style};
+use darling::util::SpannedValue;
+use darling::{
+    Error, FromDeriveInput, FromField, FromGenerics, FromMeta, FromTypeParam, FromVariant,
+};
+use proc_macro2::{Ident, Span, TokenStream};
+use quote::{format_ident, quote, quote_spanned, ToTokens};
 use std::collections::HashSet;
 use syn::spanned::Spanned;
+use syn::{
+    parse_quote, GenericArgument, GenericParam, Generics, Lifetime, LifetimeDef, LitStr, Meta,
+    Path, PathArguments, Type, TypeParam, TypePath,
+};
 
 use crate::{FromLitStr, MetaList};
 
@@ -13,7 +18,7 @@ use crate::{FromLitStr, MetaList};
 pub enum TraceDeriveKind {
     NullTrace,
     Regular,
-    Deserialize
+    Deserialize,
 }
 
 trait PossiblyIgnoredParam {
@@ -26,12 +31,16 @@ impl PossiblyIgnoredParam for syn::Lifetime {
 }
 impl PossiblyIgnoredParam for Ident {
     fn check_ignored(&self, generics: &TraceGenerics) -> bool {
-        generics.type_params.iter().any(|param| (param.ignore || param.collector_id) && param.ident == *self)
+        generics
+            .type_params
+            .iter()
+            .any(|param| (param.ignore || param.collector_id) && param.ident == *self)
     }
 }
 impl PossiblyIgnoredParam for Path {
     fn check_ignored(&self, generics: &TraceGenerics) -> bool {
-        self.get_ident().map_or(false, |ident| ident.check_ignored(generics))
+        self.get_ident()
+            .map_or(false, |ident| ident.check_ignored(generics))
     }
 }
 impl PossiblyIgnoredParam for syn::Type {
@@ -39,10 +48,8 @@ impl PossiblyIgnoredParam for syn::Type {
         match *self {
             Type::Group(ref e) => e.elem.check_ignored(generics),
             Type::Paren(ref p) => p.elem.check_ignored(generics),
-            Type::Path(ref p) if p.qself.is_none() => {
-                p.path.check_ignored(generics)
-            },
-            _ => false
+            Type::Path(ref p) if p.qself.is_none() => p.path.check_ignored(generics),
+            _ => false,
         }
     }
 }
@@ -52,7 +59,7 @@ struct TraceGenerics {
     original: Generics,
     gc_lifetime: Option<Lifetime>,
     ignored_lifetimes: HashSet<Lifetime>,
-    type_params: Vec<TraceTypeParam>
+    type_params: Vec<TraceTypeParam>,
 }
 impl TraceGenerics {
     fn is_ignored<P: PossiblyIgnoredParam>(&self, item: &P) -> bool {
@@ -60,8 +67,10 @@ impl TraceGenerics {
     }
     /// Return all the "regular" type parameters,
     /// excluding `Id` parameters and  those marked `#[zerogc(ignore)]`
-    fn regular_type_params(&self) -> impl Iterator<Item=&'_ TraceTypeParam> + '_ {
-        self.type_params.iter().filter(|param| !param.ignore && !param.collector_id)
+    fn regular_type_params(&self) -> impl Iterator<Item = &'_ TraceTypeParam> + '_ {
+        self.type_params
+            .iter()
+            .filter(|param| !param.ignore && !param.collector_id)
     }
     fn normalize(&mut self) -> Result<(), Error> {
         for tp in &mut self.type_params {
@@ -69,12 +78,18 @@ impl TraceGenerics {
         }
         if let Some(ref gc) = self.gc_lifetime {
             if self.ignored_lifetimes.contains(gc) {
-                return Err(Error::custom("Attribute can't be a gc_lifetime but also be ignored")
-                    .with_span(gc))
+                return Err(
+                    Error::custom("Attribute can't be a gc_lifetime but also be ignored")
+                        .with_span(gc),
+                );
             }
         }
-        if let (&None, Some(gc)) = (&self.gc_lifetime, self.original.lifetimes()
-            .find(|lt| lt.lifetime.ident == "gc")) {
+        if let (&None, Some(gc)) = (
+            &self.gc_lifetime,
+            self.original
+                .lifetimes()
+                .find(|lt| lt.lifetime.ident == "gc"),
+        ) {
             self.gc_lifetime = Some(gc.lifetime.clone());
         }
         for lt in self.original.lifetimes() {
@@ -82,7 +97,7 @@ impl TraceGenerics {
             let ignored = self.ignored_lifetimes.contains(lt);
             let is_gc = Some(lt) == self.gc_lifetime.as_ref();
             if !ignored && !is_gc {
-                return Err(Error::custom("Lifetime must be either ignored or 'gc").with_span(lt))
+                return Err(Error::custom("Lifetime must be either ignored or 'gc").with_span(lt));
             }
         }
         Ok(())
@@ -98,25 +113,23 @@ impl FromGenerics for TraceGenerics {
             original: generics.clone(),
             gc_lifetime: None,
             ignored_lifetimes: Default::default(),
-            type_params: Vec::new()
+            type_params: Vec::new(),
         };
         let mut errors = Vec::new();
         for param in generics.params.iter() {
             match *param {
-                GenericParam::Type(ref tp) => {
-                    match res._handle_type(tp) {
-                        Ok(()) => {},
-                        Err(e) => {
-                            errors.push(e);
-                        }
+                GenericParam::Type(ref tp) => match res._handle_type(tp) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        errors.push(e);
                     }
-                }
-                GenericParam::Lifetime(_) => {},
+                },
+                GenericParam::Lifetime(_) => {}
 
-                GenericParam::Const(_) => {
-                    errors.push(Error::custom("NYI: const parameters are currently unsupported")
-                        .with_span(param))
-                }
+                GenericParam::Const(_) => errors.push(
+                    Error::custom("NYI: const parameters are currently unsupported")
+                        .with_span(param),
+                ),
             }
         }
         if errors.is_empty() {
@@ -140,7 +153,9 @@ pub struct TraceTypeParam {
 impl TraceTypeParam {
     fn normalize(&mut self) -> Result<(), Error> {
         if self.ignore && self.collector_id {
-            return Err(Error::custom("Type parameter can't be ignored but also collector_id"))
+            return Err(Error::custom(
+                "Type parameter can't be ignored but also collector_id",
+            ));
         }
         if self.ident == "Id" && !self.collector_id {
             crate::emit_warning(
@@ -172,8 +187,6 @@ impl<T: FromMeta + Default> FromMeta for FromOrDefault<T> {
     fn from_word() -> darling::Result<Self> {
         Ok(Default::default())
     }
-
-
 }
 
 #[derive(Debug, FromField)]
@@ -210,7 +223,7 @@ struct TraceField {
     ///
     /// NOTE: The macro has builtin cycle-protection for `Box<Foo>`.
     /// It's only the existence of 'FooIndirect' that causes a problem.
-    /// 
+    ///
     /// For example, the following works fine without an explicit attribute:
     /// ```no_run
     /// # use zerogc_derive::Trace;
@@ -229,13 +242,13 @@ struct TraceField {
     #[darling(default, rename = "serde")]
     serde_opts: Option<SerdeFieldOpts>,
     #[darling(forward_attrs(serde))]
-    attrs: Vec<syn::Attribute>
+    attrs: Vec<syn::Attribute>,
 }
 impl TraceField {
     fn expand_trace(&self, idx: usize, access: &FieldAccess, immutable: bool) -> TokenStream {
         let access = match self.ident {
             Some(ref name) => access.access_named_field(name.clone()),
-            None => access.access_indexed_field(idx, self.ty.span())
+            None => access.access_indexed_field(idx, self.ty.span()),
         };
         let ty = &self.ty;
         let trait_name: Path = if immutable {
@@ -258,14 +271,18 @@ struct TraceVariant {
     ident: Ident,
     fields: darling::ast::Fields<TraceField>,
     #[darling(forward_attrs(serde))]
-    attrs: Vec<syn::Attribute>
+    attrs: Vec<syn::Attribute>,
 }
 impl TraceVariant {
-    fn fields(&self) -> impl Iterator<Item=&'_ TraceField> + '_ {
+    fn fields(&self) -> impl Iterator<Item = &'_ TraceField> + '_ {
         self.fields.iter()
     }
     pub fn destructure(&self, immutable: bool) -> (TokenStream, FieldAccess) {
-        let mutability = if !immutable { Some(<syn::Token![mut]>::default()) } else { None };
+        let mutability = if !immutable {
+            Some(<syn::Token![mut]>::default())
+        } else {
+            None
+        };
         match self.fields.style {
             Style::Unit => (quote!(), FieldAccess::None),
             Style::Tuple => {
@@ -274,14 +291,22 @@ impl TraceVariant {
                     let name = format_ident!("_member{}", span = field.ty.span(), idx);
                     quote!(ref #mutability #name)
                 });
-                (quote!((#(#destructure),*)), FieldAccess::Variable {
-                    prefix: Some(prefix)
-                })
-            },
+                (
+                    quote!((#(#destructure),*)),
+                    FieldAccess::Variable {
+                        prefix: Some(prefix),
+                    },
+                )
+            }
             Style::Struct => {
-                let fields = self.fields.iter()
+                let fields = self
+                    .fields
+                    .iter()
                     .map(|field| field.ident.as_ref().unwrap());
-                (quote!({ #(ref #mutability #fields),* }), FieldAccess::Variable { prefix: None })
+                (
+                    quote!({ #(ref #mutability #fields),* }),
+                    FieldAccess::Variable { prefix: None },
+                )
             }
         }
     }
@@ -291,7 +316,7 @@ impl TraceVariant {
 #[derive(Debug, Clone, FromMeta)]
 struct CustomSerdeBounds {
     /// The custom deserialize bound
-    deserialize: LitStr
+    deserialize: LitStr,
 }
 
 /// Options for `#[zerogc(serde)]` on a type
@@ -350,7 +375,7 @@ struct SerdeFieldOpts {
     /// regular `#[serde(default = "...")]`
     /// (but not with the #[zerogc(serde(...))])` syntax)
     #[darling(default)]
-    skip_deserializing: bool
+    skip_deserializing: bool,
 }
 
 #[derive(Debug, FromDeriveInput)]
@@ -382,19 +407,18 @@ pub struct TraceDeriveInput {
     #[darling(default, rename = "serde")]
     serde_opts: Option<SerdeTypeOpts>,
     #[darling(forward_attrs(serde))]
-    attrs: Vec<syn::Attribute>
+    attrs: Vec<syn::Attribute>,
 }
 impl TraceDeriveInput {
     fn all_fields(&self) -> Vec<&TraceField> {
         match self.data {
-            Data::Enum(ref variants) => {
-                variants.iter().flat_map(|var| var.fields()).collect()
-            },
-            Data::Struct(ref fields) => fields.iter().collect()
+            Data::Enum(ref variants) => variants.iter().flat_map(|var| var.fields()).collect(),
+            Data::Struct(ref fields) => fields.iter().collect(),
         }
     }
     pub fn determine_field_types(&self, include_ignored: bool) -> HashSet<Type> {
-        self.all_fields().iter()
+        self.all_fields()
+            .iter()
             .filter(|f| !f.unsafe_skip_trace || include_ignored)
             .map(|fd| &fd.ty)
             .cloned()
@@ -402,29 +426,44 @@ impl TraceDeriveInput {
     }
     pub fn normalize(&mut self, kind: TraceDeriveKind) -> Result<(), Error> {
         if *self.nop_trace {
-            crate::emit_warning("#[zerogc(nop_trace)] is deprecated (use #[derive(NullTrace)] instead)", self.nop_trace.span())
+            crate::emit_warning(
+                "#[zerogc(nop_trace)] is deprecated (use #[derive(NullTrace)] instead)",
+                self.nop_trace.span(),
+            )
         }
         if let Some(ref gc_lifetime) = self.generics.gc_lifetime {
             if matches!(kind, TraceDeriveKind::NullTrace) {
-                return Err(Error::custom("A NullTrace type should not have a 'gc lifetime").with_span(gc_lifetime))
+                return Err(
+                    Error::custom("A NullTrace type should not have a 'gc lifetime")
+                        .with_span(gc_lifetime),
+                );
             }
         }
         self.collector_ids.get_or_insert_with(Default::default);
         for ignored in &self.ignore_params.0 {
-            let tp = self.generics.type_params.iter_mut()
+            let tp = self
+                .generics
+                .type_params
+                .iter_mut()
                 .find(|param| &param.ident == ignored)
-                .ok_or_else(|| Error::custom("Unknown type parameter").with_span(&ignored))?; 
+                .ok_or_else(|| Error::custom("Unknown type parameter").with_span(&ignored))?;
             if tp.ignore {
-                return Err(Error::custom("Already marked as a collector id").with_span(&ignored))
+                return Err(Error::custom("Already marked as a collector id").with_span(&ignored));
             }
             tp.ignore = true;
         }
-        self.generics.ignored_lifetimes.extend(self.ignore_lifetimes.0.iter().map(|lt| lt.0.clone()));
+        self.generics
+            .ignored_lifetimes
+            .extend(self.ignore_lifetimes.0.iter().map(|lt| lt.0.clone()));
         for id in self.collector_ids.as_ref().unwrap().0.iter() {
-            if let Some(tp) = self.generics.type_params.iter_mut()
-                .find(|param| id.is_ident(&param.ident)) {
+            if let Some(tp) = self
+                .generics
+                .type_params
+                .iter_mut()
+                .find(|param| id.is_ident(&param.ident))
+            {
                 if tp.collector_id {
-                    return Err(Error::custom("Already marked as collector id").with_span(&id))
+                    return Err(Error::custom("Already marked as collector id").with_span(&id));
                 }
                 tp.collector_id = true;
             }
@@ -432,10 +471,15 @@ impl TraceDeriveInput {
         self.generics.normalize()?;
 
         if self.is_copy && self.unsafe_skip_drop {
-            return Err(Error::custom("Can't specify both #[zerogc(copy)] and #[zerogc(unsafe_skip_trace)]"))
+            return Err(Error::custom(
+                "Can't specify both #[zerogc(copy)] and #[zerogc(unsafe_skip_trace)]",
+            ));
         }
         if self.is_copy && matches!(kind, TraceDeriveKind::NullTrace) {
-            crate::emit_warning("#[zerogc(copy)] is meaningless on NullTrace", self.ident.span())
+            crate::emit_warning(
+                "#[zerogc(copy)] is meaningless on NullTrace",
+                self.ident.span(),
+            )
         }
         Ok(())
     }
@@ -447,7 +491,9 @@ impl TraceDeriveInput {
         let gc_lifetime: syn::Lifetime = match self.gc_lifetime() {
             Some(lt) => lt.clone(),
             None => {
-                generics.params.push(GenericParam::Lifetime(LifetimeDef::new(lt.clone())));
+                generics
+                    .params
+                    .push(GenericParam::Lifetime(LifetimeDef::new(lt.clone())));
                 lt
             }
         };
@@ -457,44 +503,52 @@ impl TraceDeriveInput {
     ///
     /// Implicitly modifies the specified generics
     fn expand_gcsafe_sepcific(
-        &self, kind: TraceDeriveKind,
+        &self,
+        kind: TraceDeriveKind,
         initial_generics: Option<Generics>,
-        id: &Path, gc_lt: &syn::Lifetime
+        id: &Path,
+        gc_lt: &syn::Lifetime,
     ) -> Result<TokenStream, Error> {
         let mut generics = initial_generics.unwrap_or_else(|| self.generics.original.clone());
-        let targets = self.generics.regular_type_params()
-            .map(|param| Type::Path(TypePath {
-                qself: None,
-                path: Path::from(param.ident.clone())
-            }))
+        let targets = self
+            .generics
+            .regular_type_params()
+            .map(|param| {
+                Type::Path(TypePath {
+                    qself: None,
+                    path: Path::from(param.ident.clone()),
+                })
+            })
             .chain(self.determine_field_types(false));
         let requirement = match kind {
             TraceDeriveKind::Regular => {
                 quote!(zerogc::GcSafe<#gc_lt, #id>)
-            },
+            }
             TraceDeriveKind::NullTrace => {
                 quote!(zerogc::NullTrace)
-            },
-            TraceDeriveKind::Deserialize => unreachable!()
+            }
+            TraceDeriveKind::Deserialize => unreachable!(),
         };
         for tp in self.generics.regular_type_params() {
             let tp = &tp.ident;
             match kind {
                 TraceDeriveKind::Regular => {
-                    generics.make_where_clause().predicates.push(parse_quote!(#tp: #requirement));
-                },
-                TraceDeriveKind::NullTrace => {
-                    generics.make_where_clause().predicates.push(
-                        parse_quote!(#tp: #requirement)
-                    )
-                },
-                TraceDeriveKind::Deserialize => unreachable!()
+                    generics
+                        .make_where_clause()
+                        .predicates
+                        .push(parse_quote!(#tp: #requirement));
+                }
+                TraceDeriveKind::NullTrace => generics
+                    .make_where_clause()
+                    .predicates
+                    .push(parse_quote!(#tp: #requirement)),
+                TraceDeriveKind::Deserialize => unreachable!(),
             }
         }
         let assertion: Ident = match kind {
             TraceDeriveKind::NullTrace => parse_quote!(verify_null_trace),
             TraceDeriveKind::Regular => parse_quote!(assert_gc_safe),
-            TraceDeriveKind::Deserialize => unreachable!()
+            TraceDeriveKind::Deserialize => unreachable!(),
         };
         let ty_generics = self.generics.original.split_for_impl().1;
         let (impl_generics, _, where_clause) = generics.split_for_impl();
@@ -524,30 +578,36 @@ impl TraceDeriveInput {
         match kind {
             TraceDeriveKind::NullTrace => {
                 // Verify we don't have any explicit collector id
-                if let Some(id) = self.collector_ids.as_ref().and_then(|ids| ids.0.iter().next()) {
-                   return Err(Error::custom("Can't have an explicit CollectorId for NullTrace type").with_span(id))
+                if let Some(id) = self
+                    .collector_ids
+                    .as_ref()
+                    .and_then(|ids| ids.0.iter().next())
+                {
+                    return Err(Error::custom(
+                        "Can't have an explicit CollectorId for NullTrace type",
+                    )
+                    .with_span(id));
                 }
                 generics.params.push(parse_quote!(Id: zerogc::CollectorId));
-                self.expand_gcsafe_sepcific(
-                    kind, Some(generics),
-                    &parse_quote!(Id), &gc_lifetime
-                )
+                self.expand_gcsafe_sepcific(kind, Some(generics), &parse_quote!(Id), &gc_lifetime)
             }
-            TraceDeriveKind::Regular => {
-                self.expand_for_each_regular_id(
-                    generics.clone(), kind, gc_lifetime,
-                    &mut |kind, initial, id, gc_lt| {
-                        self.expand_gcsafe_sepcific(kind, initial, id, gc_lt)
-                    }
-                )
-            },
-            TraceDeriveKind::Deserialize => unreachable!()
+            TraceDeriveKind::Regular => self.expand_for_each_regular_id(
+                generics.clone(),
+                kind,
+                gc_lifetime,
+                &mut |kind, initial, id, gc_lt| {
+                    self.expand_gcsafe_sepcific(kind, initial, id, gc_lt)
+                },
+            ),
+            TraceDeriveKind::Deserialize => unreachable!(),
         }
     }
 
     fn expand_deserialize(&self) -> Result<TokenStream, Error> {
         if !crate::DESERIALIZE_ENABLED {
-            return Err(Error::custom("The `zerogc/serde1` feature is disabled (please enable it)"));
+            return Err(Error::custom(
+                "The `zerogc/serde1` feature is disabled (please enable it)",
+            ));
         }
         let (gc_lifetime, generics) = self.generics_with_gc_lifetime(parse_quote!('gc));
         let default_should_require_simple_alloc = self.all_fields().iter().any(|field| {
@@ -560,23 +620,26 @@ impl TraceDeriveInput {
                      */
                     let name = &p.path.segments.last().unwrap().ident;
                     name == "Gc" || name == "GcArrray" || name == "GcString"
-                },
-                _ => false
+                }
+                _ => false,
             };
             if let Some(ref custom_opts) = field.serde_opts {
-                if custom_opts.delegate || custom_opts.skip_deserializing ||
-                    custom_opts.custom_bounds.is_some() || custom_opts.deserialize_with.is_some() {
+                if custom_opts.delegate
+                    || custom_opts.skip_deserializing
+                    || custom_opts.custom_bounds.is_some()
+                    || custom_opts.deserialize_with.is_some()
+                {
                     return false;
                 }
             }
             is_gc_allocated
         });
-        let should_require_simple_alloc = self.serde_opts.as_ref()
+        let should_require_simple_alloc = self
+            .serde_opts
+            .as_ref()
             .and_then(|opts| opts.require_simple_alloc)
             .unwrap_or(default_should_require_simple_alloc);
-        let do_require_simple_alloc = |id: &dyn ToTokens| {
-            quote!(<#id as zerogc::CollectorId>::Context: zerogc::GcSimpleAlloc)
-        };
+        let do_require_simple_alloc = |id: &dyn ToTokens| quote!(<#id as zerogc::CollectorId>::Context: zerogc::GcSimpleAlloc);
         self.expand_for_each_regular_id(
             generics, TraceDeriveKind::Deserialize, gc_lifetime,
             &mut |kind, initial, id, gc_lt| {
@@ -678,7 +741,7 @@ impl TraceDeriveInput {
                         impl #impl_generics zerogc::serde::GcDeserialize<#gc_lt, 'deserialize, #id> for #target_type #ty_generics #where_clause {
                             fn deserialize_gc<D: serde::Deserializer<'deserialize>>(_ctx: &#gc_lt <#id as zerogc::CollectorId>::Context, deserializer: D) -> Result<Self, D::Error> {
                                 <Self as serde::Deserialize<'deserialize>>::deserialize(deserializer)
-                            }                           
+                            }
                         }
                     })
                 } else {
@@ -725,10 +788,16 @@ impl TraceDeriveInput {
         )
     }
     fn expand_for_each_regular_id(
-        &self, generics: Generics,
+        &self,
+        generics: Generics,
         kind: TraceDeriveKind,
         gc_lifetime: Lifetime,
-        func: &mut dyn FnMut(TraceDeriveKind, Option<Generics>, &Path, &Lifetime) -> Result<TokenStream, Error>
+        func: &mut dyn FnMut(
+            TraceDeriveKind,
+            Option<Generics>,
+            &Path,
+            &Lifetime,
+        ) -> Result<TokenStream, Error>,
     ) -> Result<TokenStream, Error> {
         let mut has_explicit_collector_ids = false;
         let mut impls = Vec::new();
@@ -736,20 +805,23 @@ impl TraceDeriveInput {
             for id in ids.0.iter() {
                 has_explicit_collector_ids = true;
                 let mut initial_generics = generics.clone();
-                initial_generics.make_where_clause().predicates
+                initial_generics
+                    .make_where_clause()
+                    .predicates
                     .push(parse_quote!(#id: zerogc::CollectorId));
-                impls.push(func(
-                    kind, Some(initial_generics),
-                    id, &gc_lifetime
-                )?)
+                impls.push(func(kind, Some(initial_generics), id, &gc_lifetime)?)
             }
         }
         if !has_explicit_collector_ids {
             let mut initial_generics = generics;
-            initial_generics.params.push(parse_quote!(Id: zerogc::CollectorId));
+            initial_generics
+                .params
+                .push(parse_quote!(Id: zerogc::CollectorId));
             impls.push(func(
-                kind, Some(initial_generics.clone()),
-                &parse_quote!(Id),&gc_lifetime
+                kind,
+                Some(initial_generics.clone()),
+                &parse_quote!(Id),
+                &gc_lifetime,
             )?)
         }
         assert!(!impls.is_empty());
@@ -763,11 +835,19 @@ impl TraceDeriveInput {
             generics.params.push(parse_quote!('new_gc));
             for regular in self.generics.regular_type_params() {
                 let regular = &regular.ident;
-                generics.make_where_clause().predicates.push(parse_quote!(#regular: zerogc::NullTrace));
+                generics
+                    .make_where_clause()
+                    .predicates
+                    .push(parse_quote!(#regular: zerogc::NullTrace));
             }
-            generics.make_where_clause().predicates.push(parse_quote!(Self: zerogc::GcSafe<'new_gc, Id>));
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!(Self: zerogc::GcSafe<'new_gc, Id>));
             if let Some(ref gc_lt) = self.gc_lifetime() {
-                return Err(Error::custom("A NullTrace type may not have a 'gc lifetime").with_span(gc_lt))
+                return Err(
+                    Error::custom("A NullTrace type may not have a 'gc lifetime").with_span(gc_lt),
+                );
             }
             let (_, ty_generics, _) = self.generics.original.split_for_impl();
             let (impl_generics, _, where_clause) = generics.split_for_impl();
@@ -782,7 +862,7 @@ impl TraceDeriveInput {
             Some(lt) => {
                 generics.params.push(parse_quote!('new_gc));
                 (lt.clone(), parse_quote!('new_gc))
-            },
+            }
             None => {
                 generics.params.push(parse_quote!('gc));
                 generics.params.push(parse_quote!('new_gc));
@@ -790,19 +870,21 @@ impl TraceDeriveInput {
             }
         };
         self.expand_for_each_regular_id(
-            generics, kind, old_gc_lt,
+            generics,
+            kind,
+            old_gc_lt,
             &mut |kind, initial_generics, id, orig_lt| {
-                self.expand_rebrand_specific(
-                    kind, initial_generics,
-                    id, orig_lt, new_gc_lt.clone()
-                )
-            }
+                self.expand_rebrand_specific(kind, initial_generics, id, orig_lt, new_gc_lt.clone())
+            },
         )
     }
     fn expand_rebrand_specific(
-        &self, kind: TraceDeriveKind,
+        &self,
+        kind: TraceDeriveKind,
         initial_generics: Option<Generics>,
-        id: &Path, orig_lt: &Lifetime, new_lt: Lifetime
+        id: &Path,
+        orig_lt: &Lifetime,
+        new_lt: Lifetime,
     ) -> Result<TokenStream, Error> {
         assert!(!matches!(kind, TraceDeriveKind::NullTrace));
         let mut fold = RebrandFold {
@@ -810,13 +892,20 @@ impl TraceDeriveInput {
             collector_ids: self.collector_ids.as_ref().map_or_else(
                 || HashSet::from([parse_quote!(Id)]),
                 |ids| {
-                ids.0.iter().map(|p| Type::Path(TypePath {
-                    qself: None,
-                    path: p.clone()
-                })).collect()
-            }),
+                    ids.0
+                        .iter()
+                        .map(|p| {
+                            Type::Path(TypePath {
+                                qself: None,
+                                path: p.clone(),
+                            })
+                        })
+                        .collect()
+                },
+            ),
             new_lt: &new_lt,
-            orig_lt, id
+            orig_lt,
+            id,
         };
         let mut generics = syn::fold::fold_generics(
             &mut fold,
@@ -825,48 +914,74 @@ impl TraceDeriveInput {
         for param in &self.generics.type_params {
             let name = &param.ident;
             let target: Path = if !self.generics.is_ignored(name) {
-                generics.make_where_clause().predicates.push(parse_quote!(#name: zerogc::GcRebrand<#new_lt, #id>));
+                generics
+                    .make_where_clause()
+                    .predicates
+                    .push(parse_quote!(#name: zerogc::GcRebrand<#new_lt, #id>));
                 parse_quote!(#name::Branded)
             } else {
                 Path::from(name.clone())
             };
-            let rewritten_bounds = param.bounds.iter().cloned().map(|bound| {
-                syn::fold::fold_type_param_bound(&mut ReplaceLt {
-                    orig_lt, new_lt: &new_lt
-                }, bound)
-            }).collect::<Vec<_>>();
-            generics.make_where_clause().predicates.push(parse_quote!(#target: #(#rewritten_bounds)+*));
+            let rewritten_bounds = param
+                .bounds
+                .iter()
+                .cloned()
+                .map(|bound| {
+                    syn::fold::fold_type_param_bound(
+                        &mut ReplaceLt {
+                            orig_lt,
+                            new_lt: &new_lt,
+                        },
+                        bound,
+                    )
+                })
+                .collect::<Vec<_>>();
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!(#target: #(#rewritten_bounds)+*));
         }
         let target_type = &self.ident;
 
         let rewritten_path: Path = {
-            let mut params = self.generics.original.params.iter().map(|decl| {
-                // decl -> use
-                match decl {
-                    GenericParam::Type(ref tp) => {
-                        let name = &tp.ident;
-                        parse_quote!(#name)
+            let mut params = self
+                .generics
+                .original
+                .params
+                .iter()
+                .map(|decl| {
+                    // decl -> use
+                    match decl {
+                        GenericParam::Type(ref tp) => {
+                            let name = &tp.ident;
+                            parse_quote!(#name)
+                        }
+                        GenericParam::Lifetime(ref lt) => {
+                            let name = fold.rewrite_lifetime(lt.lifetime.clone());
+                            parse_quote!(#name)
+                        }
+                        GenericParam::Const(ref c) => {
+                            let name = &c.ident;
+                            parse_quote!(#name)
+                        }
                     }
-                    GenericParam::Lifetime(ref lt) => {
-                        let name = fold.rewrite_lifetime(lt.lifetime.clone());
-                        parse_quote!(#name)
-                    },
-                    GenericParam::Const(ref c) => {
-                        let name = &c.ident;
-                        parse_quote!(#name)
-                    }
-                }
-            }).collect::<Vec<GenericArgument>>();
-            params = params.into_iter().map(|arg| {
-                syn::fold::fold_generic_argument(&mut fold, arg)
-            }).collect();
+                })
+                .collect::<Vec<GenericArgument>>();
+            params = params
+                .into_iter()
+                .map(|arg| syn::fold::fold_generic_argument(&mut fold, arg))
+                .collect();
 
             parse_quote!(#target_type::<#(#params),*>)
         };
-        let explicitly_unsized = self.generics.original.params.iter()
+        let explicitly_unsized = self
+            .generics
+            .original
+            .params
+            .iter()
             .filter_map(|param| match param {
                 GenericParam::Type(ref t) => Some(t),
-                _ => None
+                _ => None,
             })
             .filter(|&param| crate::is_explicitly_unsized(param))
             .map(|param| param.ident.clone())
@@ -874,8 +989,13 @@ impl TraceDeriveInput {
         // Add the appropriate T::Branded: Sized bounds
         for param in self.generics.regular_type_params() {
             let name = &param.ident;
-            if explicitly_unsized.contains(name) { continue }
-            generics.make_where_clause().predicates.push(parse_quote!(#name::Branded: Sized));
+            if explicitly_unsized.contains(name) {
+                continue;
+            }
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!(#name::Branded: Sized));
         }
         let ty_generics = self.generics.original.split_for_impl().1;
         let (impl_generics, _, where_clause) = generics.split_for_impl();
@@ -889,14 +1009,14 @@ impl TraceDeriveInput {
         let target_type = &self.ident;
         if matches!(kind, TraceDeriveKind::NullTrace) {
             if immutable {
-                return Err(Error::custom("A `NullTrace` type should not be explicitly marked #[zerogc(immutable)] (it's implied)"))
+                return Err(Error::custom("A `NullTrace` type should not be explicitly marked #[zerogc(immutable)] (it's implied)"));
             }
             let generics = crate::move_bounds_to_where_clause(self.generics.original.clone());
             let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
             return Ok(quote! {
                 unsafe impl #impl_generics zerogc::NullTrace for #target_type #ty_generics #where_clause {}
                 zerogc::impl_trace_for_nulltrace!(impl #impl_generics Trace for #target_type #ty_generics #where_clause);
-            })
+            });
         }
         let trait_name: Path = if immutable {
             parse_quote!(zerogc::TraceImmutable)
@@ -911,14 +1031,19 @@ impl TraceDeriveInput {
         let mut generics = self.generics.original.clone();
         for regular in self.generics.regular_type_params() {
             let name = &regular.ident;
-            generics.make_where_clause().predicates.push(parse_quote!(#name: #trait_name))
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!(#name: #trait_name))
         }
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
         let trace_impl = match self.data {
             Data::Enum(ref variants) => {
                 let match_arms = variants.iter().map(|v| {
                     let (destructure, access) = v.destructure(immutable);
-                    let trace_fields = v.fields().enumerate()
+                    let trace_fields = v
+                        .fields()
+                        .enumerate()
                         .filter(|(_, f)| !f.unsafe_skip_trace)
                         .map(|(idx, f)| f.expand_trace(idx, &access, immutable));
                     let variant_name = &v.ident;
@@ -932,7 +1057,9 @@ impl TraceDeriveInput {
             }
             Data::Struct(ref fields) => {
                 let access = FieldAccess::SelfMember { immutable };
-                let trace_fields = fields.iter().enumerate()
+                let trace_fields = fields
+                    .iter()
+                    .enumerate()
                     .filter(|(_, f)| !f.unsafe_skip_trace)
                     .map(|(idx, f)| f.expand_trace(idx, &access, immutable));
                 quote!(#(#trace_fields;)*)
@@ -944,12 +1071,13 @@ impl TraceDeriveInput {
             quote!(false)
         };
         let all_fields = self.all_fields();
-        let needs_trace = all_fields.iter()
+        let needs_trace = all_fields
+            .iter()
             .filter(|field| !field.unsafe_skip_trace)
             .map(|field| {
-                let avoid_cycle = field.avoid_const_cycle.unwrap_or_else(|| {
-                    detect_cycle(&field.ty, target_type.clone())
-                });
+                let avoid_cycle = field
+                    .avoid_const_cycle
+                    .unwrap_or_else(|| detect_cycle(&field.ty, target_type.clone()));
                 let ty = &field.ty;
                 if avoid_cycle {
                     quote!(true)
@@ -960,17 +1088,20 @@ impl TraceDeriveInput {
         let needs_drop = if self.is_copy {
             vec![quote!(false)]
         } else {
-            all_fields.iter().map(|field| {
-                let avoid_cycle = field.avoid_const_cycle.unwrap_or_else(|| {
-                    detect_cycle(&field.ty, target_type.clone())
-                });
-                let ty = &field.ty;
-                if field.unsafe_skip_trace || avoid_cycle {
-                    quote_spanned!(ty.span() => core::mem::needs_drop::<#ty>())
-                } else {
-                    quote_spanned!(ty.span() => <#ty as zerogc::Trace>::NEEDS_DROP)                    
-                }
-            }).collect::<Vec<_>>()
+            all_fields
+                .iter()
+                .map(|field| {
+                    let avoid_cycle = field
+                        .avoid_const_cycle
+                        .unwrap_or_else(|| detect_cycle(&field.ty, target_type.clone()));
+                    let ty = &field.ty;
+                    if field.unsafe_skip_trace || avoid_cycle {
+                        quote_spanned!(ty.span() => core::mem::needs_drop::<#ty>())
+                    } else {
+                        quote_spanned!(ty.span() => <#ty as zerogc::Trace>::NEEDS_DROP)
+                    }
+                })
+                .collect::<Vec<_>>()
         };
         let assoc_constants = if !immutable {
             Some(quote! {
@@ -980,7 +1111,11 @@ impl TraceDeriveInput {
         } else {
             None
         };
-        let mutability = if !immutable { Some(<syn::Token![mut]>::default()) } else { None };
+        let mutability = if !immutable {
+            Some(<syn::Token![mut]>::default())
+        } else {
+            None
+        };
         Ok(quote! {
             #[allow(clippy::eq_op)] // NOTE: clippy doesn't like duplicates in 'NEEDS_TRACE'
             #[automatically_derived]
@@ -997,7 +1132,10 @@ impl TraceDeriveInput {
         let mut generics = self.generics.original.clone();
         for param in self.generics.regular_type_params() {
             let name = &param.ident;
-            generics.make_where_clause().predicates.push(parse_quote!(#name: zerogc::TrustedDrop));
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!(#name: zerogc::TrustedDrop));
         }
         #[allow(clippy::if_same_then_else)] // Only necessary because of detailed comment
         let protective_drop = if self.is_copy {
@@ -1021,17 +1159,20 @@ impl TraceDeriveInput {
             None
         } else {
             let target_type = &self.ident;
-            let (impl_generics, ty_generics, where_clause) = self.generics.original.split_for_impl();
-            Some(quote!(impl #impl_generics Drop for #target_type #ty_generics #where_clause {
-                #[inline]
-                fn drop(&mut self) {
-                    /*
-                     * This is only here to prevent the user
-                     * from implementing their own Drop functionality.
-                     */
-                }
-            }))
-        };        
+            let (impl_generics, ty_generics, where_clause) =
+                self.generics.original.split_for_impl();
+            Some(
+                quote!(impl #impl_generics Drop for #target_type #ty_generics #where_clause {
+                    #[inline]
+                    fn drop(&mut self) {
+                        /*
+                         * This is only here to prevent the user
+                         * from implementing their own Drop functionality.
+                         */
+                    }
+                }),
+            )
+        };
         let target_type = &self.ident;
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
         quote! {
@@ -1046,25 +1187,26 @@ impl TraceDeriveInput {
                 for v in variants {
                     for f in v.fields() {
                         if f.mutable.is_some() {
-                            return Err(Error::custom("NYI: An enum's fields cant be marked #[zerogc(mutable)"))
+                            return Err(Error::custom(
+                                "NYI: An enum's fields cant be marked #[zerogc(mutable)",
+                            ));
                         }
                     }
                 }
-            },
+            }
             Data::Struct(ref fields) => {
                 for field in &fields.fields {
                     if let Some(ref mutable_opts) = field.mutable {
                         if matches!(kind, TraceDeriveKind::NullTrace) {
                             return Err(Error::custom(
                                 "A NullTrace type shouldn't use #[zerogc(mutable)] (just use an ordinary std::cell::Cell)"
-                            ))
+                            ));
                         }
                         let original_name = match field.ident {
                             Some(ref name) => name,
                             None => {
-                                return Err(Error::custom(
-                                    "zerogc can only mutate named fields"
-                                ).with_span(&field.ty))
+                                return Err(Error::custom("zerogc can only mutate named fields")
+                                    .with_span(&field.ty))
                             }
                         };
                         // Generate a mutator
@@ -1075,30 +1217,43 @@ impl TraceDeriveInput {
                             quote!()
                         };
                         let value_ref_type = match field.ty {
-                            Type::Path(ref cell_path) if cell_path.path.segments.last()
-                                .map_or(false, |seg| seg.ident == "GcCell") => {
+                            Type::Path(ref cell_path)
+                                if cell_path
+                                    .path
+                                    .segments
+                                    .last()
+                                    .map_or(false, |seg| seg.ident == "GcCell") =>
+                            {
                                 let last_segment = cell_path.path.segments.last().unwrap();
                                 let mut inner_type = None;
-                                if let PathArguments::AngleBracketed(ref bracketed) = last_segment.arguments {
+                                if let PathArguments::AngleBracketed(ref bracketed) =
+                                    last_segment.arguments
+                                {
                                     for arg in &bracketed.args {
                                         match arg {
                                             GenericArgument::Type(t) if inner_type.is_none() => {
                                                 inner_type = Some(t.clone()); // Initialize
-                                            },
+                                            }
                                             _ => {
                                                 inner_type = None; // Unexpected arg
-                                                break
+                                                break;
                                             }
                                         }
                                     }
                                 }
-                                inner_type.ok_or_else(|| Error::custom(
-                                    "GcCell should have one (and only one) type param"
-                                ).with_span(&field.ty))?
-                            },
-                            _ => return Err(Error::custom(
-                                "A mutable field must be wrapped in a `GcCell`"
-                            ).with_span(&field.ty))
+                                inner_type.ok_or_else(|| {
+                                    Error::custom(
+                                        "GcCell should have one (and only one) type param",
+                                    )
+                                    .with_span(&field.ty)
+                                })?
+                            }
+                            _ => {
+                                return Err(Error::custom(
+                                    "A mutable field must be wrapped in a `GcCell`",
+                                )
+                                .with_span(&field.ty))
+                            }
                         };
                         // NOTE: Specially quoted since we want to blame the field for errors
                         let field_as_ptr = quote_spanned!(original_name.span() => zerogc::cell::GcCell::as_ptr(&(*self.value()).#original_name));
@@ -1107,19 +1262,26 @@ impl TraceDeriveInput {
                         let mut method_generics = Generics::default();
                         for id in self.collector_ids.iter().flat_map(|ids| ids.0.iter()) {
                             if id_type.is_some() {
-                                return Err(Error::custom("NYI: #[field(mutable)] cannot currently have multiple CollectorIds (unless generic over *all* of them)").with_span(&field.ty))
+                                return Err(Error::custom("NYI: #[field(mutable)] cannot currently have multiple CollectorIds (unless generic over *all* of them)").with_span(&field.ty));
                             }
-                            method_generics.make_where_clause().predicates.push(parse_quote!(#id: zerogc::CollectorId));
+                            method_generics
+                                .make_where_clause()
+                                .predicates
+                                .push(parse_quote!(#id: zerogc::CollectorId));
                             id_type = Some(id.clone());
                         }
                         let id_type = match id_type {
                             Some(tp) => {
-                                method_generics.make_where_clause().predicates
-                                .push(parse_quote!(#tp: zerogc::CollectorId));
+                                method_generics
+                                    .make_where_clause()
+                                    .predicates
+                                    .push(parse_quote!(#tp: zerogc::CollectorId));
                                 tp
-                            },
+                            }
                             None => {
-                                method_generics.params.push(parse_quote!(Id: zerogc::CollectorId));
+                                method_generics
+                                    .params
+                                    .push(parse_quote!(Id: zerogc::CollectorId));
                                 parse_quote!(Id)
                             }
                         };
@@ -1130,12 +1292,15 @@ impl TraceDeriveInput {
                                 parse_quote!('gc)
                             }
                         };
-                        method_generics.make_where_clause().predicates.push(parse_quote!(
-                            #value_ref_type: zerogc::GcDirectBarrier<
-                                #gc_lifetime,
-                                zerogc::Gc<#gc_lifetime, Self, #id_type>
-                            >
-                        ));
+                        method_generics
+                            .make_where_clause()
+                            .predicates
+                            .push(parse_quote!(
+                                #value_ref_type: zerogc::GcDirectBarrier<
+                                    #gc_lifetime,
+                                    zerogc::Gc<#gc_lifetime, Self, #id_type>
+                                >
+                            ));
                         let where_clause = &method_generics.where_clause;
                         extras.push(quote! {
                             #[inline] // TODO: Implement `GcDirectBarrier` ourselves
@@ -1189,7 +1354,7 @@ impl TraceDeriveInput {
 fn detect_cycle(target: &syn::Type, potential_cycle: impl Into<syn::Path>) -> bool {
     struct CycleDetector {
         potential_cycle: Path,
-        found: bool
+        found: bool,
     }
     impl<'ast> syn::visit::Visit<'ast> for CycleDetector {
         fn visit_path(&mut self, path: &'ast Path) {
@@ -1201,32 +1366,30 @@ fn detect_cycle(target: &syn::Type, potential_cycle: impl Into<syn::Path>) -> bo
     }
     let mut visitor = CycleDetector {
         potential_cycle: potential_cycle.into(),
-        found: false
+        found: false,
     };
     syn::visit::visit_type(&mut visitor, target);
     visitor.found
 }
 pub enum FieldAccess {
     None,
-    SelfMember {
-        immutable: bool
-    },
-    Variable {
-        prefix: Option<Ident>
-    }
+    SelfMember { immutable: bool },
+    Variable { prefix: Option<Ident> },
 }
 impl FieldAccess {
     fn access_named_field(&self, name: Ident) -> TokenStream {
         match *self {
             FieldAccess::None => unreachable!("no fields"),
-            FieldAccess::SelfMember { immutable: false } => quote_spanned!(name.span() => &mut self.#name),
-            FieldAccess::SelfMember { immutable: true } => quote_spanned!(name.span() => &self.#name),
-            FieldAccess::Variable { prefix: Some(ref prefix) } => {
-                format_ident!("{}{}", prefix, name).into_token_stream()
-            },
-            FieldAccess::Variable { prefix: None } => {
-                name.into_token_stream()
+            FieldAccess::SelfMember { immutable: false } => {
+                quote_spanned!(name.span() => &mut self.#name)
             }
+            FieldAccess::SelfMember { immutable: true } => {
+                quote_spanned!(name.span() => &self.#name)
+            }
+            FieldAccess::Variable {
+                prefix: Some(ref prefix),
+            } => format_ident!("{}{}", prefix, name).into_token_stream(),
+            FieldAccess::Variable { prefix: None } => name.into_token_stream(),
         }
     }
 
@@ -1234,24 +1397,32 @@ impl FieldAccess {
         match *self {
             Self::None => unreachable!("no fields"),
             Self::SelfMember { immutable: false } => {
-                let idx = syn::Index { index: idx as u32, span };
+                let idx = syn::Index {
+                    index: idx as u32,
+                    span,
+                };
                 quote_spanned!(span => &mut self.#idx)
-            },
+            }
             Self::SelfMember { immutable: true } => {
-                let idx = syn::Index { index: idx as u32, span };
+                let idx = syn::Index {
+                    index: idx as u32,
+                    span,
+                };
                 quote_spanned!(span => &self.#idx)
             }
-            Self::Variable { prefix: Some(ref prefix) } => {
-                format_ident!("{}{}", span = span, prefix, idx).into_token_stream()
-            },
-            Self::Variable { prefix: None } => unreachable!("Can't access index fields without a prefix")
+            Self::Variable {
+                prefix: Some(ref prefix),
+            } => format_ident!("{}{}", span = span, prefix, idx).into_token_stream(),
+            Self::Variable { prefix: None } => {
+                unreachable!("Can't access index fields without a prefix")
+            }
         }
     }
 }
 
 struct ReplaceLt<'a> {
     orig_lt: &'a syn::Lifetime,
-    new_lt: &'a syn::Lifetime
+    new_lt: &'a syn::Lifetime,
 }
 impl syn::fold::Fold for ReplaceLt<'_> {
     fn fold_lifetime(&mut self, orig: Lifetime) -> Lifetime {
@@ -1267,7 +1438,7 @@ struct RebrandFold<'a> {
     collector_ids: HashSet<Type>,
     new_lt: &'a syn::Lifetime,
     orig_lt: &'a syn::Lifetime,
-    id: &'a syn::Path
+    id: &'a syn::Path,
 }
 impl RebrandFold<'_> {
     fn rewrite_lifetime(&self, orig: Lifetime) -> Lifetime {
@@ -1281,10 +1452,14 @@ impl RebrandFold<'_> {
 impl<'a> syn::fold::Fold for RebrandFold<'a> {
     fn fold_lifetime_def(&mut self, orig: LifetimeDef) -> LifetimeDef {
         LifetimeDef {
-            bounds: orig.bounds.into_iter().map(|lt| self.rewrite_lifetime(lt)).collect(),
+            bounds: orig
+                .bounds
+                .into_iter()
+                .map(|lt| self.rewrite_lifetime(lt))
+                .collect(),
             colon_token: orig.colon_token,
             lifetime: orig.lifetime,
-            attrs: orig.attrs
+            attrs: orig.attrs,
         }
     }
 

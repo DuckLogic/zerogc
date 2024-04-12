@@ -6,33 +6,32 @@
 
 use std::collections::HashSet;
 
-use proc_macro2::{Ident, TokenStream, TokenTree, Span};
-use proc_macro_kwargs::parse::{Syn, NestedList, NestedDict};
-use syn::{Error, Expr, GenericArgument, GenericParam, Generics, PredicateType, Token, Type,
-          TypeParamBound, WhereClause, WherePredicate, braced, parse_quote, Path, Lifetime,
-          PathArguments};
-use syn::parse::{ParseStream};
-use syn::spanned::Spanned;
+use proc_macro2::{Ident, Span, TokenStream, TokenTree};
+use proc_macro_kwargs::parse::{NestedDict, NestedList, Syn};
 use proc_macro_kwargs::{MacroArg, MacroKeywordArgs};
+use syn::parse::ParseStream;
+use syn::spanned::Spanned;
+use syn::{
+    braced, parse_quote, Error, Expr, GenericArgument, GenericParam, Generics, Lifetime, Path,
+    PathArguments, PredicateType, Token, Type, TypeParamBound, WhereClause, WherePredicate,
+};
 
-use quote::{quote, quote_spanned};
 use super::zerogc_crate;
+use indexmap::{indexmap, IndexMap};
+use quote::{quote, quote_spanned};
 use syn::ext::IdentExt;
-use indexmap::{IndexMap, indexmap};
 
 fn empty_clause() -> WhereClause {
     WhereClause {
         predicates: Default::default(),
-        where_token: Default::default()
+        where_token: Default::default(),
     }
 }
 
 #[derive(Clone, Debug)]
 pub enum CollectorIdInfo {
     Any,
-    Specific {
-        map: IndexMap<Path, Lifetime>
-    }
+    Specific { map: IndexMap<Path, Lifetime> },
 }
 impl Default for CollectorIdInfo {
     fn default() -> Self {
@@ -43,9 +42,11 @@ impl CollectorIdInfo {
     /// Create info from a single `CollectorId`,
     /// implicitly assuming its lifetime is `'gc`
     pub fn single(path: Path) -> Self {
-        CollectorIdInfo::Specific { map: indexmap! {
-            path => parse_quote!('gc)
-        } }
+        CollectorIdInfo::Specific {
+            map: indexmap! {
+                path => parse_quote!('gc)
+            },
+        }
     }
 }
 impl MacroArg for CollectorIdInfo {
@@ -58,7 +59,7 @@ impl MacroArg for CollectorIdInfo {
         } else if stream.peek(syn::token::Brace) {
             let inner = NestedDict::parse_macro_arg(stream)?;
             Ok(CollectorIdInfo::Specific {
-                map: inner.elements
+                map: inner.elements,
             })
         } else {
             Err(stream.error("Expected either `*`, a path, or a map of Path => Lifetime"))
@@ -70,7 +71,7 @@ impl MacroArg for CollectorIdInfo {
 pub enum DeserializeStrategy {
     UnstableHorribleHack(Span),
     Delegate(Span),
-    ExplicitClosure(KnownArgClosure)
+    ExplicitClosure(KnownArgClosure),
 }
 impl MacroArg for DeserializeStrategy {
     fn parse_macro_arg(stream: ParseStream) -> syn::Result<Self> {
@@ -79,8 +80,8 @@ impl MacroArg for DeserializeStrategy {
             syn::custom_keyword!(delegate);
         }
         if stream.peek(Token![|]) {
-            Ok(DeserializeStrategy::ExplicitClosure(KnownArgClosure::parse_with_fixed_args(
-                stream, &["ctx", "deserializer"])?
+            Ok(DeserializeStrategy::ExplicitClosure(
+                KnownArgClosure::parse_with_fixed_args(stream, &["ctx", "deserializer"])?,
             ))
         } else if stream.peek(kw::unstable_horrible_hack) {
             let span = stream.parse::<kw::unstable_horrible_hack>()?.span;
@@ -145,24 +146,29 @@ pub struct MacroInput {
     #[kwarg(optional, rename = "trace_immutable")]
     trace_immutable_closure: Option<VisitClosure>,
     #[kwarg(optional, rename = "deserialize")]
-    deserialize_strategy: Option<DeserializeStrategy>
+    deserialize_strategy: Option<DeserializeStrategy>,
 }
 impl MacroInput {
     fn parse_visitor(&self) -> syn::Result<VisitImpl> {
         if let Some(ref visit_closure) = self.raw_visit_template {
-            if let Some(closure) = self.trace_immutable_closure.as_ref()
-                .or_else(|| self.trace_mut_closure.as_ref()) {
+            if let Some(closure) = self
+                .trace_immutable_closure
+                .as_ref()
+                .or_else(|| self.trace_mut_closure.as_ref())
+            {
                 return Err(Error::new(
                     closure.0.body.span(),
                     "Cannot specify specific closure (trace_mut/trace_immutable) in addition to `visit`"
-                ))
+                ));
             }
-            Ok(VisitImpl::Generic { generic_impl: visit_closure.0.body.clone() })
+            Ok(VisitImpl::Generic {
+                generic_impl: visit_closure.0.body.clone(),
+            })
         } else {
             let trace_closure = self.trace_mut_closure.clone().ok_or_else(|| {
                 Error::new(
                     Span::call_site(),
-                    "Either a `visit` or a `trace_mut` impl is required for Trace types"
+                    "Either a `visit` or a `trace_mut` impl is required for Trace types",
                 )
             })?;
             let trace_immut_closure = match self.bounds.trace_immutable {
@@ -171,19 +177,16 @@ impl MacroInput {
                         return Err(Error::new(
                             closure.0.body.span(),
                             "Specified a `trace_immutable` implementation even though TraceImmutable is never implemented"
-                        ))
+                        ));
                     } else {
                         None
                     }
-                },
+                }
                 _ => {
                     let target_span = self.target_type.span();
                     // we maybe implement `TraceImmutable` some of the time
                     Some(self.trace_immutable_closure.clone().ok_or_else(|| {
-                        Error::new(
-                            target_span,
-                            "Requires a `trace_immutable` implementation"
-                        )
+                        Error::new(target_span, "Requires a `trace_immutable` implementation")
                     })?)
                 }
             };
@@ -191,7 +194,7 @@ impl MacroInput {
                 mutable: ::syn::parse2(trace_closure.0.body)?,
                 immutable: trace_immut_closure
                     .map(|closure| ::syn::parse2::<Box<Expr>>(closure.0.body))
-                    .transpose()?
+                    .transpose()?,
             })
         }
     }
@@ -203,19 +206,20 @@ impl MacroInput {
     pub fn expand_output(&self) -> Result<TokenStream, Error> {
         let zerogc_crate = zerogc_crate();
         let target_type = &self.target_type;
-        let trace_impl = self.expand_trace_impl(true)?
-            .expect("Trace impl required");
-        let trace_immutable_impl = self.expand_trace_impl(false)?
-            .unwrap_or_default();
+        let trace_impl = self.expand_trace_impl(true)?.expect("Trace impl required");
+        let trace_immutable_impl = self.expand_trace_impl(false)?.unwrap_or_default();
         let gcsafe_impl = self.expand_gcsafe_impl()?;
         let null_trace_clause = match self.null_trace {
             TraitRequirements::Always => Some(empty_clause()),
             TraitRequirements::Where(ref clause) => Some(clause.clone()),
-            TraitRequirements::Never => None
+            TraitRequirements::Never => None,
         };
         let null_trace_impl = if let Some(null_trace_clause) = null_trace_clause {
             let mut generics = self.basic_generics();
-            generics.make_where_clause().predicates.extend(null_trace_clause.predicates);
+            generics
+                .make_where_clause()
+                .predicates
+                .extend(null_trace_clause.predicates);
             let (impl_generics, _, where_clause) = generics.split_for_impl();
             quote! {
                 unsafe impl #impl_generics #zerogc_crate::NullTrace for #target_type
@@ -249,12 +253,22 @@ impl MacroInput {
                 None => return Ok(None), // They are requesting that we dont implement
             }
         };
-        generics.make_where_clause().predicates
+        generics
+            .make_where_clause()
+            .predicates
             .extend(clause.predicates);
         let visit_impl = self.parse_visitor()?.expand_impl(mutable)?;
         let (impl_generics, _, where_clause) = generics.split_for_impl();
-        let trait_name = if mutable { quote!(#zerogc_crate::Trace) } else { quote!(#zerogc_crate::TraceImmutable) };
-        let trace_method_name = if mutable { quote!(trace) } else { quote!(trace_immutable) };
+        let trait_name = if mutable {
+            quote!(#zerogc_crate::Trace)
+        } else {
+            quote!(#zerogc_crate::TraceImmutable)
+        };
+        let trace_method_name = if mutable {
+            quote!(trace)
+        } else {
+            quote!(trace_immutable)
+        };
         let needs_drop_const = if mutable {
             let expr = &self.needs_drop;
             Some(quote!(const NEEDS_DROP: bool = {
@@ -274,11 +288,7 @@ impl MacroInput {
         } else {
             None
         };
-        let mutability = if mutable {
-            quote!(mut)
-        } else {
-            quote!()
-        };
+        let mutability = if mutable { quote!(mut) } else { quote!() };
         Ok(Some(quote! {
             unsafe impl #impl_generics #trait_name for #target_type #where_clause {
                 #needs_trace_const
@@ -332,9 +342,11 @@ impl MacroInput {
         let target_type = &self.target_type;
         let strategy = match self.deserialize_strategy {
             Some(ref strategy) => strategy,
-            _ => return Ok(Vec::new())
+            _ => return Ok(Vec::new()),
         };
-        if !crate::DESERIALIZE_ENABLED { return Ok(Vec::new()) }
+        if !crate::DESERIALIZE_ENABLED {
+            return Ok(Vec::new());
+        }
         let de_lt = parse_quote!('deserialize);
         self.for_each_id_type(self.basic_generics(), true, |mut generics, id_type, gc_lt| {
             generics.params.push(parse_quote!('deserialize));
@@ -409,7 +421,12 @@ impl MacroInput {
             }))
         })
     }
-    fn for_each_id_type<R>(&self, mut generics: Generics, needs_lifetime: bool, mut func: impl FnMut(Generics, &Path, &Lifetime) -> Result<R, Error>) -> Result<Vec<R>, Error> {
+    fn for_each_id_type<R>(
+        &self,
+        mut generics: Generics,
+        needs_lifetime: bool,
+        mut func: impl FnMut(Generics, &Path, &Lifetime) -> Result<R, Error>,
+    ) -> Result<Vec<R>, Error> {
         let zerogc_crate = zerogc_crate();
         match self.collector_id {
             CollectorIdInfo::Specific { ref map } => {
@@ -418,9 +435,11 @@ impl MacroInput {
                     res.push(func(generics.clone(), path, lt)?);
                 }
                 Ok(res)
-            },
+            }
             CollectorIdInfo::Any => {
-                generics.params.push(parse_quote!(Id: #zerogc_crate::CollectorId));
+                generics
+                    .params
+                    .push(parse_quote!(Id: #zerogc_crate::CollectorId));
                 let lt = parse_quote!('gc);
                 let p = parse_quote!(Id);
                 if needs_lifetime && !generics.params.iter().any(|param| matches!(param, GenericParam::Lifetime(ref other_lt) if other_lt.lifetime == lt)) {
@@ -436,10 +455,13 @@ impl MacroInput {
         let zerogc_crate = zerogc_crate();
         let mut generics = self.basic_generics();
         if let Some(where_clause) = create_clause_with_default(
-            &self.bounds.trusted_drop, &self.params,
-            vec![parse_quote!(#zerogc_crate::TrustedDrop)]
+            &self.bounds.trusted_drop,
+            &self.params,
+            vec![parse_quote!(#zerogc_crate::TrustedDrop)],
         ) {
-            generics.make_where_clause().predicates
+            generics
+                .make_where_clause()
+                .predicates
                 .extend(where_clause.predicates);
         }
 
@@ -567,7 +589,7 @@ impl MacroInput {
 #[derive(Debug, Clone)]
 pub struct KnownArgClosure {
     body: TokenStream,
-    brace: ::syn::token::Brace
+    brace: ::syn::token::Brace,
 }
 impl KnownArgClosure {
     pub fn parse_with_fixed_args(input: ParseStream, fixed_args: &[&str]) -> syn::Result<Self> {
@@ -584,16 +606,20 @@ impl KnownArgClosure {
         }
         let arg_end = input.parse::<Token![|]>()?.span;
         if actual_args.len() != fixed_args.len() {
-            return Err(Error::new(arg_start.join(arg_end).unwrap(), format!(
-                "Expected {} args but got {}",
-                fixed_args.len(), actual_args.len()
-            )));
+            return Err(Error::new(
+                arg_start.join(arg_end).unwrap(),
+                format!(
+                    "Expected {} args but got {}",
+                    fixed_args.len(),
+                    actual_args.len()
+                ),
+            ));
         }
         for (index, (actual, &expected)) in actual_args.iter().zip(fixed_args).enumerate() {
             if *actual != expected {
                 return Err(Error::new(
                     actual.span(),
-                    format!("Expected arg #{} to be named {:?}", index, expected)
+                    format!("Expected arg #{} to be named {:?}", index, expected),
                 ));
             }
         }
@@ -603,21 +629,29 @@ impl KnownArgClosure {
         let body;
         let brace = braced!(body in input);
         let body = body.parse::<TokenStream>()?;
-        Ok(KnownArgClosure { body: quote!({ #body }), brace })
+        Ok(KnownArgClosure {
+            body: quote!({ #body }),
+            brace,
+        })
     }
 }
 #[derive(Debug, Clone)]
 pub struct VisitClosure(KnownArgClosure);
 impl MacroArg for VisitClosure {
     fn parse_macro_arg(input: ParseStream) -> syn::Result<Self> {
-        Ok(VisitClosure(KnownArgClosure::parse_with_fixed_args(input, &["self", "visitor"])?))
+        Ok(VisitClosure(KnownArgClosure::parse_with_fixed_args(
+            input,
+            &["self", "visitor"],
+        )?))
     }
 }
 #[derive(Debug)]
 pub struct VisitInsideGcClosure(KnownArgClosure);
 impl MacroArg for VisitInsideGcClosure {
     fn parse_macro_arg(input: ParseStream) -> syn::Result<Self> {
-        Ok(VisitInsideGcClosure(KnownArgClosure::parse_with_fixed_args(input, &["gc", "visitor"])?))
+        Ok(VisitInsideGcClosure(
+            KnownArgClosure::parse_with_fixed_args(input, &["gc", "visitor"])?,
+        ))
     }
 }
 
@@ -648,7 +682,7 @@ pub struct CustomBounds {
     #[kwarg(optional, rename = "GcDeserialize")]
     deserialize: Option<TraitRequirements>,
     #[kwarg(optional)]
-    visit_inside_gc: Option<Syn<WhereClause>>
+    visit_inside_gc: Option<Syn<WhereClause>>,
 }
 impl CustomBounds {
     fn trace_where_clause(&self, generic_params: &[GenericParam]) -> WhereClause {
@@ -660,9 +694,11 @@ impl CustomBounds {
                 // generate the implicit requiremnents
                 let zerogc_crate = zerogc_crate();
                 create_clause_with_default(
-                    &self.trace, generic_params,
-                    vec![parse_quote!(#zerogc_crate::Trace)]
-                ).unwrap_or_else(|| unreachable!("Trace must always be implemented"))
+                    &self.trace,
+                    generic_params,
+                    vec![parse_quote!(#zerogc_crate::Trace)],
+                )
+                .unwrap_or_else(|| unreachable!("Trace must always be implemented"))
             }
         }
     }
@@ -674,16 +710,23 @@ impl CustomBounds {
             None => {
                 let zerogc_crate = zerogc_crate();
                 create_clause_with_default(
-                    &self.trace_immutable, generic_params,
-                    vec![parse_quote!(#zerogc_crate::TraceImmutable)]
+                    &self.trace_immutable,
+                    generic_params,
+                    vec![parse_quote!(#zerogc_crate::TraceImmutable)],
                 )
             }
         }
     }
-    fn gcsafe_clause(&self, id_type: &Path, gc_lt: &Lifetime, generic_params: &[GenericParam]) -> Result<Option<WhereClause>, Error> {
+    fn gcsafe_clause(
+        &self,
+        id_type: &Path,
+        gc_lt: &Lifetime,
+        generic_params: &[GenericParam],
+    ) -> Result<Option<WhereClause>, Error> {
         let zerogc_crate = zerogc_crate();
         let mut res = create_clause_with_default_and_ignored(
-            &self.gcsafe, generic_params,
+            &self.gcsafe,
+            generic_params,
             vec![parse_quote!(#zerogc_crate::GcSafe<#gc_lt, #id_type>)],
             Some(&mut |param| {
                 /*
@@ -691,17 +734,23 @@ impl CustomBounds {
                  * to resolve it.
                  */
                 matches!(param, GenericParam::Type(ref tp) if Some(&tp.ident) == id_type.get_ident())
-            })
+            }),
         );
         if self.gcsafe.is_none() {
             // Extend with the trae bounds
-            res.get_or_insert_with(empty_clause).predicates.extend(
-                self.trace_where_clause(generic_params).predicates
-            )
+            res.get_or_insert_with(empty_clause)
+                .predicates
+                .extend(self.trace_where_clause(generic_params).predicates)
         }
         Ok(res)
     }
-    fn deserialize_clause(&self, id_type: &Path, gc_lt: &Lifetime, de_lt: &Lifetime, generic_params: &[GenericParam]) -> Option<WhereClause> {
+    fn deserialize_clause(
+        &self,
+        id_type: &Path,
+        gc_lt: &Lifetime,
+        de_lt: &Lifetime,
+        generic_params: &[GenericParam],
+    ) -> Option<WhereClause> {
         let zerogc_crate = zerogc_crate();
         match self.deserialize {
             Some(TraitRequirements::Never) => None, // skip this impl
@@ -709,31 +758,35 @@ impl CustomBounds {
             Some(TraitRequirements::Where(ref explicit)) => Some(explicit.clone()),
             None => {
                 create_clause_with_default_and_ignored(
-                    &self.trace_immutable, generic_params,
-                    vec![parse_quote!(#zerogc_crate::serde::GcDeserialize<#gc_lt, #de_lt, #id_type>)],
+                    &self.trace_immutable,
+                    generic_params,
+                    vec![
+                        parse_quote!(#zerogc_crate::serde::GcDeserialize<#gc_lt, #de_lt, #id_type>),
+                    ],
                     Some(&mut |param| {
                         /*
                          * HACK: Ignore `Id: GcSafe<'gc, Id>` bound because type inference is unable
                          * to resolve it.
                          */
                         matches!(param, GenericParam::Type(ref tp) if Some(&tp.ident) == id_type.get_ident())
-                    })
+                    }),
                 )
             }
         }
     }
 }
 fn create_clause_with_default(
-    target: &Option<TraitRequirements>, generic_params: &[GenericParam],
-    default_bounds: Vec<TypeParamBound>
+    target: &Option<TraitRequirements>,
+    generic_params: &[GenericParam],
+    default_bounds: Vec<TypeParamBound>,
 ) -> Option<WhereClause> {
-    create_clause_with_default_and_ignored(
-        target, generic_params, default_bounds, None
-    )
+    create_clause_with_default_and_ignored(target, generic_params, default_bounds, None)
 }
 fn create_clause_with_default_and_ignored(
-    target: &Option<TraitRequirements>, generic_params: &[GenericParam],
-    default_bounds: Vec<TypeParamBound>, mut should_ignore: Option<&mut dyn FnMut(&GenericParam) -> bool>
+    target: &Option<TraitRequirements>,
+    generic_params: &[GenericParam],
+    default_bounds: Vec<TypeParamBound>,
+    mut should_ignore: Option<&mut dyn FnMut(&GenericParam) -> bool>,
 ) -> Option<WhereClause> {
     Some(match *target {
         Some(TraitRequirements::Never) => return None, // do not implement
@@ -747,16 +800,20 @@ fn create_clause_with_default_and_ignored(
             // Infer bounds for all params
             for param in generic_params {
                 if let Some(ref mut should_ignore) = should_ignore {
-                    if should_ignore(param) { continue }
+                    if should_ignore(param) {
+                        continue;
+                    }
                 }
                 if let GenericParam::Type(ref t) = param {
                     let ident = &t.ident;
-                    where_clause.predicates.push(WherePredicate::Type(PredicateType {
-                        bounded_ty: parse_quote!(#ident),
-                        colon_token: Default::default(),
-                        bounds: default_bounds.iter().cloned().collect(),
-                        lifetimes: None
-                    }))
+                    where_clause
+                        .predicates
+                        .push(WherePredicate::Type(PredicateType {
+                            bounded_ty: parse_quote!(#ident),
+                            colon_token: Default::default(),
+                            bounds: default_bounds.iter().cloned().collect(),
+                            lifetimes: None,
+                        }))
                 }
             }
             where_clause
@@ -795,22 +852,20 @@ pub enum VisitImpl {
     /// }
     /// Ok(())
     /// ````
-    Generic {
-        generic_impl: TokenStream
-    },
+    Generic { generic_impl: TokenStream },
     /// Specialized implementations which are different for
     /// both `Trace` and `TraceImmutable`
     Specific {
         mutable: Box<Expr>,
-        immutable: Option<Box<Expr>>
-    }
+        immutable: Option<Box<Expr>>,
+    },
 }
 enum MagicVarType {
     Mutability,
     AsRef,
     Iter,
     TraceFunc,
-    B
+    B,
 }
 impl MagicVarType {
     fn parse_ident(ident: &Ident) -> Result<MagicVarType, Error> {
@@ -821,10 +876,7 @@ impl MagicVarType {
             "iter" => MagicVarType::Iter,
             "trace_func" => MagicVarType::TraceFunc,
             "b" => MagicVarType::B,
-            _ => return Err(
-                Error::new(ident.span(),
-                           "Invalid magic variable name"
-                ))
+            _ => return Err(Error::new(ident.span(), "Invalid magic variable name")),
         })
     }
 }
@@ -881,29 +933,30 @@ impl VisitImpl {
                             format!(
                                 "Unable to perform 'magic' variable substitution on closure: {}",
                                 tokens
-                            )
+                            ),
                         );
                         err.combine(cause);
-                        return Err(err)
+                        return Err(err);
                     }
                 })
             }
-            VisitImpl::Specific { mutable: ref mutable_impl, ref immutable } => {
-                Ok(if mutable {
-                    mutable_impl.clone()
-                } else {
-                    immutable.clone().ok_or_else(|| {
-                        Error::new(
-                            Span::call_site(),
-                            "Expected a trace_immutable closure"
-                        )
-                    })?
-                })
-            }
+            VisitImpl::Specific {
+                mutable: ref mutable_impl,
+                ref immutable,
+            } => Ok(if mutable {
+                mutable_impl.clone()
+            } else {
+                immutable.clone().ok_or_else(|| {
+                    Error::new(Span::call_site(), "Expected a trace_immutable closure")
+                })?
+            }),
         }
     }
 }
-fn replace_magic_tokens(input: TokenStream, func: &mut dyn FnMut(&Ident) -> Result<TokenStream, Error>) -> Result<TokenStream, Error> {
+fn replace_magic_tokens(
+    input: TokenStream,
+    func: &mut dyn FnMut(&Ident) -> Result<TokenStream, Error>,
+) -> Result<TokenStream, Error> {
     use quote::TokenStreamExt;
     let mut res = TokenStream::new();
     let mut iter = input.into_iter();
@@ -919,27 +972,25 @@ fn replace_magic_tokens(input: TokenStream, func: &mut dyn FnMut(&Ident) -> Resu
             }
             TokenTree::Punct(ref p) if p.as_char() == '#' => {
                 match iter.next() {
-                    None => return Err(Error::new(
-                        p.span(), "Unexpected EOF after magic token `#`"
-                    )),
+                    None => {
+                        return Err(Error::new(p.span(), "Unexpected EOF after magic token `#`"))
+                    }
                     Some(TokenTree::Punct(ref p2)) if p2.as_char() == '#' => {
                         // Pass through p2
                         res.append(TokenTree::Punct(p2.clone()));
                     }
                     Some(TokenTree::Ident(ref ident)) => {
                         res.extend(func(ident)?);
-                    },
+                    }
                     Some(ref other) => {
                         return Err(Error::new(
-                            p.span(), format!(
-                                "Invalid token after magic token `#`: {}",
-                                other
-                            )
+                            p.span(),
+                            format!("Invalid token after magic token `#`: {}", other),
                         ))
                     }
                 }
             }
-            TokenTree::Punct(_) | TokenTree::Ident(_) | TokenTree::Literal(_)=> {
+            TokenTree::Punct(_) | TokenTree::Ident(_) | TokenTree::Literal(_) => {
                 // pass through
                 res.append(item);
             }
@@ -960,7 +1011,7 @@ pub enum TraitRequirements {
     /// the specified where clause is satisfied
     Where(WhereClause),
     /// The trait should always be implemented
-    Always
+    Always,
 }
 
 impl MacroArg for TraitRequirements {
@@ -974,7 +1025,7 @@ impl MacroArg for TraitRequirements {
             } else {
                 Err(Error::new(
                     ident.span(),
-                    "Invalid identifier for `TraitRequirement`"
+                    "Invalid identifier for `TraitRequirement`",
                 ))
             }
         } else if input.peek(syn::token::Brace) {
@@ -987,69 +1038,92 @@ impl MacroArg for TraitRequirements {
     }
 }
 
-
-
-fn rewrite_type(target: &Type, target_type_name: &str, rewriter: &mut dyn FnMut(&Type) -> Option<Type>) -> Result<Type, Error> {
+fn rewrite_type(
+    target: &Type,
+    target_type_name: &str,
+    rewriter: &mut dyn FnMut(&Type) -> Option<Type>,
+) -> Result<Type, Error> {
     if let Some(explicitly_rewritten) = rewriter(target) {
-        return Ok(explicitly_rewritten)
+        return Ok(explicitly_rewritten);
     }
     let mut target = target.clone();
     match target {
         Type::Paren(ref mut inner) => {
             *inner.elem = rewrite_type(&inner.elem, target_type_name, rewriter)?
-        },
+        }
         Type::Group(ref mut inner) => {
             *inner.elem = rewrite_type(&inner.elem, target_type_name, rewriter)?
-        },
+        }
         Type::Reference(ref mut target) => {
             // TODO: Lifetime safety?
             // Rewrite reference target
             *target.elem = rewrite_type(&target.elem, target_type_name, rewriter)?
         }
-        Type::Path(::syn::TypePath { ref mut qself, ref mut path }) => {
-            *qself = qself.clone().map::<Result<_, Error>, _>(|mut qself| {
-                qself.ty = Box::new(rewrite_type(
-                    &*qself.ty, target_type_name,
-                    &mut *rewriter
-                )?);
-                Ok(qself)
-            }).transpose()?;
-            path.segments = path.segments.iter().cloned().map(|mut segment| {
-                // old_segment.ident is ignored...
-                match segment.arguments {
-                    ::syn::PathArguments::None => {}, // Nothing to do here
-                    ::syn::PathArguments::AngleBracketed(ref mut generic_args) => {
-                        for arg in &mut generic_args.args {
-                            match arg {
-                                GenericArgument::Lifetime(_) | GenericArgument::Const(_) => {},
-                                GenericArgument::Type(ref mut generic_type) => {
-                                    *generic_type = rewrite_type(generic_type, target_type_name, &mut *rewriter)?;
-                                }
-                                GenericArgument::Constraint(_) | GenericArgument::Binding(_) => {
-                                    return Err(Error::new(
-                                        arg.span(), format!(
+        Type::Path(::syn::TypePath {
+            ref mut qself,
+            ref mut path,
+        }) => {
+            *qself = qself
+                .clone()
+                .map::<Result<_, Error>, _>(|mut qself| {
+                    qself.ty =
+                        Box::new(rewrite_type(&*qself.ty, target_type_name, &mut *rewriter)?);
+                    Ok(qself)
+                })
+                .transpose()?;
+            path.segments = path
+                .segments
+                .iter()
+                .cloned()
+                .map(|mut segment| {
+                    // old_segment.ident is ignored...
+                    match segment.arguments {
+                        ::syn::PathArguments::None => {} // Nothing to do here
+                        ::syn::PathArguments::AngleBracketed(ref mut generic_args) => {
+                            for arg in &mut generic_args.args {
+                                match arg {
+                                    GenericArgument::Lifetime(_) | GenericArgument::Const(_) => {}
+                                    GenericArgument::Type(ref mut generic_type) => {
+                                        *generic_type = rewrite_type(
+                                            generic_type,
+                                            target_type_name,
+                                            &mut *rewriter,
+                                        )?;
+                                    }
+                                    GenericArgument::Constraint(_)
+                                    | GenericArgument::Binding(_) => {
+                                        return Err(Error::new(
+                                            arg.span(),
+                                            format!(
                                             "Unable to handle generic arg while rewriting as a {}",
                                             target_type_name
-                                        )
-                                    ))
+                                        ),
+                                        ))
+                                    }
                                 }
                             }
                         }
+                        ::syn::PathArguments::Parenthesized(ref mut paran_args) => {
+                            return Err(Error::new(
+                                paran_args.span(),
+                                "TODO: Rewriting paranthesized (fn-style) args",
+                            ));
+                        }
                     }
-                    ::syn::PathArguments::Parenthesized(ref mut paran_args) => {
-                        return Err(Error::new(
-                            paran_args.span(),
-                            "TODO: Rewriting paranthesized (fn-style) args"
-                        ));
-                    }
-                }
-                Ok(segment)
-            }).collect::<Result<_, Error>>()?;
+                    Ok(segment)
+                })
+                .collect::<Result<_, Error>>()?;
         }
-        _ => return Err(Error::new(target.span(), format!(
-            "Unable to rewrite type as a `{}`: {}",
-            target_type_name, quote!(#target)
-        )))
+        _ => {
+            return Err(Error::new(
+                target.span(),
+                format!(
+                    "Unable to rewrite type as a `{}`: {}",
+                    target_type_name,
+                    quote!(#target)
+                ),
+            ))
+        }
     }
     Ok(target)
 }

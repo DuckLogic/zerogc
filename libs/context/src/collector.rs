@@ -2,20 +2,19 @@
 #![allow(clippy::missing_safety_doc)]
 
 use core::fmt::{self, Debug, Formatter};
-use core::ptr::NonNull;
+use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
-use core::hash::{Hasher, Hash};
+use core::ptr::NonNull;
 
 use alloc::sync::Arc;
 
-use slog::{Logger, o};
+use slog::{o, Logger};
 
-use zerogc::{Gc, GcSafe, GcArray, GcSimpleAlloc, GcSystem, Trace};
+use zerogc::{Gc, GcArray, GcSafe, GcSimpleAlloc, GcSystem, Trace};
 
-use crate::{CollectorContext};
 use crate::state::{CollectionManager, RawContext};
+use crate::CollectorContext;
 use zerogc::vec::raw::GcRawVec;
-
 
 pub unsafe trait ConstRawCollectorImpl: RawCollectorImpl {
     fn resolve_array_len_const<T>(gc: &GcArray<T, CollectorId<Self>>) -> usize;
@@ -37,12 +36,12 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     type Ptr: CollectorPtr<Self>;
 
     /// The type that manages this collector's state
-    type Manager: CollectionManager<Self, Context=Self::RawContext>;
+    type Manager: CollectionManager<Self, Context = Self::RawContext>;
 
     /// The context
     type RawContext: RawContext<Self>;
     /// The raw representation of a vec
-    type RawVec<'gc, T: GcSafe<'gc, CollectorId<Self>>>: GcRawVec<'gc, T, Id=CollectorId<Self>>;
+    type RawVec<'gc, T: GcSafe<'gc, CollectorId<Self>>>: GcRawVec<'gc, T, Id = CollectorId<Self>>;
 
     /// True if this collector is a singleton
     ///
@@ -54,14 +53,19 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     const SYNC: bool;
 
     fn id_for_gc<'a, 'gc, T>(gc: &'a Gc<'gc, T, CollectorId<Self>>) -> &'a CollectorId<Self>
-        where 'gc: 'a, T: ?Sized + 'gc;
+    where
+        'gc: 'a,
+        T: ?Sized + 'gc;
 
     // TODO: What if we want to customize 'GcArrayRepr'??
 
-    fn id_for_array<'a, 'gc, T>(gc: &'a GcArray<'gc, T, CollectorId<Self>>) -> &'a CollectorId<Self> where 'gc: 'a;
- 
-    fn resolve_array_len<T>(repr: &GcArray<T, CollectorId<Self>>) -> usize;
+    fn id_for_array<'a, 'gc, T>(
+        gc: &'a GcArray<'gc, T, CollectorId<Self>>,
+    ) -> &'a CollectorId<Self>
+    where
+        'gc: 'a;
 
+    fn resolve_array_len<T>(repr: &GcArray<T, CollectorId<Self>>) -> usize;
 
     /// Convert the specified value into a dyn pointer
     unsafe fn as_dyn_trace_pointer<T: Trace>(t: *mut T) -> Self::DynTracePtr;
@@ -74,13 +78,17 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
     /// The id of this collector
     #[inline]
     fn id(&self) -> CollectorId<Self> {
-        CollectorId { ptr: unsafe { Self::Ptr::from_raw(self as *const _ as *mut _) } }
+        CollectorId {
+            ptr: unsafe { Self::Ptr::from_raw(self as *const _ as *mut _) },
+        }
     }
     unsafe fn gc_write_barrier<'gc, O, V>(
         owner: &Gc<'gc, O, CollectorId<Self>>,
         value: &Gc<'gc, V, CollectorId<Self>>,
-        field_offset: usize
-    ) where O: GcSafe<'gc, CollectorId<Self>> + ?Sized, V: GcSafe<'gc, CollectorId<Self>> + ?Sized;
+        field_offset: usize,
+    ) where
+        O: GcSafe<'gc, CollectorId<Self>> + ?Sized,
+        V: GcSafe<'gc, CollectorId<Self>> + ?Sized;
     /// The logger associated with this collector
     fn logger(&self) -> &Logger;
 
@@ -94,14 +102,14 @@ pub unsafe trait RawCollectorImpl: 'static + Sized {
 }
 
 /// A thread safe collector
-pub unsafe trait SyncCollector: RawCollectorImpl + Sync {
-
-}
+pub unsafe trait SyncCollector: RawCollectorImpl + Sync {}
 
 /// A collector implemented as a singleton
 ///
 /// This only has one instance
-pub unsafe trait SingletonCollector: RawCollectorImpl<Ptr=PhantomData<&'static Self>> {
+pub unsafe trait SingletonCollector:
+    RawCollectorImpl<Ptr = PhantomData<&'static Self>>
+{
     /// When the collector is a singleton,
     /// return the global implementation
     fn global_ptr() -> *const Self;
@@ -118,7 +126,7 @@ impl<C: RawCollectorImpl> PartialEq for CollectorId<C> {
         self.ptr == other.ptr
     }
 }
-impl<C: RawCollectorImpl> Hash for CollectorId<C>  {
+impl<C: RawCollectorImpl> Hash for CollectorId<C> {
     #[inline]
     fn hash<H: Hasher>(&self, hasher: &mut H) {
         hasher.write_usize(self.ptr.as_ptr() as usize);
@@ -143,8 +151,9 @@ impl<C: RawCollectorImpl> Debug for CollectorId<C> {
 }
 
 /// An unchecked pointer to a collector
-pub unsafe trait CollectorPtr<C: RawCollectorImpl<Ptr=Self>>: Copy + Eq
-    + self::sealed::Sealed + 'static {
+pub unsafe trait CollectorPtr<C: RawCollectorImpl<Ptr = Self>>:
+    Copy + Eq + self::sealed::Sealed + 'static
+{
     /// A weak reference to the pointer
     type Weak: Clone + 'static;
 
@@ -162,7 +171,7 @@ pub unsafe trait CollectorPtr<C: RawCollectorImpl<Ptr=Self>>: Copy + Eq
 }
 /// This is implemented as a
 /// raw pointer via [Arc::into_raw]
-unsafe impl<C: RawCollectorImpl<Ptr=Self>> CollectorPtr<C> for NonNull<C> {
+unsafe impl<C: RawCollectorImpl<Ptr = Self>> CollectorPtr<C> for NonNull<C> {
     type Weak = alloc::sync::Weak<C>;
 
     #[inline]
@@ -192,17 +201,13 @@ unsafe impl<C: RawCollectorImpl<Ptr=Self>> CollectorPtr<C> for NonNull<C> {
 
     #[inline]
     fn upgrade_weak_raw(weak: &Self::Weak) -> Option<Self> {
-        weak.upgrade().map(|arc| unsafe {
-            Self::from_raw(Arc::into_raw(arc) as *mut _)
-        })
+        weak.upgrade()
+            .map(|arc| unsafe { Self::from_raw(Arc::into_raw(arc) as *mut _) })
     }
 
     #[inline]
     unsafe fn assume_weak_valid(weak: &Self::Weak) -> Self {
-        debug_assert!(
-            weak.upgrade().is_some(),
-            "Dead collector"
-        );
+        debug_assert!(weak.upgrade().is_some(), "Dead collector");
         NonNull::new_unchecked(weak.as_ptr() as *mut _)
     }
 
@@ -216,7 +221,7 @@ unsafe impl<C: RawCollectorImpl<Ptr=Self>> CollectorPtr<C> for NonNull<C> {
 }
 /// Dummy implementation
 impl<C: RawCollectorImpl> self::sealed::Sealed for NonNull<C> {}
-unsafe impl<C: SingletonCollector<Ptr=Self>> CollectorPtr<C> for PhantomData<&'static C> {
+unsafe impl<C: SingletonCollector<Ptr = Self>> CollectorPtr<C> for PhantomData<&'static C> {
     type Weak = PhantomData<&'static C>;
 
     #[inline]
@@ -290,7 +295,9 @@ impl<C: RawCollectorImpl> CollectorId<C> {
     }
     #[inline]
     pub unsafe fn weak_ref(&self) -> WeakCollectorRef<C> {
-        WeakCollectorRef { weak: self.ptr.create_weak() }
+        WeakCollectorRef {
+            weak: self.ptr.create_weak(),
+        }
     }
 }
 unsafe impl<C: SyncCollector> Sync for CollectorId<C> {}
@@ -303,12 +310,19 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     type ArrayPtr = zerogc::array::repr::ThinArrayPtr<Self>;
 
     #[inline]
-    fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self where T: ?Sized, 'gc: 'a {
+    fn from_gc_ptr<'a, 'gc, T>(gc: &'a Gc<'gc, T, Self>) -> &'a Self
+    where
+        T: ?Sized,
+        'gc: 'a,
+    {
         C::id_for_gc(gc)
     }
 
     #[inline]
-    fn resolve_array_id<'a, 'gc, T>(gc: &'a GcArray<'gc, T, Self>) -> &'a Self where 'gc: 'a {
+    fn resolve_array_id<'a, 'gc, T>(gc: &'a GcArray<'gc, T, Self>) -> &'a Self
+    where
+        'gc: 'a,
+    {
         C::id_for_array(gc)
     }
 
@@ -321,8 +335,11 @@ unsafe impl<C: RawCollectorImpl> ::zerogc::CollectorId for CollectorId<C> {
     unsafe fn gc_write_barrier<'gc, O, V>(
         owner: &Gc<'gc, O, Self>,
         value: &Gc<'gc, V, Self>,
-        field_offset: usize
-    ) where O: GcSafe<'gc, Self> + ?Sized, V: GcSafe<'gc, Self> + ?Sized {
+        field_offset: usize,
+    ) where
+        O: GcSafe<'gc, Self> + ?Sized,
+        V: GcSafe<'gc, Self> + ?Sized,
+    {
         C::gc_write_barrier(owner, value, field_offset)
     }
 
@@ -344,43 +361,64 @@ pub struct WeakCollectorRef<C: RawCollectorImpl> {
 impl<C: RawCollectorImpl> WeakCollectorRef<C> {
     #[inline]
     pub unsafe fn assume_valid(&self) -> CollectorId<C> {
-        CollectorId { ptr: C::Ptr::assume_weak_valid(&self.weak) }
+        CollectorId {
+            ptr: C::Ptr::assume_weak_valid(&self.weak),
+        }
     }
     pub fn ensure_valid<R>(&self, func: impl FnOnce(CollectorId<C>) -> R) -> R {
-        self.try_ensure_valid(|id| match id{
+        self.try_ensure_valid(|id| match id {
             Some(id) => func(id),
-            None => panic!("Dead collector")
+            None => panic!("Dead collector"),
         })
     }
     #[inline]
-    pub fn try_ensure_valid<R>(&self, func: impl FnOnce(Option<CollectorId<C>>) -> R) -> R{
+    pub fn try_ensure_valid<R>(&self, func: impl FnOnce(Option<CollectorId<C>>) -> R) -> R {
         func(C::Ptr::upgrade_weak(&self.weak).map(|r| r.id()))
     }
 }
 
 pub unsafe trait RawSimpleAlloc: RawCollectorImpl {
-    unsafe fn alloc_uninit<'gc, T: GcSafe<'gc, CollectorId<Self>>>(context: &'gc CollectorContext<Self>) -> *mut T;
-    unsafe fn alloc_uninit_slice<'gc, T>(context: &'gc CollectorContext<Self>, len: usize) -> *mut T
-        where T: GcSafe<'gc, CollectorId<Self>>;
-    fn alloc_raw_vec_with_capacity<'gc, T>(context: &'gc CollectorContext<Self>, capacity: usize) -> Self::RawVec<'gc, T>
-        where T: GcSafe<'gc, CollectorId<Self>>;
+    unsafe fn alloc_uninit<'gc, T: GcSafe<'gc, CollectorId<Self>>>(
+        context: &'gc CollectorContext<Self>,
+    ) -> *mut T;
+    unsafe fn alloc_uninit_slice<'gc, T>(
+        context: &'gc CollectorContext<Self>,
+        len: usize,
+    ) -> *mut T
+    where
+        T: GcSafe<'gc, CollectorId<Self>>;
+    fn alloc_raw_vec_with_capacity<'gc, T>(
+        context: &'gc CollectorContext<Self>,
+        capacity: usize,
+    ) -> Self::RawVec<'gc, T>
+    where
+        T: GcSafe<'gc, CollectorId<Self>>;
 }
 unsafe impl<C> GcSimpleAlloc for CollectorContext<C>
-    where C: RawSimpleAlloc {
+where
+    C: RawSimpleAlloc,
+{
     #[inline]
     unsafe fn alloc_uninit<'gc, T>(&'gc self) -> *mut T
-        where T: GcSafe<'gc, CollectorId<C>> {
+    where
+        T: GcSafe<'gc, CollectorId<C>>,
+    {
         C::alloc_uninit(self)
     }
 
     #[inline]
     unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> *mut T
-        where T: GcSafe<'gc, CollectorId<C>> {
+    where
+        T: GcSafe<'gc, CollectorId<C>>,
+    {
         C::alloc_uninit_slice(self, len)
     }
 
     #[inline]
-    fn alloc_raw_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> C::RawVec<'gc, T> where T: GcSafe<'gc, CollectorId<C>> {
+    fn alloc_raw_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> C::RawVec<'gc, T>
+    where
+        T: GcSafe<'gc, CollectorId<C>>,
+    {
         C::alloc_raw_vec_with_capacity::<T>(self, capacity)
     }
 }
@@ -395,7 +433,7 @@ pub struct CollectorRef<C: RawCollectorImpl> {
     /// When using multiple collectors, this is just an [Arc].
     ///
     /// It is implemented as a raw pointer around [Arc::into_raw]
-    ptr: C::Ptr
+    ptr: C::Ptr,
 }
 /// We actually are thread safe ;)
 unsafe impl<C: SyncCollector> Send for CollectorRef<C> {}
@@ -404,17 +442,14 @@ unsafe impl<C: SyncCollector> Sync for CollectorRef<C> {}
 
 /// Internal trait for initializing a collector
 #[doc(hidden)]
-pub trait CollectorInit<C: RawCollectorImpl<Ptr=Self>>: CollectorPtr<C> {
+pub trait CollectorInit<C: RawCollectorImpl<Ptr = Self>>: CollectorPtr<C> {
     fn create() -> CollectorRef<C> {
-        Self::with_logger(C::Config::default(), Logger::root(
-            slog::Discard,
-            o!()
-        ))
+        Self::with_logger(C::Config::default(), Logger::root(slog::Discard, o!()))
     }
     fn with_logger(config: C::Config, logger: Logger) -> CollectorRef<C>;
 }
 
-impl<C: RawCollectorImpl<Ptr=NonNull<C>>> CollectorInit<C> for NonNull<C> {
+impl<C: RawCollectorImpl<Ptr = NonNull<C>>> CollectorInit<C> for NonNull<C> {
     fn with_logger(config: C::Config, logger: Logger) -> CollectorRef<C> {
         assert!(!C::SINGLETON);
         let raw_ptr = C::init(config, logger);
@@ -422,34 +457,46 @@ impl<C: RawCollectorImpl<Ptr=NonNull<C>>> CollectorInit<C> for NonNull<C> {
     }
 }
 impl<C> CollectorInit<C> for PhantomData<&'static C>
-    where C: SingletonCollector {
+where
+    C: SingletonCollector,
+{
     fn with_logger(config: C::Config, logger: Logger) -> CollectorRef<C> {
         assert!(C::SINGLETON);
         C::init_global(config, logger); // TODO: Is this safe?
-        // NOTE: The raw pointer is implicit (now that we're leaked)
+                                        // NOTE: The raw pointer is implicit (now that we're leaked)
         CollectorRef { ptr: PhantomData }
     }
 }
 
-
 impl<C: RawCollectorImpl> CollectorRef<C> {
     #[inline]
-    pub fn create() -> Self where C::Ptr: CollectorInit<C> {
+    pub fn create() -> Self
+    where
+        C::Ptr: CollectorInit<C>,
+    {
         <C::Ptr as CollectorInit<C>>::create()
     }
 
     #[inline]
-    pub fn with_logger(logger: Logger) -> Self where C::Ptr: CollectorInit<C> {
+    pub fn with_logger(logger: Logger) -> Self
+    where
+        C::Ptr: CollectorInit<C>,
+    {
         Self::with_config(C::Config::default(), logger)
     }
 
-    pub fn with_config(config: C::Config, logger: Logger) -> Self where C::Ptr: CollectorInit<C> {
+    pub fn with_config(config: C::Config, logger: Logger) -> Self
+    where
+        C::Ptr: CollectorInit<C>,
+    {
         <C::Ptr as CollectorInit<C>>::with_logger(config, logger)
     }
 
     #[inline]
     pub(crate) fn clone_internal(&self) -> CollectorRef<C> {
-        CollectorRef { ptr: unsafe { self.ptr.clone_owned() } }
+        CollectorRef {
+            ptr: unsafe { self.ptr.clone_owned() },
+        }
     }
 
     #[inline]
@@ -460,7 +507,7 @@ impl<C: RawCollectorImpl> CollectorRef<C> {
     /// The id of this collector
     #[inline]
     pub fn id(&self) -> CollectorId<C> {
-        CollectorId { ptr: self.ptr  }
+        CollectorId { ptr: self.ptr }
     }
 
     /// Convert this collector into a unique context
@@ -472,7 +519,6 @@ impl<C: RawCollectorImpl> CollectorRef<C> {
     }
 }
 impl<C: SyncCollector> CollectorRef<C> {
-
     /// Create a new context bound to this collector
     ///
     /// Warning: Only one collector should be created per thread.
@@ -484,7 +530,9 @@ impl<C: SyncCollector> CollectorRef<C> {
 impl<C: RawCollectorImpl> Drop for CollectorRef<C> {
     #[inline]
     fn drop(&mut self) {
-        unsafe { self.ptr.drop(); }
+        unsafe {
+            self.ptr.drop();
+        }
     }
 }
 

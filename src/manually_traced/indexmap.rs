@@ -38,7 +38,6 @@ unsafe_gc_impl! {
     },
 }
 
-
 unsafe_gc_impl! {
     target => IndexSet<T, S>,
     params => [T: TraceImmutable, S: 'static],

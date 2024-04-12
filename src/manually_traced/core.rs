@@ -4,9 +4,9 @@
 //!
 //! `RefCell` and `Cell` require `T: NullTrace` and do not have implementations for other types.
 //! This is because some collectors may need write barriers to protect their internals.
-use core::num::Wrapping;
+use core::cell::{Cell, RefCell};
 use core::marker::PhantomData;
-use core::cell::{RefCell, Cell};
+use core::num::Wrapping;
 
 use crate::prelude::*;
 use crate::GcDirectBarrier;
@@ -251,7 +251,6 @@ unsafe_gc_impl! {
     }
 }
 
-
 unsafe_gc_impl!(
     target => Cell<T>,
     params => [T: NullTrace],
@@ -284,7 +283,6 @@ unsafe_gc_impl!(
     }
 );
 
-
 /*
  * Implements tracing for mutable references.
  *
@@ -312,8 +310,6 @@ unsafe_gc_impl! {
         visitor.#trace_func::<T>(#b **self)
     }
 }
-
-
 
 /*
  * Implements tracing for slices, by tracing all the objects they refer to.
@@ -356,7 +352,9 @@ unsafe_gc_impl! {
     deserialize => unstable_horrible_hack,
 }
 unsafe impl<'gc, OwningRef, V> GcDirectBarrier<'gc, OwningRef> for Option<V>
-    where V: GcDirectBarrier<'gc, OwningRef> {
+where
+    V: GcDirectBarrier<'gc, OwningRef>,
+{
     #[inline]
     unsafe fn write_barrier(&self, owner: &OwningRef, start_offset: usize) {
         // Implementing direct write is safe because we store our value inline
@@ -364,17 +362,16 @@ unsafe impl<'gc, OwningRef, V> GcDirectBarrier<'gc, OwningRef> for Option<V>
             None => {
                 /* Nothing to trigger the barrier for :) */
                 // TODO: Is this unreachable code?
-            },
+            }
             Some(ref value) => {
                 /*
                  * We must manually compute the offset
                  * Null pointer-optimized types will have offset of zero,
                  * while other types may not
                  */
-                let value_offset = (value as *const V as usize) -
-                    (self as *const Self as usize);
+                let value_offset = (value as *const V as usize) - (self as *const Self as usize);
                 value.write_barrier(owner, start_offset + value_offset)
-            },
+            }
         }
     }
 }
@@ -396,9 +393,9 @@ unsafe_gc_impl! {
 #[cfg(test)]
 mod test {
     use crate::epsilon::{EpsilonCollectorId, Gc};
-    use zerogc_derive::Trace;
     use crate::prelude::*;
     use std::marker::PhantomData;
+    use zerogc_derive::Trace;
 
     #[test]
     fn test_null_trace<'gc>() {

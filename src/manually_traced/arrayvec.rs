@@ -1,4 +1,4 @@
-use arrayvec::{ArrayVec, ArrayString};
+use arrayvec::{ArrayString, ArrayVec};
 
 use crate::{GcRebrand, NullTrace};
 
@@ -22,7 +22,7 @@ unsafe_gc_impl!(
     NEEDS_TRACE => <T as Trace>::NEEDS_TRACE,
     NEEDS_DROP => <T as Trace>::NEEDS_DROP,
     bounds => {
-        GcRebrand => { where T: GcRebrand<'new_gc, Id>, T::Branded: Sized }, 
+        GcRebrand => { where T: GcRebrand<'new_gc, Id>, T::Branded: Sized },
     },
     branded_type => ArrayVec<T::Branded, SIZE>,
     trace_template => |self, visitor| {
@@ -71,6 +71,6 @@ unsafe_gc_impl!(
             }
         }
         let visitor: ArrayVecVisitor<Id, T, SIZE> = ArrayVecVisitor { ctx, marker: PhantomData };
-        deserializer.deserialize_seq(visitor)      
+        deserializer.deserialize_seq(visitor)
     }
 );

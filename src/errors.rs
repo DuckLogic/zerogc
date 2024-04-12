@@ -11,11 +11,11 @@
 //! [GcHandle::use_critical] section to block
 //! garbage collection during formatting calls...
 
-use std::fmt::{self, Formatter, Display, Debug};
 use std::error::Error as StdError;
+use std::fmt::{self, Debug, Display, Formatter};
 
-use crate::DynTrace;
 use crate::prelude::*;
+use crate::DynTrace;
 
 /// A garbage collected [`std::error::Error`] type
 ///
@@ -28,14 +28,24 @@ use crate::prelude::*;
 ///
 /// The fifth point is rather subtle.
 /// Another way of saying it is that `T: 'gc` and `T::Branded: 'static`.
-pub trait GcErrorType<'gc, Id: CollectorId>: StdError + Sync + GcSafe<'gc, Id> + 'gc + GcRebrand<'static, Id>
-    + self::sealed::Sealed<Id>
-    where <Self as GcRebrand<'static, Id>>::Branded: 'static {}
-impl<'gc, Id: CollectorId, T: StdError + 'gc + Sync + GcSafe<'gc, Id> + GcRebrand<'static, Id>> GcErrorType<'gc, Id> for T
-    where <Self as GcRebrand<'static, Id>>::Branded: 'static {}
-impl<'gc, Id: CollectorId, T: StdError + 'gc + Sync + GcSafe<'gc, Id> + GcRebrand<'static, Id>> self::sealed::Sealed<Id> for T
-    where <Self as GcRebrand<'static, Id>>::Branded: 'static {}
-
+pub trait GcErrorType<'gc, Id: CollectorId>:
+    StdError + Sync + GcSafe<'gc, Id> + 'gc + GcRebrand<'static, Id> + self::sealed::Sealed<Id>
+where
+    <Self as GcRebrand<'static, Id>>::Branded: 'static,
+{
+}
+impl<'gc, Id: CollectorId, T: StdError + 'gc + Sync + GcSafe<'gc, Id> + GcRebrand<'static, Id>>
+    GcErrorType<'gc, Id> for T
+where
+    <Self as GcRebrand<'static, Id>>::Branded: 'static,
+{
+}
+impl<'gc, Id: CollectorId, T: StdError + 'gc + Sync + GcSafe<'gc, Id> + GcRebrand<'static, Id>>
+    self::sealed::Sealed<Id> for T
+where
+    <Self as GcRebrand<'static, Id>>::Branded: 'static,
+{
+}
 
 /// A super-trait of [GcErrorType]
 /// that is suitable for dynamic dispatch.
@@ -45,10 +55,14 @@ impl<'gc, Id: CollectorId, T: StdError + 'gc + Sync + GcSafe<'gc, Id> + GcRebran
 ///
 /// This is an implementation detail
 #[doc(hidden)]
-pub trait DynGcErrorType<'gc, Id: CollectorId>: Sync + StdError + DynTrace<'gc, Id> + self::sealed::Sealed<Id> {}
-impl<'gc, T: GcErrorType<'gc, Id>, Id: CollectorId> DynGcErrorType<'gc, Id> for T
-    where <T as GcRebrand<'static, Id>>::Branded: 'static {}
-
+pub trait DynGcErrorType<'gc, Id: CollectorId>:
+    Sync + StdError + DynTrace<'gc, Id> + self::sealed::Sealed<Id>
+{
+}
+impl<'gc, T: GcErrorType<'gc, Id>, Id: CollectorId> DynGcErrorType<'gc, Id> for T where
+    <T as GcRebrand<'static, Id>>::Branded: 'static
+{
+}
 
 crate::trait_object_trace!(
     impl<'gc, Id> Trace for dyn DynGcErrorType<'gc, Id> { where Id: CollectorId };
@@ -68,7 +82,7 @@ crate::trait_object_trace!(
 /// This is analogous to [`anyhow::Error`](https://docs.rs/anyhow/1.0.43/anyhow/struct.Error.html)
 /// but only for garbage collected .
 pub struct GcError<Id: HandleCollectorId> {
-    handle: Box<Id::Handle<dyn DynGcErrorType<'static, Id>>>
+    handle: Box<Id::Handle<dyn DynGcErrorType<'static, Id>>>,
 }
 impl<Id: HandleCollectorId> GcError<Id> {
     /// Allocate a new dynamically dispatched [GcError]
@@ -78,25 +92,23 @@ impl<Id: HandleCollectorId> GcError<Id> {
     /// is [GcSimpleAlloc::alloc_error].
     #[cold]
     pub fn from_gc_allocated<'gc, T: GcErrorType<'gc, Id> + 'gc>(gc: Gc<'gc, T, Id>) -> Self
-        where <T as GcRebrand<'static, Id>>::Branded: 'static,  {
+    where
+        <T as GcRebrand<'static, Id>>::Branded: 'static,
+    {
         let dynamic = gc as Gc<'gc, dyn DynGcErrorType<'gc, Id>, Id>;
         GcError {
-            handle: Box::new(Gc::create_handle(&dynamic))
+            handle: Box::new(Gc::create_handle(&dynamic)),
         }
     }
 }
 impl<Id: HandleCollectorId> Display for GcError<Id> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        self.handle.use_critical(|err| {
-            Display::fmt(&err, f)
-        })
+        self.handle.use_critical(|err| Display::fmt(&err, f))
     }
 }
 impl<Id: HandleCollectorId> Debug for GcError<Id> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        self.handle.use_critical(|err| {
-            Debug::fmt(&err, f)
-        })
+        self.handle.use_critical(|err| Debug::fmt(&err, f))
     }
 }
 impl<Id: HandleCollectorId> StdError for GcError<Id> {

@@ -1,17 +1,17 @@
 //! Defines the interface to garbage collected arrays.
-use core::ops::{Deref, Index};
-use core::ptr::NonNull;
 use core::cmp::Ordering;
-use core::slice::SliceIndex;
-use core::str;
-use core::fmt::{self, Formatter, Debug, Display};
+use core::fmt::{self, Debug, Display, Formatter};
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
+use core::ops::{Deref, Index};
+use core::ptr::NonNull;
+use core::slice::SliceIndex;
+use core::str;
 
-use crate::{CollectorId, GcSafe, GcRebrand, Gc};
-use zerogc_derive::{Trace, unsafe_gc_impl};
+use crate::{CollectorId, Gc, GcRebrand, GcSafe};
+use zerogc_derive::{unsafe_gc_impl, Trace};
 
-use self::repr::{GcArrayPtr};
+use self::repr::GcArrayPtr;
 
 pub mod repr;
 
@@ -30,7 +30,7 @@ pub mod repr;
 #[derive(Trace, Eq, PartialEq, Hash, Clone, Copy)]
 #[zerogc(copy, collector_ids(Id))]
 pub struct GcString<'gc, Id: CollectorId> {
-    bytes: GcArray<'gc, u8, Id>    
+    bytes: GcArray<'gc, u8, Id>,
 }
 impl<'gc, Id: CollectorId> GcString<'gc, Id> {
     /// Convert an array of UTF8 bytes into a string.
@@ -79,7 +79,7 @@ impl<'gc, Id: CollectorId> Debug for GcString<'gc, Id> {
 impl<'gc, Id: CollectorId> Display for GcString<'gc, Id> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         Display::fmt(self.as_str(), f)
-    }  
+    }
 }
 
 /// A garbage collected array.
@@ -93,18 +93,13 @@ impl<'gc, Id: CollectorId> Display for GcString<'gc, Id> {
 #[repr(transparent)]
 pub struct GcArray<'gc, T, Id: CollectorId> {
     ptr: Id::ArrayPtr,
-    marker: PhantomData<Gc<'gc, [T], Id>>
+    marker: PhantomData<Gc<'gc, [T], Id>>,
 }
 impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
     /// Convert this array into a slice
     #[inline]
     pub fn as_slice(&self) -> &'gc [T] {
-        unsafe {
-            core::slice::from_raw_parts(
-                self.as_raw_ptr(),
-                self.len()
-            )
-        }
+        unsafe { core::slice::from_raw_parts(self.as_raw_ptr(), self.len()) }
     }
     /// Load a raw pointer to the array's value
     #[inline]
@@ -145,7 +140,10 @@ impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
     /// value allocated from the corresponding [CollectorId]
     #[inline]
     pub unsafe fn from_raw_ptr(ptr: NonNull<T>, len: usize) -> Self {
-        GcArray { ptr: Id::ArrayPtr::from_raw_parts(ptr, len), marker: PhantomData }
+        GcArray {
+            ptr: Id::ArrayPtr::from_raw_parts(ptr, len),
+            marker: PhantomData,
+        }
     }
 }
 /// If the underlying type is `Sync`, it's safe
@@ -154,11 +152,21 @@ impl<'gc, T, Id: CollectorId> GcArray<'gc, T, Id> {
 /// The safety of the collector itself depends on whether [CollectorId] is Sync.
 /// If it is, the whole garbage collection implementation should be as well.
 unsafe impl<'gc, T, Id> Sync for GcArray<'gc, T, Id>
-    where T: Sync, Id: CollectorId + Sync {}
+where
+    T: Sync,
+    Id: CollectorId + Sync,
+{
+}
 unsafe impl<'gc, T, Id> Send for GcArray<'gc, T, Id>
-    where T: Sync, Id: CollectorId + Sync {}
+where
+    T: Sync,
+    Id: CollectorId + Sync,
+{
+}
 impl<'gc, T, I, Id: CollectorId> Index<I> for GcArray<'gc, T, Id>
-    where I: SliceIndex<[T]> {
+where
+    I: SliceIndex<[T]>,
+{
     type Output = I::Output;
     #[inline]
     fn index(&self, idx: I) -> &I::Output {
@@ -222,7 +230,10 @@ impl<'gc, T: Hash, Id: CollectorId> Hash for GcArray<'gc, T, Id> {
         T::hash_slice(self.as_slice(), hasher)
     }
 }
-impl<'gc, T, Id: CollectorId> IntoIterator for GcArray<'gc, T, Id>  where T: 'gc {
+impl<'gc, T, Id: CollectorId> IntoIterator for GcArray<'gc, T, Id>
+where
+    T: 'gc,
+{
     type Item = &'gc T;
 
     type IntoIter = core::slice::Iter<'gc, T>;
@@ -232,8 +243,10 @@ impl<'gc, T, Id: CollectorId> IntoIterator for GcArray<'gc, T, Id>  where T: 'gc
         self.as_slice().iter()
     }
 }
-impl<'array, 'gc, T, Id: CollectorId> IntoIterator for &'array GcArray<'gc, T, Id> 
-    where T: 'array {
+impl<'array, 'gc, T, Id: CollectorId> IntoIterator for &'array GcArray<'gc, T, Id>
+where
+    T: 'array,
+{
     type Item = &'array T;
 
     type IntoIter = core::slice::Iter<'array, T>;
@@ -266,8 +279,8 @@ unsafe_gc_impl!(
 
 #[cfg(test)]
 mod test {
-    use crate::{CollectorId, GcArray};
     use crate::epsilon::{self};
+    use crate::{CollectorId, GcArray};
     #[test]
     fn test_covariance<'a>() {
         fn covariant<'a, T, Id: CollectorId>(s: GcArray<'static, T, Id>) -> GcArray<'a, T, Id> {

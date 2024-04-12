@@ -47,7 +47,7 @@ macro_rules! trait_object_trace {
         collector_id => $collector_id:path,
         gc_lifetime => $gc_lt:lifetime) => {
         unsafe impl$(<$($lt,)* $($param),*>)? $crate::TrustedDrop for (dyn $target + $gc_lt) where Self: $crate::DynTrace<$gc_lt, $collector_id>, $($($where_clause)*)? {}
-        unsafe impl$(<$($lt,)* $($param),*>)? $crate::GcSafe<$gc_lt, $collector_id> for (dyn $target + $gc_lt) where Self: $crate::DynTrace<$gc_lt, $collector_id>, $($($where_clause)*)? {            
+        unsafe impl$(<$($lt,)* $($param),*>)? $crate::GcSafe<$gc_lt, $collector_id> for (dyn $target + $gc_lt) where Self: $crate::DynTrace<$gc_lt, $collector_id>, $($($where_clause)*)? {
             #[inline]
             unsafe fn trace_inside_gc<V>(gc: &mut $crate::Gc<$gc_lt, Self, $collector_id>, visitor: &mut V) -> Result<(), V::Err>
                 where V: $crate::GcVisitor {
@@ -122,7 +122,7 @@ macro_rules! impl_nulltrace_for_static {
             params => [$($param)*],
             bounds => {
                 GcSafe => { where Self: 'static, $($($where_tk)*)* },
-                Trace => { where Self: 'static, $($($where_tk)*)* },               
+                Trace => { where Self: 'static, $($($where_tk)*)* },
                 TraceImmutable => { where Self: 'static, $($($where_tk)*)* },
                 GcRebrand => { where Self: 'static, $($($where_tk)*)* },
                 TrustedDrop => { where Self: 'static, $($($where_tk)*)* }
