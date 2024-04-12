@@ -1,12 +1,12 @@
 [package]
 name = "zerogc-simple"
 description = "Lightweight mark/sweep collector for zerogc."
-version = "0.2.0-alpha.7"
-authors = ["Techcable <Techcable@techcable.net>"]
-repository = "https://github.com/DuckLogic/zerogc"
+version.workspace = true
+authors.workspace = true
+repository.workspace =true
+license.workspace = true
+edition.workspace = true
 readme = "../../README.md"
-license = "MIT"
-edition = "2018"
 
 [dependencies]
 inherent = "1"
