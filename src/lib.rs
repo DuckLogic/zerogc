@@ -45,6 +45,8 @@ extern crate self as zerogc;
  * I want this library to use 'mostly' stable features,
  * unless there's good justification to use an unstable feature.
  */
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt::{self, Debug, Display, Formatter};
 use core::hash::{Hash, Hasher};
@@ -524,7 +526,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     /// Allocate an array, taking ownership of the values in
     /// the specified vec.
     #[inline]
-    #[cfg(feature = "alloc")]
+    #[cfg(any(feature = "alloc", feature = "std"))]
     fn alloc_array_from_vec<'gc, T>(&'gc self, mut src: Vec<T>) -> GcArray<'gc, T, Self::Id>
     where
         T: GcSafe<'gc, Self::Id>,

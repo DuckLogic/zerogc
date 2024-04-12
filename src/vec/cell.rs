@@ -1,4 +1,6 @@
 //! The implementation of [GcVecCell]
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use inherent::inherent;
@@ -135,6 +137,7 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: SimpleAllocCollectorId> IGcVec<'gc, T>
     pub fn copy_from_slice(src: &[T], ctx: &'gc <Id as CollectorId>::Context) -> Self
     where
         T: Copy;
+    #[cfg(feature = "alloc")]
     pub fn from_vec(src: Vec<T>, ctx: &'gc <Id as CollectorId>::Context) -> Self;
     pub fn get(&mut self, index: usize) -> Option<T>
     where

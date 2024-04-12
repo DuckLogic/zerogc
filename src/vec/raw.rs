@@ -1,6 +1,7 @@
 //! The underlying representation of a [GcVec](`crate::vec::GcVec`)
 
-use core::iter::Iterator;
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use crate::{CollectorId, GcRebrand, GcSafe};
@@ -40,6 +41,7 @@ pub unsafe trait IGcVec<'gc, T: GcSafe<'gc, Self::Id>>: Sized + Extend<T> {
     ///
     /// This consumes ownership of the original vector.
     #[inline]
+    #[cfg(any(feature = "alloc", feature = "std"))]
     fn from_vec(mut src: Vec<T>, ctx: &'gc <Self::Id as CollectorId>::Context) -> Self {
         let len = src.len();
         let mut res = Self::with_capacity_in(len, ctx);

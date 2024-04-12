@@ -103,8 +103,9 @@
 //! It has been called the [stretchy vector problem](https://www.ravenbrook.com/project/mps/master/manual/html/guide/vector.html)
 //! by some. This is less of a problem for `zerogc`, because collections can only
 //! happen at explicit safepoints.
+#[cfg(all(not(feature = "std"), feature = "alloc"))]
+use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use core::convert::{AsMut, AsRef};
 use core::fmt::{self, Debug, Formatter};
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
@@ -383,6 +384,7 @@ unsafe impl<'gc, T: GcSafe<'gc, Id>, Id: CollectorId> IGcVec<'gc, T> for GcVec<'
     pub fn copy_from_slice(src: &[T], ctx: &'gc Id::Context) -> Self
     where
         T: Copy;
+    #[cfg(any(feature = "alloc", feature = "std"))]
     pub fn from_vec(src: Vec<T>, ctx: &'gc Id::Context) -> Self;
 
     /*
