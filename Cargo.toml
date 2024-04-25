@@ -1,0 +1,17 @@
+[package]
+name = "zerogc-next"
+description = "Redesign of the zerogc API"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+allocator-api2 = "0.2.18"
+bitbybit = "1.3.2"
+
+[workspace]
+resolver = "2"
+members = [".", "libs/*"]
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2021"

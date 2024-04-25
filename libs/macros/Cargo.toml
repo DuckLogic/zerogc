@@ -1,0 +1,15 @@
+[package]
+name = "zerog-next-macros"
+description = "Procedural macros for zerogc-next"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+proc-macro-kwargs = "0.2"
+indexmap = "2"
