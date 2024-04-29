@@ -3,6 +3,41 @@
 //! Implementation mostly copied from the stdlib.
 
 use std::alloc::{Layout, LayoutError};
+use std::fmt::{Debug, Formatter};
+use std::num::{NonZero, NonZeroUsize};
+
+/// Represents a valid alignment for a type.
+///
+/// This emulates the unstable [`std::ptr::Alignment`] API.
+///
+/// ## Safety
+/// The alignment must be a nonzero power of two
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub struct Alignment(NonZeroUsize);
+
+impl Alignment {
+    #[inline]
+    pub const fn new(value: usize) -> Result<Self, InvalidAlignmentError> {
+        if value.is_power_of_two() {
+            Ok(Alignment(unsafe { NonZero::new_unchecked(value) }))
+        } else {
+            Err(InvalidAlignmentError)
+        }
+    }
+
+    #[inline]
+    pub fn value(&self) -> usize {
+        self.0.get()
+    }
+}
+impl Debug for Alignment {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Alignment").field(&self.value()).finish()
+    }
+}
+#[derive(Debug, thiserror::Error)]
+#[error("Invalid alignment")]
+struct InvalidAlignmentError;
 
 #[derive(Copy, Clone, Debug)]
 pub struct LayoutExt(pub Layout);
@@ -27,7 +62,7 @@ impl LayoutExt {
         let new_size = self.0.size() + pad;
 
         // SAFETY: padded size is guaranteed to not exceed `isize::MAX`.
-        unsafe { Layout::from_size_align_unchecked(new_size, self.align()) }
+        unsafe { Layout::from_size_align_unchecked(new_size, self.0.align()) }
     }
 
     /// Copied from stdlib [`Layout::extend`]
@@ -38,15 +73,15 @@ impl LayoutExt {
     /// you must call [`Self::pad_to_align`] to add trailing padding.
     /// See stdlib docs for details.
     #[inline]
-    pub const fn extend(&self, next: Layout) -> Result<(Layout, usize), LayoutError> {
+    pub const fn extend(&self, next: Layout) -> Result<(Layout, usize), LayoutExtError> {
         let new_align = Self::const_max(self.0.align(), next.align());
         let pad = self.padding_needed_for(next.align());
 
         let Some(offset) = self.size().checked_add(pad) else {
-            return LayoutError;
+            return LayoutExtError;
         };
         let Some(new_size) = offset.checked_add(next.size()) else {
-            return LayoutError;
+            return LayoutExtError;
         };
 
         /*
@@ -55,7 +90,7 @@ impl LayoutExt {
          * is we skip the usize::is_power_of_two check.
          */
         if new_size > Self::max_size_for_align(new_align) {
-            return Err(LayoutError);
+            return Err(LayoutExtError);
         } else {
             Ok((
                 unsafe { Layout::from_size_align_unchecked(new_size, new_align) },
@@ -64,6 +99,10 @@ impl LayoutExt {
         }
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("Layout error")]
+struct LayoutExtError;
 
 #[inline]
 const fn const_max(first: usize, second: usize) -> usize {

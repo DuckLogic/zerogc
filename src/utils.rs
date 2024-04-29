@@ -1,10 +1,9 @@
-pub(crate) mod layout_helpers;
-
-pub(crate) use self::layout_helpers::LayoutExt;
-use crate::Collect;
-use crate::Collect;
-use std::mem::ManuallyDrop;
 use std::mem::{self, ManuallyDrop};
+
+pub(crate) mod bumpalo_raw;
+mod layout_helpers;
+
+pub use self::layout_helpers::{Alignment, LayoutExt};
 
 /// Transmute one type into another,
 /// without doing compile-time checks for sizes.
@@ -29,8 +28,8 @@ use std::mem::{self, ManuallyDrop};
 #[inline(always)]
 #[track_caller] // for the case where sizes don't match
 pub unsafe fn transmute_arbitrary<Src, Dst>(val: Src) -> Dst {
-    const SIZE_MATCHES: bool = std::mem::size_of::<Src>() == std::mem::size_of::<Dst>();
-    if SIZE_MATCHES {
+    let size_matches = const { std::mem::size_of::<Src>() == std::mem::size_of::<Dst>() };
+    if size_matches {
         let src: ManuallyDrop<Src> = ManuallyDrop::new(val);
         std::mem::transmute_copy(&src as &Src)
     } else {

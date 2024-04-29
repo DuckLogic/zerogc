@@ -6,14 +6,14 @@ use std::ops::Deref;
 use std::ptr::NonNull;
 
 use crate::context::{GcHeader, GcTypeInfo};
-use crate::{Collect, CollectContext, CollectorId};
+use crate::{Collect, CollectContext, CollectorId, GarbageCollector};
 
 pub struct Gc<'gc, T, Id: CollectorId> {
     ptr: NonNull<T>,
     marker: PhantomData<*const T>,
-    collect_marker: PhantomData<&'gc Id::Collector>,
+    collect_marker: PhantomData<&'gc GarbageCollector<Id>>,
 }
-impl<'gc, T, Id: CollectorId> Gc<'gc, T, Id> {
+impl<'gc, T: Collect<Id>, Id: CollectorId> Gc<'gc, T, Id> {
     #[inline]
     pub fn id(&self) -> Id {
         match unsafe { Id::summon_singleton() } {
@@ -22,23 +22,23 @@ impl<'gc, T, Id: CollectorId> Gc<'gc, T, Id> {
         }
     }
 
+    #[inline]
     pub(crate) fn header(&self) -> &'_ GcHeader<Id> {
         unsafe {
-            &*((self.ptr.as_ptr() as *mut u8)
-                .sub(const { GcHeader::determine_layout(Layout::new()).value_offset })
+            &*((self.ptr.as_ptr() as *mut u8).sub(GcHeader::<Id>::FIXED_ALIGNMENT)
                 as *mut GcHeader<Id>)
         }
     }
 
+    #[inline]
     pub(crate) fn type_info() -> &'static GcTypeInfo<Id> {
-        GcTypeInfo::of::<Self>()
+        GcTypeInfo::new::<Self>()
     }
 
     #[inline(always)]
-    pub unsafe fn from_raw_ptr(ptr: NonNull<T>, id: Id) -> Self {
+    pub unsafe fn from_raw_ptr(ptr: NonNull<T>) -> Self {
         Gc {
             ptr,
-            id,
             marker: PhantomData,
             collect_marker: PhantomData,
         }

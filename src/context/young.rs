@@ -1,78 +1,140 @@
-use crate::context::{GcHeader, GcLayout, GcTypeInfo};
-use crate::utils::LayoutExt;
-use crate::CollectorId;
 use std::alloc::Layout;
 use std::cell::Cell;
+use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-/// A yong-generation object-space
+use bumpalo::ChunkRawIter;
+
+use crate::context::{AllocInfo, GcHeader, GcStateBits, GcTypeInfo, GenerationId, HeaderMetadata};
+use crate::utils::bumpalo_raw::{BumpAllocRaw, BumpAllocRawConfig};
+use crate::utils::{Alignment, LayoutExt};
+use crate::CollectorId;
+
+/// A young-generation object-space
 ///
 /// If copying is in progress,
 /// there may be two young generations for a single collector.
 ///
 /// The design of the allocator is heavily based on [`bumpalo`](https://crates.io/crates/bumpalo)
-pub struct YoungGenerationSpace<Id> {
-    current_chunk: Cell<NonNull<ChunkHeader>>,
-    current_chunk_next_ptr: Cell<NonNull<u8>>,
-    current_chunk_end_ptr: Cell<NonNull<u8>>,
+pub struct YoungGenerationSpace<Id: CollectorId> {
+    bump: BumpAllocRaw<BumpConfig<Id>>,
     collector_id: Id,
 }
 impl<Id: CollectorId> YoungGenerationSpace<Id> {
+    /// The maximum size to allocate in the young generation.
+    ///
+    /// Anything larger than this is immediately sent to the old generation.
+    pub const SIZE_LIMIT: usize = 1024;
+
     #[inline(always)]
-    pub fn alloc_uninit(
+    pub unsafe fn alloc_uninit(
         &self,
-        layout_info: GcLayout,
         type_info: &'static GcTypeInfo<Id>,
-    ) -> (*mut GcHeader<Id>, NonNull<u8>) {
-        debug_assert_eq!(layout_info, type_info.layout_info);
+    ) -> Result<NonNull<GcHeader<Id>>, YoungAllocError> {
+        let overall_size = type_info.layout.overall_size;
+        if overall_size > Self::SIZE_LIMIT {
+            return Err(YoungAllocError::SizeExceedsLimit);
+        }
+        let Ok(raw_ptr) = self
+            .bump
+            .try_alloc_layout(Layout::from_size_align_unchecked(
+                overall_size,
+                GcHeader::<Id>::FIXED_ALIGNMENT,
+            ))
+        else {
+            return Err(YoungAllocError::OutOfMemory);
+        };
+        let header_ptr = raw_ptr.cast::<GcHeader<Id>>();
+        header_ptr.as_ptr().write(GcHeader {
+            state_bits: Cell::new(
+                GcStateBits::builder()
+                    .with_forwarded(false)
+                    .with_generation(GenerationId::Young)
+                    .with_array(false)
+                    .build(),
+            ),
+            alloc_info: AllocInfo {
+                this_object_overall_size: overall_size as u32,
+            },
+            metadata: HeaderMetadata { type_info },
+            collector_id: self.collector_id,
+        });
+        Ok(header_ptr)
     }
-    fn ensure_chunk(&self, layout: Layout) -> Layout {
-        x
+
+    #[inline]
+    pub unsafe fn iter_raw_allocations(&self) -> IterRawAllocations<'_, Id> {
+        IterRawAllocations {
+            chunk_iter: self.bump.iter_allocated_chunks_raw(),
+            remaining_chunk_info: None,
+            marker: PhantomData,
+        }
+    }
+}
+#[derive(Debug, thiserror::Error)]
+enum YoungAllocError {
+    #[error("Out of memory")]
+    OutOfMemory,
+    #[error("Size exceeds young-alloc limit")]
+    SizeExceedsLimit,
+}
+
+struct IterRawAllocations<'bump, Id: CollectorId> {
+    chunk_iter: ChunkRawIter<'bump>,
+    remaining_chunk_info: Option<(NonNull<u8>, usize)>,
+    marker: PhantomData<Id>,
+}
+impl<Id: CollectorId> Iterator for IterRawAllocations<'_, Id> {
+    type Item = NonNull<GcHeader<Id>>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some((ref mut remaining_chunk_ptr, ref mut remaining_chunk_size)) =
+                self.remaining_chunk_info
+            {
+                if *remaining_chunk_size == 0 {
+                    continue;
+                }
+                debug_assert!(
+                    *remaining_chunk_size >= GcHeader::<Id>::REGULAR_HEADER_LAYOUT.size()
+                );
+                debug_assert_eq!(
+                    // TODO: Use `is_aligned_to` once stabilized
+                    remaining_chunk_ptr
+                        .as_ptr()
+                        .align_offset(GcHeader::<Id>::FIXED_ALIGNMENT),
+                    0
+                );
+                unsafe {
+                    let header = &*remaining_chunk_ptr.as_ptr().cast::<GcHeader<Id>>();
+                    debug_assert_eq!(header.state_bits.get().generation(), GenerationId::Young);
+                    let overall_object_size = header.alloc_info.this_object_overall_size as usize;
+                    *remaining_chunk_ptr = NonNull::new_unchecked(
+                        remaining_chunk_ptr.as_ptr().add(overall_object_size),
+                    );
+                    *remaining_chunk_size = remaining_chunk_size.unchecked_sub(overall_object_size);
+                    return Some(NonNull::from(header));
+                }
+            } else {
+                match self.chunk_iter.next() {
+                    None => return None,
+                    Some((remaining_chunk_ptr, remaining_chunk_size)) => {
+                        self.remaining_chunk_info = Some((
+                            unsafe { NonNull::new_unchecked(remaining_chunk_ptr) },
+                            remaining_chunk_size,
+                        ));
+                    }
+                }
+            }
+        }
     }
 }
 
-#[repr(C, align(16))]
-pub struct ChunkHeader {
-    initial_object: Option<NonNull<u8>>,
-    final_allocation_ptr: Option<NonNull<u8>>,
-    prev_chunk: Option<NonNull<ChunkHeader>>,
-    data_size: usize,
-}
-impl ChunkHeader {
-    #[inline]
-    fn data_start_ptr(&self) -> NonNull<u8> {
-        unsafe {
-            NonNull::new_unchecked(
-                (self as *const Self as *const u8).add(Self::DATA_OFFSET) as *mut u8
-            )
-        }
-    }
-    #[inline]
-    fn data_end_ptr(&self) -> NonNull<u8> {
-        unsafe { NonNull::new_unchecked(self.start_ptr().as_ptr().add(self.data_size)) }
-    }
-    #[inline]
-    fn overall_layout(&self) -> Layout {
-        assert_eq!(Self::DATA_OFFSET, Self::HEADER_LAYOUT.size());
-        unsafe {
-            Layout::from_size_align_unchecked(
-                Self::DATA_OFFSET.unchecked_add(self.data_size),
-                Self::DATA_ALIGNMENT,
-            )
-            .unwrap()
-        }
-    }
-    #[inline]
-    fn data_layout(&self) -> Layout {
-        unsafe { Layout::from_size_align_unchecked(self.data_size, Self::DATA_ALIGNMENT) }
-    }
-    const HEADER_LAYOUT: Layout = Layout::new::<Self>();
-    pub const DATA_OFFSET: usize = {
-        let this_layout = Self::HEADER_LAYOUT;
-        assert!(this_layout.align() <= Self::DATA_ALIGNMENT);
-        let padding = LayoutExt(this_layout).padding_needed_for(Self::DATA_ALIGNMENT);
-        this_layout.size() + padding
+struct BumpConfig<Id: CollectorId>(PhantomData<&'static Id>);
+impl<Id: CollectorId> BumpAllocRawConfig for BumpConfig<Id> {
+    const FIXED_ALIGNMENT: Alignment = match Alignment::new(GcHeader::<Id>::FIXED_ALIGNMENT) {
+        Ok(alignment) => alignment,
+        Err(_) => unreachable!("GcHeader alignment must be valid"),
     };
-    /// This over-alignment should be good enough for everything...
-    pub const DATA_ALIGNMENT: usize = std::mem::align_of::<Self>();
 }
