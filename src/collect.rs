@@ -1,13 +1,14 @@
 //! Defines the [`Collect`] trait and implements it for several types
 
-mod collections;
-pub mod macros;
-mod primitives;
+use std::ptr::NonNull;
 
 use crate::context::CollectContext;
 use crate::CollectorId;
-use std::mem::ManuallyDrop;
-use std::ptr::NonNull;
+
+mod collections;
+#[doc(hidden)] // has an internal helper module
+pub mod macros;
+mod primitives;
 
 pub unsafe trait Collect<Id: CollectorId> {
     type Collected<'newgc>: Collect<Id>;

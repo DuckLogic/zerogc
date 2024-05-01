@@ -1,7 +1,4 @@
-use std::alloc::Layout;
-use std::any::Any;
 use std::marker::PhantomData;
-use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::ptr::NonNull;
 
@@ -50,11 +47,10 @@ unsafe impl<'gc, Id: CollectorId, T: Collect<Id>> Collect<Id> for Gc<'gc, T, Id>
 
     #[inline]
     unsafe fn collect_inplace(target: NonNull<Self>, context: &mut CollectContext<'_, Id>) {
-        let resolved = target.as_ref();
-        if matches!(Id::SINGLETON, None) && resolved.id() != context.id() {
+        if matches!(Id::SINGLETON, None) && target.as_ref().id() != context.id() {
             return;
         }
-        context.trace_gcptr(target)
+        context.trace_gc_ptr_mut(target)
     }
 }
 impl<'gc, T, Id: CollectorId> Deref for Gc<'gc, T, Id> {

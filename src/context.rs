@@ -1,21 +1,18 @@
-use std::alloc::{Layout, LayoutError};
-use std::any::TypeId;
+use std::alloc::Layout;
 use std::cell::Cell;
-use std::cmp;
 use std::fmt::Debug;
-use std::io::repeat;
 use std::marker::PhantomData;
-use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 
-use allocator_api2::alloc::Allocator;
 use bitbybit::{bitenum, bitfield};
 
+use crate::context::old::OldGenerationSpace;
 use crate::context::young::YoungGenerationSpace;
 use crate::gcptr::Gc;
 use crate::utils::LayoutExt;
-use crate::{Collect, NullCollect};
+use crate::Collect;
 
+mod old;
 mod young;
 
 pub enum SingletonStatus {
@@ -109,7 +106,7 @@ impl<Id: CollectorId> GcTypeLayout<Id> {
         let Ok((expected_overall_layout, value_offset)) =
             LayoutExt(header_layout).extend(value_layout)
         else {
-            unreachable!("layout overflow")
+            panic!("layout overflow")
         };
         assert!(
             value_offset == GcHeader::<Id>::REGULAR_VALUE_OFFSET,
@@ -191,11 +188,46 @@ trait TypeIdInit<Id: CollectorId, T: Collect<Id>> {
 struct GcTypeInitImpl;
 impl<Id: CollectorId, T: Collect<Id>> TypeIdInit<Id, T> for GcTypeInitImpl {}
 
+trait Generation<Id: CollectorId> {
+    const ID: GenerationId;
+    fn cast_young(&self) -> Option<&'_ YoungGenerationSpace<Id>>;
+    fn cast_old(&self) -> Option<&'_ OldGenerationSpace<Id>>;
+}
+
 #[derive(Debug, Eq, PartialEq)]
 #[bitenum(u1, exhaustive = true)]
 enum GenerationId {
     Young = 0,
     Old = 1,
+}
+
+#[bitenum(u1, exhaustive = true)]
+enum GcMarkBits {
+    White = 0,
+    Black = 1,
+}
+
+#[bitenum(u1, exhaustive = true)]
+enum GcRawMarkBits {
+    Red = 0,
+    Green = 1,
+}
+impl GcRawMarkBits {
+    #[inline]
+    pub fn resolve<Id: CollectorId, T: Generation<Id>>(&self, gen: &T) -> GcMarkBits {
+        let inverted = match T::Id {
+            GenerationId::Young => false,
+            GenerationId::Old => {
+                self.to_regular_markbits(gen.cast_old().unwrap().mark_bits_inverted())
+            }
+        };
+        let bits = self.raw_value();
+        GcMarkBits::new_with_raw_value(if inverted {
+            <arbitrary_int::UInt<u8, 1> as arbitrary_int::Number>::MAX - bits
+        } else {
+            bits
+        })
+    }
 }
 
 /// A bitfifeld
@@ -212,6 +244,8 @@ struct GcStateBits {
     generation: GenerationId,
     #[bit(2, rw)]
     array: bool,
+    #[bit(3, rw)]
+    raw_mark_bits: GcRawMarkBits,
 }
 union HeaderMetadata<Id: CollectorId> {
     type_info: &'static GcTypeInfo<Id>,
@@ -235,6 +269,7 @@ union AllocInfo {
     /// This is used in the old generation.
     pub live_object_index: u32,
 }
+
 #[repr(C, align(8))]
 pub(crate) struct GcHeader<Id: CollectorId> {
     pub state_bits: Cell<GcStateBits>,
@@ -386,7 +421,7 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
         self.id
     }
     #[inline]
-    unsafe fn trace_gc_ptr<T: Collect<Id>>(&mut self, target: NonNull<Gc<'_, T, Id>>) {
+    pub unsafe fn trace_gc_ptr_mut<T: Collect<Id>>(&mut self, target: NonNull<Gc<'_, T, Id>>) {
         let target = target.as_ptr();
         target
             .cast::<Gc<'newgc, T::Collected<'newgc>, Id>>()
@@ -398,11 +433,16 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
     ) -> Gc<'newgc, T::Collected<'newgc>, Id> {
         debug_assert_eq!(target.id(), self.id());
         let header = target.header();
-
         if header.state_bits.get().forwarded() {
-            header.metadata.forward_ptr;
-            todo!()
+            return Gc::from_raw_ptr(
+                header
+                    .metadata
+                    .forward_ptr
+                    .as_ref()
+                    .regular_value_ptr()
+                    .cast(),
+            );
         }
-        crate::utils::transmute_arbitrary(target)
+        todo!()
     }
 }

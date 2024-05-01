@@ -12,7 +12,7 @@ macro_rules! static_null_trace {
             };
 
             #[inline(always)] // does nothing
-            unsafe fn collect_inplace(_target: std::ptr::NonNull<Self>, _context: &mut crate::context::CollectContext<'_, Id>) {}
+            unsafe fn collect_inplace(_target: std::ptr::NonNull<Self>, _context: &mut $crate::context::CollectContext<'_, Id>) {}
         }
         unsafe impl<Id: $crate::CollectorId> $crate::NullCollect<Id> for $target {}
     };

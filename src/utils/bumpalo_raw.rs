@@ -1,8 +1,6 @@
 use bumpalo::{AllocErr, Bump};
 use std::alloc::Layout;
-use std::cell::Cell;
 use std::marker::PhantomData;
-use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
 use crate::utils::Alignment;
@@ -14,7 +12,7 @@ pub struct BumpAllocRaw<Config: BumpAllocRawConfig> {
 impl<Config: BumpAllocRawConfig> BumpAllocRaw<Config> {
     #[inline(always)]
     pub fn try_alloc_layout(&self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
-        assert_eq!(layout.align(), Config::FIXED_ALIGNMENT);
+        assert_eq!(layout.align(), Config::FIXED_ALIGNMENT.value());
         self.inner.try_alloc_layout(layout)
     }
 

@@ -1,9 +1,4 @@
-#![feature(
-    inline_const, // will be stabilized in next release
-)]
 extern crate core;
-
-use std::fmt::Debug;
 
 pub mod collect;
 pub mod context;

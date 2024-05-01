@@ -1,4 +1,4 @@
-use std::mem::{self, ManuallyDrop};
+use std::mem::ManuallyDrop;
 
 pub(crate) mod bumpalo_raw;
 mod layout_helpers;

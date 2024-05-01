@@ -5,9 +5,12 @@ use std::ptr::NonNull;
 
 use bumpalo::ChunkRawIter;
 
-use crate::context::{AllocInfo, GcHeader, GcStateBits, GcTypeInfo, GenerationId, HeaderMetadata};
+use crate::context::old::OldGenerationSpace;
+use crate::context::{
+    AllocInfo, GcHeader, GcStateBits, GcTypeInfo, GenerationId, GenerationKind, HeaderMetadata,
+};
 use crate::utils::bumpalo_raw::{BumpAllocRaw, BumpAllocRawConfig};
-use crate::utils::{Alignment, LayoutExt};
+use crate::utils::Alignment;
 use crate::CollectorId;
 
 /// A young-generation object-space
@@ -69,6 +72,19 @@ impl<Id: CollectorId> YoungGenerationSpace<Id> {
             remaining_chunk_info: None,
             marker: PhantomData,
         }
+    }
+}
+impl<Id: CollectorId> super::Generation<Id> for YoungGenerationSpace<Id> {
+    const ID: GenerationId = GenerationId::Young;
+
+    #[inline]
+    fn cast_young(&self) -> Option<&'_ YoungGenerationSpace<Id>> {
+        Some(self)
+    }
+
+    #[inline]
+    fn cast_old(&self) -> Option<&'_ OldGenerationSpace<Id>> {
+        None
     }
 }
 #[derive(Debug, thiserror::Error)]
@@ -135,6 +151,6 @@ struct BumpConfig<Id: CollectorId>(PhantomData<&'static Id>);
 impl<Id: CollectorId> BumpAllocRawConfig for BumpConfig<Id> {
     const FIXED_ALIGNMENT: Alignment = match Alignment::new(GcHeader::<Id>::FIXED_ALIGNMENT) {
         Ok(alignment) => alignment,
-        Err(_) => unreachable!("GcHeader alignment must be valid"),
+        Err(_) => panic!("GcHeader alignment must be valid"),
     };
 }
