@@ -10,7 +10,8 @@ allocator-api2 = "0.2.18"
 bitbybit = "1.3.2"
 arbitrary-int = "1.2.7"
 thiserror = "1"
-
+# Easier to debug recusion than an explicit queue
+stacker = "0.1"
 # Internal bindings to mimalloc
 zerogc-next-mimalloc-semisafe = { version = "0.1.0-alpha.1", path = "libs/mimalloc-semisafe" }
 log = "0.4.21"

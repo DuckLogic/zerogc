@@ -7,7 +7,8 @@ use bumpalo::ChunkRawIter;
 
 use crate::context::old::OldGenerationSpace;
 use crate::context::{
-    AllocInfo, GcHeader, GcStateBits, GcTypeInfo, GenerationId, GenerationKind, HeaderMetadata,
+    AllocInfo, CollectStage, CollectStageTracker, GcHeader, GcStateBits, GcTypeInfo, GenerationId,
+    GenerationKind, HeaderMetadata,
 };
 use crate::utils::bumpalo_raw::{BumpAllocRaw, BumpAllocRawConfig};
 use crate::utils::Alignment;
@@ -22,12 +23,20 @@ use crate::CollectorId;
 pub struct YoungGenerationSpace<Id: CollectorId> {
     bump: BumpAllocRaw<BumpConfig<Id>>,
     collector_id: Id,
+    stage: CollectStageTracker,
 }
 impl<Id: CollectorId> YoungGenerationSpace<Id> {
     /// The maximum size to allocate in the young generation.
     ///
     /// Anything larger than this is immediately sent to the old generation.
     pub const SIZE_LIMIT: usize = 1024;
+
+    pub unsafe fn sweep(&mut self) {
+        self.stage
+            .begin_stage(Some(CollectStage::Mark), CollectStage::Sweep);
+        self.bump.reset();
+        self.stage.finish_stage(CollectStage::Sweep);
+    }
 
     #[inline(always)]
     pub unsafe fn alloc_uninit(

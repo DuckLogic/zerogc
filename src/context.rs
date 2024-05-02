@@ -2,6 +2,7 @@ use std::alloc::Layout;
 use std::cell::Cell;
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::os::macos::raw::stat;
 use std::ptr::NonNull;
 
 use bitbybit::{bitenum, bitfield};
@@ -46,8 +47,44 @@ pub unsafe trait CollectorId: Copy + Debug + Eq + 'static {
     unsafe fn summon_singleton() -> Option<Self>;
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum CollectStageTracker {
+    NotCollecting,
+    Stage { current: CollectStage },
+    FinishedStage { last_stage: CollectStage },
+}
+
+impl CollectStageTracker {
+    #[inline]
+    fn begin_stage(&mut self, expected_stage: Option<CollectStage>, new_stage: CollectStage) {
+        assert_eq!(
+            match expected_stage {
+                Some(last_stage) => CollectStageTracker::FinishedStage { last_stage },
+                None => CollectStageTracker::NotCollecting,
+            },
+            self
+        );
+        *self = CollectStageTracker::Stage { current: new_stage };
+    }
+
+    #[inline]
+    fn finish_stage(&mut self, stage: CollectStage) {
+        assert_eq!(CollectStageTracker::Stage { current: stage }, self);
+        *self = CollectStageTracker::FinishedStage { last_stage: stage };
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CollectStage {
+    Mark,
+    Sweep,
+}
+
 pub struct GarbageCollector<Id: CollectorId> {
     id: Id,
+    young_generation: YoungGenerationSpace<Id>,
+    old_generation: OldGenerationSpace<Id>,
+    mark_bits_inverted: bool,
 }
 impl<Id: CollectorId> GarbageCollector<Id> {
     #[inline]
@@ -159,9 +196,11 @@ impl<Id: CollectorId> GcArrayTypeInfo<Id> {
     }
 }
 
+type TraceFuncPtr<Id> = unsafe fn(NonNull<()>, &mut CollectContext<Id>);
 pub(crate) struct GcTypeInfo<Id: CollectorId> {
     layout: GcTypeLayout<Id>,
     drop_func: Option<unsafe fn(*mut ())>,
+    trace_func: Option<TraceFuncPtr<Id>>,
 }
 impl<Id: CollectorId> GcTypeInfo<Id> {
     #[inline]
@@ -181,18 +220,28 @@ trait TypeIdInit<Id: CollectorId, T: Collect<Id>> {
         } else {
             None
         };
-        GcTypeInfo { layout, drop_func }
+        let trace_func = if T::NEEDS_COLLECT {
+            unsafe {
+                Some(std::mem::transmute::<
+                    _,
+                    unsafe fn(NonNull<()>, &mut CollectContext<Id>),
+                >(
+                    T::collect_inplace as unsafe fn(NonNull<T>, &mut CollectContext<Id>),
+                ))
+            }
+        } else {
+            None
+        };
+        GcTypeInfo {
+            layout,
+            drop_func,
+            trace_func,
+        }
     };
     const TYPE_INFO_REF: &'static GcTypeInfo<Id> = &Self::TYPE_INFO_INIT_VAL;
 }
 struct GcTypeInitImpl;
 impl<Id: CollectorId, T: Collect<Id>> TypeIdInit<Id, T> for GcTypeInitImpl {}
-
-unsafe trait Generation<Id: CollectorId> {
-    const ID: GenerationId;
-    fn cast_young(&self) -> Option<&'_ YoungGenerationSpace<Id>>;
-    fn cast_old(&self) -> Option<&'_ OldGenerationSpace<Id>>;
-}
 
 #[derive(Debug, Eq, PartialEq)]
 #[bitenum(u1, exhaustive = true)]
@@ -206,15 +255,21 @@ type GcMarkBitsRepr = arbitrary_int::UInt<u8, 1>;
 
 #[bitenum(u1, exhaustive = true)]
 enum GcMarkBits {
+    /// Indicates that tracing has not yet marked the object.
+    ///
+    /// Once tracing completes, this means the object is dead.
     White = 0,
+    /// Indicates that tracing has marked the object.
+    ///
+    /// This means the object is live.
     Black = 1,
 }
 
 impl GcMarkBits {
     #[inline]
-    pub fn to_raw<Id: CollectorId, T: Generation<Id>>(&self, gen: &T) -> GcRawMarkBits {
+    pub fn to_raw<Id: CollectorId>(&self, collector: &GarbageCollector<Id>) -> GcRawMarkBits {
         let bits: GcMarkBitsRepr = self.raw_value();
-        GcRawMarkBits::new_with_raw_value(if GcRawMarkBits::is_inverted(gen) {
+        GcRawMarkBits::new_with_raw_value(if collector.mark_bits_inverted {
             GcRawMarkBits::invert_bits(bits)
         } else {
             bits
@@ -229,9 +284,9 @@ enum GcRawMarkBits {
 }
 impl GcRawMarkBits {
     #[inline]
-    pub fn resolve<Id: CollectorId, T: Generation<Id>>(&self, gen: &T) -> GcMarkBits {
+    pub fn resolve<Id: CollectorId>(&self, collector: &GarbageCollector<Id>) -> GcMarkBits {
         let bits: GcMarkBitsRepr = self.raw_value();
-        GcMarkBits::new_with_raw_value(if Self::is_inverted(gen) {
+        GcMarkBits::new_with_raw_value(if collector.mark_bits_inverted {
             Self::invert_bits(bits)
         } else {
             bits
@@ -241,14 +296,6 @@ impl GcRawMarkBits {
     #[inline]
     fn invert_bits(bits: GcMarkBitsRepr) -> GcMarkBitsRepr {
         <GcMarkBitsRepr as arbitrary_int::Number>::MAX - bits
-    }
-
-    #[inline]
-    fn is_inverted<Id: CollectorId, T: Generation<Id>>(gen: &T) -> bool {
-        match T::Id {
-            GenerationId::Young => false,
-            GenerationId::Old => gen.cast_old().unwrap().mark_bits_inverted(),
-        }
     }
 }
 
@@ -294,9 +341,9 @@ union AllocInfo {
 
 #[repr(C, align(8))]
 pub(crate) struct GcHeader<Id: CollectorId> {
-    pub state_bits: Cell<GcStateBits>,
-    pub alloc_info: AllocInfo,
-    pub metadata: HeaderMetadata<Id>,
+    pub(crate) state_bits: Cell<GcStateBits>,
+    pub(crate) alloc_info: AllocInfo,
+    pub(crate) metadata: HeaderMetadata<Id>,
     /// The id for the collector where this object is allocated.
     ///
     /// If the collector is a singleton (either global or thread-local),
@@ -307,6 +354,13 @@ pub(crate) struct GcHeader<Id: CollectorId> {
     pub collector_id: Id,
 }
 impl<Id: CollectorId> GcHeader<Id> {
+    #[inline]
+    pub(crate) unsafe fn update_state_bits(&self, func: impl FnOnce(&mut GcStateBits)) {
+        let mut bits = self.state_bits.get();
+        func(&mut bits);
+        self.state_bits.set(bits);
+    }
+
     /// The fixed alignment for all GC types
     ///
     /// Allocating a type with an alignment greater than this is an error.
@@ -364,6 +418,16 @@ impl<Id: CollectorId> GcArrayHeader<Id> {
         unsafe {
             &*(self.main_header.resolve_type_info() as *const GcTypeInfo<Id>
                 as *const GcArrayTypeInfo<Id>)
+        }
+    }
+
+    #[inline]
+    pub fn array_value_ptr(&self) -> NonNull<u8> {
+        unsafe {
+            NonNull::new_unchecked(
+                (self as *const Self as *mut Self as *mut u8)
+                    .add(GcHeader::<Id>::ARRAY_VALUE_OFFSET),
+            )
         }
     }
 
@@ -435,6 +499,7 @@ impl<Id: CollectorId> GcArrayHeader<Id> {
 
 pub struct CollectContext<'newgc, Id: CollectorId> {
     id: Id,
+    garbage_collector: &'newgc mut GarbageCollector<Id>,
 }
 impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
     #[inline]
@@ -450,13 +515,27 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
             .write(self.collect_gc_ptr(target.read()));
     }
 
+    #[cfg_attr(not(debug_assertions), inline)]
     unsafe fn collect_gc_ptr<'gc, T: Collect<Id>>(
         &mut self,
         target: Gc<'gc, T, Id>,
     ) -> Gc<'newgc, T::Collected<'newgc>, Id> {
-        debug_assert_eq!(target.id(), self.id());
         let header = target.header();
+        assert_eq!(header.collector_id, self.id, "Mismatched collector ids");
+        debug_assert!(
+            !header.state_bits.get().array(),
+            "Incorrectly marked as an array"
+        );
         if header.state_bits.get().forwarded() {
+            debug_assert_eq!(header.state_bits.get().generation(), GenerationId::Young);
+            debug_assert_eq!(
+                header
+                    .state_bits
+                    .get()
+                    .raw_mark_bits()
+                    .resolve(&self.garbage_collector.young_generation),
+                GcMarkBits::Black
+            );
             return Gc::from_raw_ptr(
                 header
                     .metadata
@@ -466,6 +545,141 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
                     .cast(),
             );
         }
-        todo!()
+        match header
+            .state_bits
+            .get()
+            .raw_mark_bits()
+            .resolve(self.garbage_collector)
+        {
+            GcMarkBits::White => {
+                let new_header = self.fallback_collect_gcptr(header);
+                Gc::from_raw_ptr(new_header.as_ref().regular_value_ptr().cast())
+            }
+            GcMarkBits::Black => {
+                // already traced, can skip it
+                Gc::from_raw_ptr(target.as_raw_ptr())
+            }
+        }
+    }
+
+    #[cold]
+    unsafe fn fallback_collect_gcheaer<'gc>(
+        &mut self,
+        header_ptr: NonNull<GcHeader<Id>>,
+    ) -> NonNull<GcHeader<Id>> {
+        let type_info: &'static GcTypeInfo<Id>;
+        let prev_generation: GenerationId;
+        {
+            let header = header_ptr.as_ref();
+            debug_assert_eq!(
+                header
+                    .state_bits
+                    .get()
+                    .raw_mark_bits()
+                    .resolve(self.garbage_collector),
+                GcMarkBits::White
+            );
+            // mark as black
+            header.update_state_bits(|state_bits| {
+                state_bits.with_raw_mark_bits(GcMarkBits::Black.to_raw(self.garbage_collector));
+            });
+            prev_generation = header.state_bits.get().generation();
+            type_info = header.metadata.type_info;
+        }
+        let forwarded_ptr = match prev_generation {
+            GenerationId::Young => {
+                assert!(
+                    !header_ptr.as_ref().state_bits.get().array(),
+                    "TODO: Support arrays in youngen copy"
+                );
+                // reallocate in oldgen
+                // TODO: This panic is fatal, will cause an abort
+                let forwarded_ptr = self
+                    .garbage_collector
+                    .old_generation
+                    .alloc_uninit(type_info)
+                    .expect("Oldgen alloc failure");
+                forwarded_ptr
+                    .as_ref()
+                    .state_bits
+                    .set(header_ptr.as_ref().state_bits.get());
+                forwarded_ptr.as_ref().update_state_bits(|bits| {
+                    debug_assert!(!bits.forwarded());
+                    bits.with_generation(GenerationId::Old);
+                });
+                header_ptr.as_ref().update_state_bits(|bits| {
+                    bits.with_forwarded(true);
+                });
+                (&mut *header_ptr.as_ptr()).metadata.forward_ptr = forwarded_ptr.cast();
+                // NOTE: Copy uninitialized bytes is safe here, as long as they are not read in dest
+                forwarded_ptr
+                    .as_ref()
+                    .regular_value_ptr()
+                    .cast::<u8>()
+                    .as_ptr()
+                    .copy_from_nonoverlapping(
+                        header_ptr
+                            .as_ref()
+                            .regular_value_ptr()
+                            .cast::<u8>()
+                            .as_ptr(),
+                        type_info.layout.value_layout().size(),
+                    );
+                forwarded_ptr
+            }
+            GenerationId::Old => header_ptr, // no copying needed for oldgen
+        };
+        /*
+         * finally, trace the value
+         * this needs to come after forwarding and switching the mark bit
+         * so we can properly update self-referential pointers
+         */
+        if let Some(trace_func) = type_info.trace_func {
+            /*
+             * NOTE: Cannot have aliasing &mut header references during this recursion
+             * The parameters to maybe_grow are completely arbitrary right now.
+             */
+            stacker::maybe_grow(
+                4096,       // 4KB
+                128 * 1024, // 128KB
+                || self.trace_children(forwarded_ptr, trace_func),
+            );
+        }
+        forwarded_ptr
+    }
+
+    #[inline]
+    unsafe fn trace_children(
+        &mut self,
+        header: NonNull<GcHeader<Id>>,
+        trace_func: TraceFuncPtr<Id>,
+    ) {
+        debug_assert!(
+            !header.as_ref().state_bits.get().forwarded(),
+            "Cannot be forwarded"
+        );
+        if header.as_ref().state_bits.get().array() {
+            self.trace_children_array(header.cast(), trace_func);
+        } else {
+            trace_func(header.as_ref().regular_value_ptr().cast(), self);
+        }
+    }
+    unsafe fn trace_children_array(
+        &mut self,
+        header: NonNull<GcArrayHeader<Id>>,
+        trace_func: TraceFuncPtr<Id>,
+    ) {
+        let type_info = header.as_ref().main_header.metadata.type_info;
+        debug_assert_eq!(type_info.trace_func, Some(trace_func));
+        let array_header = header.cast::<GcArrayHeader<Id>>();
+        let element_layout = type_info.layout.value_layout;
+        let len = array_header.as_ref().len_elements;
+        let element_start_ptr = array_header.as_ref().array_value_ptr();
+        for i in 0..len {
+            let element = element_start_ptr
+                .as_ptr()
+                .add(i.unchecked_mul(element_layout.size()));
+            trace_func(NonNull::new_unchecked(element as *mut ()), self);
+        }
     }
 }

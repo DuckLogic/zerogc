@@ -17,6 +17,11 @@ impl<Config: BumpAllocRawConfig> BumpAllocRaw<Config> {
     }
 
     #[inline]
+    pub fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    #[inline]
     pub unsafe fn iter_allocated_chunks_raw(&self) -> bumpalo::ChunkRawIter<'_> {
         self.inner.iter_allocated_chunks_raw()
     }

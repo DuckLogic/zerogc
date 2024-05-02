@@ -34,6 +34,11 @@ impl<'gc, T: Collect<Id>, Id: CollectorId> Gc<'gc, T, Id> {
     }
 
     #[inline(always)]
+    pub unsafe fn as_raw_ptr(&self) -> NonNull<T> {
+        self.ptr
+    }
+
+    #[inline(always)]
     pub unsafe fn from_raw_ptr(ptr: NonNull<T>) -> Self {
         Gc {
             ptr,
