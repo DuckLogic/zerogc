@@ -13,6 +13,7 @@ thiserror = "1"
 
 # Internal bindings to mimalloc
 zerogc-next-mimalloc-semisafe = { version = "0.1.0-alpha.1", path = "libs/mimalloc-semisafe" }
+log = "0.4.21"
 
 [workspace]
 resolver = "2"

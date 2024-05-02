@@ -74,7 +74,7 @@ impl<Id: CollectorId> YoungGenerationSpace<Id> {
         }
     }
 }
-impl<Id: CollectorId> super::Generation<Id> for YoungGenerationSpace<Id> {
+unsafe impl<Id: CollectorId> super::Generation<Id> for YoungGenerationSpace<Id> {
     const ID: GenerationId = GenerationId::Young;
 
     #[inline]

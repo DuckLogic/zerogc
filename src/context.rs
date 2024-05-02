@@ -188,7 +188,7 @@ trait TypeIdInit<Id: CollectorId, T: Collect<Id>> {
 struct GcTypeInitImpl;
 impl<Id: CollectorId, T: Collect<Id>> TypeIdInit<Id, T> for GcTypeInitImpl {}
 
-trait Generation<Id: CollectorId> {
+unsafe trait Generation<Id: CollectorId> {
     const ID: GenerationId;
     fn cast_young(&self) -> Option<&'_ YoungGenerationSpace<Id>>;
     fn cast_old(&self) -> Option<&'_ OldGenerationSpace<Id>>;
@@ -201,10 +201,25 @@ enum GenerationId {
     Old = 1,
 }
 
+/// The raw bit representation of [GcMarkBits]
+type GcMarkBitsRepr = arbitrary_int::UInt<u8, 1>;
+
 #[bitenum(u1, exhaustive = true)]
 enum GcMarkBits {
     White = 0,
     Black = 1,
+}
+
+impl GcMarkBits {
+    #[inline]
+    pub fn to_raw<Id: CollectorId, T: Generation<Id>>(&self, gen: &T) -> GcRawMarkBits {
+        let bits: GcMarkBitsRepr = self.raw_value();
+        GcRawMarkBits::new_with_raw_value(if GcRawMarkBits::is_inverted(gen) {
+            GcRawMarkBits::invert_bits(bits)
+        } else {
+            bits
+        })
+    }
 }
 
 #[bitenum(u1, exhaustive = true)]
@@ -215,22 +230,29 @@ enum GcRawMarkBits {
 impl GcRawMarkBits {
     #[inline]
     pub fn resolve<Id: CollectorId, T: Generation<Id>>(&self, gen: &T) -> GcMarkBits {
-        let inverted = match T::Id {
-            GenerationId::Young => false,
-            GenerationId::Old => {
-                self.to_regular_markbits(gen.cast_old().unwrap().mark_bits_inverted())
-            }
-        };
-        let bits = self.raw_value();
-        GcMarkBits::new_with_raw_value(if inverted {
-            <arbitrary_int::UInt<u8, 1> as arbitrary_int::Number>::MAX - bits
+        let bits: GcMarkBitsRepr = self.raw_value();
+        GcMarkBits::new_with_raw_value(if Self::is_inverted(gen) {
+            Self::invert_bits(bits)
         } else {
             bits
         })
     }
+
+    #[inline]
+    fn invert_bits(bits: GcMarkBitsRepr) -> GcMarkBitsRepr {
+        <GcMarkBitsRepr as arbitrary_int::Number>::MAX - bits
+    }
+
+    #[inline]
+    fn is_inverted<Id: CollectorId, T: Generation<Id>>(gen: &T) -> bool {
+        match T::Id {
+            GenerationId::Young => false,
+            GenerationId::Old => gen.cast_old().unwrap().mark_bits_inverted(),
+        }
+    }
 }
 
-/// A bitfifeld
+/// A bitfield for the garbage collector's state.
 ///
 /// ## Default
 /// The `DEFAULT` value isn't valid here.
@@ -413,13 +435,13 @@ impl<Id: CollectorId> GcArrayHeader<Id> {
 
 pub struct CollectContext<'newgc, Id: CollectorId> {
     id: Id,
-    new_yong_generation: &'newgc YoungGenerationSpace<Id>,
 }
 impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
     #[inline]
     pub fn id(&self) -> Id {
         self.id
     }
+
     #[inline]
     pub unsafe fn trace_gc_ptr_mut<T: Collect<Id>>(&mut self, target: NonNull<Gc<'_, T, Id>>) {
         let target = target.as_ptr();
@@ -427,6 +449,7 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
             .cast::<Gc<'newgc, T::Collected<'newgc>, Id>>()
             .write(self.collect_gc_ptr(target.read()));
     }
+
     unsafe fn collect_gc_ptr<'gc, T: Collect<Id>>(
         &mut self,
         target: Gc<'gc, T, Id>,
