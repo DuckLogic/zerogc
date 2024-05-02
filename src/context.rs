@@ -103,6 +103,75 @@ impl<Id: CollectorId> GarbageCollector<Id> {
     }
 }
 
+unsafe trait RawAllocTarget<Id: CollectorId> {
+    const ARRAY: bool;
+    type Header: Sized;
+    fn header_metadata(&self) -> HeaderMetadata<Id>;
+    unsafe fn init_header(&self, header_ptr: NonNull<Self::Header>, base_header: GcHeader<Id>);
+    fn overall_layout(&self) -> Layout;
+}
+struct RegularAlloc<Id: CollectorId> {
+    type_info: &'static GcTypeInfo<Id>,
+}
+unsafe impl<Id: CollectorId> RawAllocTarget<Id> for RegularAlloc<Id> {
+    const ARRAY: bool = false;
+    type Header = GcHeader<Id>;
+
+    #[inline]
+    fn header_metadata(&self) -> HeaderMetadata<Id> {
+        HeaderMetadata {
+            type_info: self.type_info,
+        }
+    }
+
+    #[inline]
+    unsafe fn init_header(&self, header_ptr: NonNull<GcHeader<Id>>, base_header: GcHeader<Id>) {
+        header_ptr.as_ptr().write(base_header)
+    }
+
+    #[inline]
+    fn overall_layout(&self) -> Layout {
+        unsafe {
+            Layout::from_size_align_unchecked(
+                self.type_info.layout.overall_size,
+                GcHeader::<Id>::FIXED_ALIGNMENT,
+            )
+        }
+    }
+}
+struct ArrayAlloc<Id: CollectorId> {
+    type_info: &'static GcArrayTypeInfo<Id>,
+    layout_info: GcArrayLayoutInfo<Id>,
+}
+unsafe impl<Id: CollectorId> RawAllocTarget<Id> for ArrayAlloc<Id> {
+    const ARRAY: bool = true;
+    type Header = GcArrayHeader<Id>;
+
+    #[inline]
+    fn header_metadata(&self) -> HeaderMetadata<Id> {
+        HeaderMetadata {
+            array_type_info: self.type_info,
+        }
+    }
+
+    #[inline]
+    unsafe fn init_header(
+        &self,
+        header_ptr: NonNull<GcArrayHeader<Id>>,
+        base_header: GcHeader<Id>,
+    ) {
+        header_ptr.as_ptr().write(GcArrayHeader {
+            main_header: base_header,
+            len_elements: self.layout_info.len_elements,
+        })
+    }
+
+    #[inline]
+    fn overall_layout(&self) -> Layout {
+        self.layout_info.overall_layout()
+    }
+}
+
 /// The layout of a "regular" (non-array) type
 pub(crate) struct GcTypeLayout<Id: CollectorId> {
     /// The layout of the underlying value
@@ -197,12 +266,23 @@ impl<Id: CollectorId> GcArrayTypeInfo<Id> {
 }
 
 type TraceFuncPtr<Id> = unsafe fn(NonNull<()>, &mut CollectContext<Id>);
+#[repr(C)]
 pub(crate) struct GcTypeInfo<Id: CollectorId> {
     layout: GcTypeLayout<Id>,
     drop_func: Option<unsafe fn(*mut ())>,
     trace_func: Option<TraceFuncPtr<Id>>,
 }
 impl<Id: CollectorId> GcTypeInfo<Id> {
+    #[inline]
+    pub unsafe fn assume_array_info(&self) -> &'_ GcArrayTypeInfo<Id> {
+        // Takes advantage of fact repr is identical
+        assert_eq!(
+            std::mem::size_of::<Self>(),
+            std::mem::size_of::<GcArrayTypeInfo<Id>>()
+        );
+        &*(self as *const Self as *const GcArrayTypeInfo<Id>)
+    }
+
     #[inline]
     pub const fn new<T: Collect<Id>>() -> &'static Self {
         <GcTypeInitImpl as TypeIdInit<Id, T>>::TYPE_INFO_REF
@@ -432,11 +512,41 @@ impl<Id: CollectorId> GcArrayHeader<Id> {
     }
 
     #[inline]
+    pub fn layout_info(&self) -> GcArrayLayoutInfo<Id> {
+        GcArrayLayoutInfo {
+            element_layout: self.element_layout(),
+            len_elements: self.len_elements,
+            marker: PhantomData,
+        }
+    }
+
+    #[inline]
     fn element_layout(&self) -> Layout {
         self.resolve_type_info()
             .element_type_info
             .layout
             .value_layout
+    }
+
+    #[inline]
+    fn value_layout(&self) -> Layout {
+        self.layout_info().value_layout()
+    }
+
+    #[inline]
+    fn overall_layout(&self) -> Layout {
+        self.layout_info().overall_layout()
+    }
+}
+struct GcArrayLayoutInfo<Id: CollectorId> {
+    element_layout: Layout,
+    len_elements: usize,
+    marker: PhantomData<&'static Id>,
+}
+impl<Id: CollectorId> GcArrayLayoutInfo<Id> {
+    #[inline]
+    pub const fn element_layout(&self) -> Layout {
+        self.element_layout
     }
 
     #[cfg_attr(not(debug_assertions), inline)]
@@ -552,7 +662,7 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
             .resolve(self.garbage_collector)
         {
             GcMarkBits::White => {
-                let new_header = self.fallback_collect_gcptr(header);
+                let new_header = self.fallback_collect_gc_header(NonNull::from(header));
                 Gc::from_raw_ptr(new_header.as_ref().regular_value_ptr().cast())
             }
             GcMarkBits::Black => {
@@ -563,11 +673,12 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
     }
 
     #[cold]
-    unsafe fn fallback_collect_gcheaer<'gc>(
+    unsafe fn fallback_collect_gc_header<'gc>(
         &mut self,
         header_ptr: NonNull<GcHeader<Id>>,
     ) -> NonNull<GcHeader<Id>> {
         let type_info: &'static GcTypeInfo<Id>;
+        let array = header_ptr.as_ref().state_bits.get().array();
         let prev_generation: GenerationId;
         {
             let header = header_ptr.as_ref();
@@ -588,44 +699,81 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
         }
         let forwarded_ptr = match prev_generation {
             GenerationId::Young => {
-                assert!(
-                    !header_ptr.as_ref().state_bits.get().array(),
-                    "TODO: Support arrays in youngen copy"
-                );
+                let array_value_size: Option<usize>;
                 // reallocate in oldgen
-                // TODO: This panic is fatal, will cause an abort
-                let forwarded_ptr = self
-                    .garbage_collector
-                    .old_generation
-                    .alloc_uninit(type_info)
-                    .expect("Oldgen alloc failure");
-                forwarded_ptr
+                let copied_ptr = if array {
+                    let array_type_info = type_info.assume_array_info();
+                    debug_assert!(std::ptr::eq(
+                        array_type_info,
+                        header_ptr.as_ref().metadata.array_type_info
+                    ));
+                    let array_layout = GcArrayLayoutInfo {
+                        element_layout: array_type_info.element_type_info.layout.value_layout,
+                        len_elements: header_ptr.cast::<GcArrayHeader<Id>>().as_ref().len_elements,
+                        marker: PhantomData,
+                    };
+                    array_value_size = Some(array_layout.value_layout().size());
+                    self.garbage_collector
+                        .old_generation
+                        .alloc_raw(ArrayAlloc {
+                            layout_info: array_layout,
+                            type_info: array_type_info,
+                        })
+                        .map(NonNull::cast::<GcHeader<Id>>)
+                } else {
+                    array_value_size = None;
+                    self.garbage_collector
+                        .old_generation
+                        .alloc_raw(RegularAlloc { type_info })
+                }
+                .unwrap_or_else(|| {
+                    // TODO: This panic is fatal, will cause an abort
+                    panic!("Oldgen alloc failure")
+                });
+                copied_ptr
                     .as_ref()
                     .state_bits
                     .set(header_ptr.as_ref().state_bits.get());
-                forwarded_ptr.as_ref().update_state_bits(|bits| {
+                copied_ptr.as_ref().update_state_bits(|bits| {
                     debug_assert!(!bits.forwarded());
                     bits.with_generation(GenerationId::Old);
                 });
                 header_ptr.as_ref().update_state_bits(|bits| {
                     bits.with_forwarded(true);
                 });
-                (&mut *header_ptr.as_ptr()).metadata.forward_ptr = forwarded_ptr.cast();
+                (&mut *header_ptr.as_ptr()).metadata.forward_ptr = copied_ptr.cast();
                 // NOTE: Copy uninitialized bytes is safe here, as long as they are not read in dest
-                forwarded_ptr
-                    .as_ref()
-                    .regular_value_ptr()
-                    .cast::<u8>()
-                    .as_ptr()
-                    .copy_from_nonoverlapping(
-                        header_ptr
-                            .as_ref()
-                            .regular_value_ptr()
-                            .cast::<u8>()
-                            .as_ptr(),
-                        type_info.layout.value_layout().size(),
-                    );
-                forwarded_ptr
+                if array {
+                    copied_ptr
+                        .cast::<GcArrayHeader<Id>>()
+                        .as_ref()
+                        .array_value_ptr()
+                        .cast::<u8>()
+                        .as_ptr()
+                        .copy_from_nonoverlapping(
+                            header_ptr
+                                .cast::<GcArrayHeader<Id>>()
+                                .as_ref()
+                                .array_value_ptr()
+                                .as_ptr(),
+                            array_value_size.unwrap(),
+                        )
+                } else {
+                    copied_ptr
+                        .as_ref()
+                        .regular_value_ptr()
+                        .cast::<u8>()
+                        .as_ptr()
+                        .copy_from_nonoverlapping(
+                            header_ptr
+                                .as_ref()
+                                .regular_value_ptr()
+                                .cast::<u8>()
+                                .as_ptr(),
+                            type_info.layout.value_layout().size(),
+                        );
+                }
+                copied_ptr
             }
             GenerationId::Old => header_ptr, // no copying needed for oldgen
         };

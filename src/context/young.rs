@@ -7,8 +7,8 @@ use bumpalo::ChunkRawIter;
 
 use crate::context::old::OldGenerationSpace;
 use crate::context::{
-    AllocInfo, CollectStage, CollectStageTracker, GcHeader, GcStateBits, GcTypeInfo, GenerationId,
-    GenerationKind, HeaderMetadata,
+    AllocInfo, CollectStage, CollectStageTracker, GcHeader, GcStateBits, GenerationId,
+    HeaderMetadata,
 };
 use crate::utils::bumpalo_raw::{BumpAllocRaw, BumpAllocRawConfig};
 use crate::utils::Alignment;
@@ -38,39 +38,36 @@ impl<Id: CollectorId> YoungGenerationSpace<Id> {
         self.stage.finish_stage(CollectStage::Sweep);
     }
 
-    #[inline(always)]
-    pub unsafe fn alloc_uninit(
+    #[inline]
+    pub unsafe fn alloc_raw<T: super::RawAllocTarget<Id>>(
         &self,
-        type_info: &'static GcTypeInfo<Id>,
-    ) -> Result<NonNull<GcHeader<Id>>, YoungAllocError> {
-        let overall_size = type_info.layout.overall_size;
-        if overall_size > Self::SIZE_LIMIT {
+        target: T,
+    ) -> Result<NonNull<T::Header>, YoungAllocError> {
+        let overall_layout = target.overall_layout();
+        if overall_layout.size() > Self::SIZE_LIMIT {
             return Err(YoungAllocError::SizeExceedsLimit);
         }
-        let Ok(raw_ptr) = self
-            .bump
-            .try_alloc_layout(Layout::from_size_align_unchecked(
-                overall_size,
-                GcHeader::<Id>::FIXED_ALIGNMENT,
-            ))
-        else {
+        let Ok(raw_ptr) = self.bump.try_alloc_layout(overall_layout) else {
             return Err(YoungAllocError::OutOfMemory);
         };
-        let header_ptr = raw_ptr.cast::<GcHeader<Id>>();
-        header_ptr.as_ptr().write(GcHeader {
-            state_bits: Cell::new(
-                GcStateBits::builder()
-                    .with_forwarded(false)
-                    .with_generation(GenerationId::Young)
-                    .with_array(false)
-                    .build(),
-            ),
-            alloc_info: AllocInfo {
-                this_object_overall_size: overall_size as u32,
+        let header_ptr = raw_ptr.cast::<T::Header>();
+        target.init_header(
+            header_ptr,
+            GcHeader {
+                state_bits: Cell::new(
+                    GcStateBits::builder()
+                        .with_forwarded(false)
+                        .with_generation(GenerationId::Young)
+                        .with_array(T::ARRAY)
+                        .build(),
+                ),
+                alloc_info: AllocInfo {
+                    this_object_overall_size: overall_layout.size() as u32,
+                },
+                metadata: HeaderMetadata { type_info },
+                collector_id: self.collector_id,
             },
-            metadata: HeaderMetadata { type_info },
-            collector_id: self.collector_id,
-        });
+        );
         Ok(header_ptr)
     }
 
@@ -81,19 +78,6 @@ impl<Id: CollectorId> YoungGenerationSpace<Id> {
             remaining_chunk_info: None,
             marker: PhantomData,
         }
-    }
-}
-unsafe impl<Id: CollectorId> super::Generation<Id> for YoungGenerationSpace<Id> {
-    const ID: GenerationId = GenerationId::Young;
-
-    #[inline]
-    fn cast_young(&self) -> Option<&'_ YoungGenerationSpace<Id>> {
-        Some(self)
-    }
-
-    #[inline]
-    fn cast_old(&self) -> Option<&'_ OldGenerationSpace<Id>> {
-        None
     }
 }
 #[derive(Debug, thiserror::Error)]

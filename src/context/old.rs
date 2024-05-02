@@ -6,9 +6,10 @@ use zerogc_next_mimalloc_semisafe::heap::MimallocHeap;
 
 use crate::context::young::YoungGenerationSpace;
 use crate::context::{
-    AllocInfo, CollectStage, CollectStageTracker, GcHeader, GcMarkBits, GcStateBits, GcTypeInfo,
-    GenerationId, HeaderMetadata,
+    AllocInfo, CollectStage, CollectStageTracker, GcArrayTypeInfo, GcHeader, GcMarkBits,
+    GcStateBits, GcTypeInfo, GenerationId, HeaderMetadata,
 };
+use crate::gcptr::Gc;
 use crate::CollectorId;
 
 pub struct OldGenerationSpace<Id: CollectorId> {
@@ -53,39 +54,39 @@ impl<Id: CollectorId> OldGenerationSpace<Id> {
         self.stage.finish_stage(CollectStage::Sweep);
     }
 
-    #[inline(always)]
-    pub unsafe fn alloc_uninit(
+    #[inline]
+    pub unsafe fn alloc_raw<T: super::RawAllocTarget<Id>>(
         &self,
-        type_info: &'static GcTypeInfo<Id>,
-    ) -> Result<NonNull<GcHeader<Id>>, OldAllocError> {
-        let overall_size = type_info.layout.overall_size;
-        let raw_ptr = match self.heap.allocate(Layout::from_size_align_unchecked(
-            overall_size,
-            GcHeader::<Id>::FIXED_ALIGNMENT,
-        )) {
+        target: T,
+    ) -> Result<NonNull<T::Header>, OldAllocError> {
+        let overall_layout = target.overall_layout();
+        let raw_ptr = match self.heap.allocate(overall_layout) {
             Ok(raw_ptr) => raw_ptr,
             Err(allocator_api2::alloc::AllocError) => return Err(OldAllocError::OutOfMemory),
         };
-        let header_ptr = raw_ptr.cast::<GcHeader<Id>>();
+        let header_ptr = raw_ptr.cast::<T::Header>();
         let live_object_index: u32;
         {
             let live_objects = &mut *self.live_objects.get();
             live_object_index = u32::try_from(live_objects.len()).unwrap();
             live_objects.push(header_ptr);
         }
-        header_ptr.as_ptr().write(GcHeader {
-            state_bits: Cell::new(
-                GcStateBits::builder()
-                    .with_forwarded(false)
-                    .with_generation(GenerationId::Old)
-                    .with_array(false)
-                    .with_raw_mark_bits(GcMarkBits::White.to_raw(self))
-                    .build(),
-            ),
-            alloc_info: AllocInfo { live_object_index },
-            metadata: HeaderMetadata { type_info },
-            collector_id: self.collector_id,
-        });
+        target.init_header(
+            header_ptr,
+            GcHeader {
+                state_bits: Cell::new(
+                    GcStateBits::builder()
+                        .with_forwarded(false)
+                        .with_generation(GenerationId::Old)
+                        .with_array(T::ARRAY)
+                        .with_raw_mark_bits(GcMarkBits::White.to_raw(self))
+                        .build(),
+                ),
+                alloc_info: AllocInfo { live_object_index },
+                metadata: HeaderMetadata { type_info },
+                collector_id: self.collector_id,
+            },
+        );
         Ok(header_ptr)
     }
 }
