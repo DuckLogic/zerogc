@@ -1,15 +1,11 @@
-use std::alloc::Layout;
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use bumpalo::ChunkRawIter;
 
-use crate::context::old::OldGenerationSpace;
-use crate::context::{
-    AllocInfo, CollectStage, CollectStageTracker, GcHeader, GcStateBits, GenerationId,
-    HeaderMetadata,
-};
+use crate::context::layout::{AllocInfo, GcHeader};
+use crate::context::{CollectStage, CollectStageTracker, GenerationId};
 use crate::utils::bumpalo_raw::{BumpAllocRaw, BumpAllocRawConfig};
 use crate::utils::Alignment;
 use crate::CollectorId;
@@ -54,17 +50,11 @@ impl<Id: CollectorId> YoungGenerationSpace<Id> {
         target.init_header(
             header_ptr,
             GcHeader {
-                state_bits: Cell::new(
-                    GcStateBits::builder()
-                        .with_forwarded(false)
-                        .with_generation(GenerationId::Young)
-                        .with_array(T::ARRAY)
-                        .build(),
-                ),
+                state_bits: Cell::new(target.init_state_bits(GenerationId::Young)),
                 alloc_info: AllocInfo {
                     this_object_overall_size: overall_layout.size() as u32,
                 },
-                metadata: HeaderMetadata { type_info },
+                metadata: target.header_metadata(),
                 collector_id: self.collector_id,
             },
         );

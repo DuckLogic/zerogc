@@ -32,7 +32,7 @@ impl Alignment {
     }
 
     #[inline]
-    pub fn value(&self) -> usize {
+    pub const fn value(&self) -> usize {
         self.0.get()
     }
 }
@@ -117,7 +117,7 @@ impl LayoutExt {
 #[derive(Debug, thiserror::Error)]
 #[error("Layout error")]
 #[non_exhaustive]
-struct LayoutExtError;
+pub struct LayoutExtError;
 
 #[inline]
 const fn const_max(first: usize, second: usize) -> usize {

@@ -2,17 +2,20 @@ use std::alloc::Layout;
 use std::cell::Cell;
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::os::macos::raw::stat;
 use std::ptr::NonNull;
 
-use bitbybit::{bitenum, bitfield};
+use bitbybit::bitenum;
 
+use crate::context::layout::{
+    GcArrayHeader, GcArrayLayoutInfo, GcArrayTypeInfo, GcHeader, GcMarkBits, GcStateBits,
+    GcTypeInfo, HeaderMetadata, TraceFuncPtr,
+};
 use crate::context::old::OldGenerationSpace;
 use crate::context::young::YoungGenerationSpace;
 use crate::gcptr::Gc;
-use crate::utils::LayoutExt;
 use crate::Collect;
 
+pub(crate) mod layout;
 mod old;
 mod young;
 
@@ -62,14 +65,14 @@ impl CollectStageTracker {
                 Some(last_stage) => CollectStageTracker::FinishedStage { last_stage },
                 None => CollectStageTracker::NotCollecting,
             },
-            self
+            *self
         );
         *self = CollectStageTracker::Stage { current: new_stage };
     }
 
     #[inline]
     fn finish_stage(&mut self, stage: CollectStage) {
-        assert_eq!(CollectStageTracker::Stage { current: stage }, self);
+        assert_eq!(CollectStageTracker::Stage { current: stage }, *self);
         *self = CollectStageTracker::FinishedStage { last_stage: stage };
     }
 }
@@ -80,16 +83,24 @@ enum CollectStage {
     Sweep,
 }
 
+/// The state of a [GarbageCollector]
+///
+/// Seperated out to pass around as a separate reference.
+/// This is important to avoid `&mut` from different sub-structures.
+pub(crate) struct CollectorState<Id: CollectorId> {
+    collector_id: Id,
+    mark_bits_inverted: Cell<bool>,
+}
+
 pub struct GarbageCollector<Id: CollectorId> {
-    id: Id,
+    state: CollectorState<Id>,
     young_generation: YoungGenerationSpace<Id>,
     old_generation: OldGenerationSpace<Id>,
-    mark_bits_inverted: bool,
 }
 impl<Id: CollectorId> GarbageCollector<Id> {
     #[inline]
     pub fn id(&self) -> Id {
-        self.id
+        self.state.collector_id
     }
 
     #[inline(always)]
@@ -109,11 +120,23 @@ unsafe trait RawAllocTarget<Id: CollectorId> {
     fn header_metadata(&self) -> HeaderMetadata<Id>;
     unsafe fn init_header(&self, header_ptr: NonNull<Self::Header>, base_header: GcHeader<Id>);
     fn overall_layout(&self) -> Layout;
+    #[inline]
+    fn init_state_bits(&self, gen: GenerationId) -> GcStateBits {
+        GcStateBits::builder()
+            .with_forwarded(false)
+            .with_generation(gen)
+            .with_array(Self::ARRAY)
+            .with_raw_mark_bits(GcMarkBits::White.to_raw(self.collector_state()))
+            .build()
+    }
+
+    fn collector_state(&self) -> &'_ CollectorState<Id>;
 }
-struct RegularAlloc<Id: CollectorId> {
+struct RegularAlloc<'a, Id: CollectorId> {
+    state: &'a CollectorState<Id>,
     type_info: &'static GcTypeInfo<Id>,
 }
-unsafe impl<Id: CollectorId> RawAllocTarget<Id> for RegularAlloc<Id> {
+unsafe impl<Id: CollectorId> RawAllocTarget<Id> for RegularAlloc<'_, Id> {
     const ARRAY: bool = false;
     type Header = GcHeader<Id>;
 
@@ -133,17 +156,23 @@ unsafe impl<Id: CollectorId> RawAllocTarget<Id> for RegularAlloc<Id> {
     fn overall_layout(&self) -> Layout {
         unsafe {
             Layout::from_size_align_unchecked(
-                self.type_info.layout.overall_size,
+                self.type_info.layout.overall_layout().size(),
                 GcHeader::<Id>::FIXED_ALIGNMENT,
             )
         }
     }
+
+    #[inline]
+    fn collector_state(&self) -> &'_ CollectorState<Id> {
+        self.state
+    }
 }
-struct ArrayAlloc<Id: CollectorId> {
+struct ArrayAlloc<'a, Id: CollectorId> {
     type_info: &'static GcArrayTypeInfo<Id>,
     layout_info: GcArrayLayoutInfo<Id>,
+    state: &'a CollectorState<Id>,
 }
-unsafe impl<Id: CollectorId> RawAllocTarget<Id> for ArrayAlloc<Id> {
+unsafe impl<Id: CollectorId> RawAllocTarget<Id> for ArrayAlloc<'_, Id> {
     const ARRAY: bool = true;
     type Header = GcArrayHeader<Id>;
 
@@ -162,7 +191,7 @@ unsafe impl<Id: CollectorId> RawAllocTarget<Id> for ArrayAlloc<Id> {
     ) {
         header_ptr.as_ptr().write(GcArrayHeader {
             main_header: base_header,
-            len_elements: self.layout_info.len_elements,
+            len_elements: self.layout_info.len_elements(),
         })
     }
 
@@ -170,441 +199,18 @@ unsafe impl<Id: CollectorId> RawAllocTarget<Id> for ArrayAlloc<Id> {
     fn overall_layout(&self) -> Layout {
         self.layout_info.overall_layout()
     }
-}
-
-/// The layout of a "regular" (non-array) type
-pub(crate) struct GcTypeLayout<Id: CollectorId> {
-    /// The layout of the underlying value
-    ///
-    /// INVARIANT: The maximum alignment is [`GcHeader::FIXED_ALIGNMENT`]
-    value_layout: Layout,
-    /// The overall size of the value including the header
-    /// and trailing padding.
-    overall_size: usize,
-    marker: PhantomData<&'static Id>,
-}
-impl<Id: CollectorId> GcTypeLayout<Id> {
-    #[inline]
-    pub const fn value_size(&self) -> usize {
-        self.value_layout.size()
-    }
 
     #[inline]
-    pub const fn value_align(&self) -> usize {
-        self.value_layout.align()
-    }
-
-    #[inline]
-    pub const fn value_layout(&self) -> Layout {
-        self.value_layout
-    }
-
-    #[inline]
-    pub const fn overall_layout(&self) -> Layout {
-        unsafe {
-            Layout::from_size_align_unchecked(self.overall_size, GcHeader::<Id>::FIXED_ALIGNMENT)
-        }
-    }
-
-    //noinspection RsAssertEqual
-    const fn compute_overall_layout(value_layout: Layout) -> Layout {
-        let header_layout = GcHeader::<Id>::REGULAR_HEADER_LAYOUT;
-        let Ok((expected_overall_layout, value_offset)) =
-            LayoutExt(header_layout).extend(value_layout)
-        else {
-            panic!("layout overflow")
-        };
-        assert!(
-            value_offset == GcHeader::<Id>::REGULAR_VALUE_OFFSET,
-            "Unexpected value offset"
-        );
-        let res = LayoutExt(expected_overall_layout).pad_to_align();
-        assert!(
-            res.align() == GcHeader::<Id>::FIXED_ALIGNMENT,
-            "Unexpected overall alignment"
-        );
-        res
-    }
-    #[track_caller]
-    pub const fn from_value_layout(value_layout: Layout) -> Self {
-        assert!(
-            value_layout.align() <= GcHeader::<Id>::FIXED_ALIGNMENT,
-            "Alignment exceeds maximum",
-        );
-        let overall_layout = Self::compute_overall_layout(value_layout);
-        GcTypeLayout {
-            value_layout,
-            overall_size: overall_layout.size(),
-            marker: PhantomData,
-        }
+    fn collector_state(&self) -> &'_ CollectorState<Id> {
+        self.state
     }
 }
-
-#[repr(transparent)]
-pub(crate) struct GcArrayTypeInfo<Id: CollectorId> {
-    /// The type info for the array's elements.
-    ///
-    /// This is stored as the first element to allow one-way
-    /// pointer casts from GcArrayTypeInfo -> GcTypeInfo.
-    /// This simulates OO-style inheritance.
-    element_type_info: GcTypeInfo<Id>,
-}
-
-impl<Id: CollectorId> GcArrayTypeInfo<Id> {
-    //noinspection RsAssertEqual
-    #[inline]
-    pub const fn new<T: Collect<Id>>() -> &'static Self {
-        /*
-         * for the time being GcTypeInfo <--> GcArrayTypeInfo,
-         * so we just cast the pointers
-         */
-        assert!(std::mem::size_of::<Self>() == std::mem::size_of::<GcTypeInfo<Id>>());
-        unsafe {
-            &*(GcTypeInfo::<Id>::new::<T>() as *const GcTypeInfo<Id> as *const GcArrayTypeInfo<Id>)
-        }
-    }
-}
-
-type TraceFuncPtr<Id> = unsafe fn(NonNull<()>, &mut CollectContext<Id>);
-#[repr(C)]
-pub(crate) struct GcTypeInfo<Id: CollectorId> {
-    layout: GcTypeLayout<Id>,
-    drop_func: Option<unsafe fn(*mut ())>,
-    trace_func: Option<TraceFuncPtr<Id>>,
-}
-impl<Id: CollectorId> GcTypeInfo<Id> {
-    #[inline]
-    pub unsafe fn assume_array_info(&self) -> &'_ GcArrayTypeInfo<Id> {
-        // Takes advantage of fact repr is identical
-        assert_eq!(
-            std::mem::size_of::<Self>(),
-            std::mem::size_of::<GcArrayTypeInfo<Id>>()
-        );
-        &*(self as *const Self as *const GcArrayTypeInfo<Id>)
-    }
-
-    #[inline]
-    pub const fn new<T: Collect<Id>>() -> &'static Self {
-        <GcTypeInitImpl as TypeIdInit<Id, T>>::TYPE_INFO_REF
-    }
-}
-trait TypeIdInit<Id: CollectorId, T: Collect<Id>> {
-    const TYPE_INFO_INIT_VAL: GcTypeInfo<Id> = {
-        let layout = GcTypeLayout::from_value_layout(Layout::new::<T>());
-        let drop_func = if std::mem::needs_drop::<T>() {
-            unsafe {
-                Some(std::mem::transmute::<_, unsafe fn(*mut ())>(
-                    std::ptr::drop_in_place as unsafe fn(*mut T),
-                ))
-            }
-        } else {
-            None
-        };
-        let trace_func = if T::NEEDS_COLLECT {
-            unsafe {
-                Some(std::mem::transmute::<
-                    _,
-                    unsafe fn(NonNull<()>, &mut CollectContext<Id>),
-                >(
-                    T::collect_inplace as unsafe fn(NonNull<T>, &mut CollectContext<Id>),
-                ))
-            }
-        } else {
-            None
-        };
-        GcTypeInfo {
-            layout,
-            drop_func,
-            trace_func,
-        }
-    };
-    const TYPE_INFO_REF: &'static GcTypeInfo<Id> = &Self::TYPE_INFO_INIT_VAL;
-}
-struct GcTypeInitImpl;
-impl<Id: CollectorId, T: Collect<Id>> TypeIdInit<Id, T> for GcTypeInitImpl {}
 
 #[derive(Debug, Eq, PartialEq)]
 #[bitenum(u1, exhaustive = true)]
 enum GenerationId {
     Young = 0,
     Old = 1,
-}
-
-/// The raw bit representation of [GcMarkBits]
-type GcMarkBitsRepr = arbitrary_int::UInt<u8, 1>;
-
-#[bitenum(u1, exhaustive = true)]
-enum GcMarkBits {
-    /// Indicates that tracing has not yet marked the object.
-    ///
-    /// Once tracing completes, this means the object is dead.
-    White = 0,
-    /// Indicates that tracing has marked the object.
-    ///
-    /// This means the object is live.
-    Black = 1,
-}
-
-impl GcMarkBits {
-    #[inline]
-    pub fn to_raw<Id: CollectorId>(&self, collector: &GarbageCollector<Id>) -> GcRawMarkBits {
-        let bits: GcMarkBitsRepr = self.raw_value();
-        GcRawMarkBits::new_with_raw_value(if collector.mark_bits_inverted {
-            GcRawMarkBits::invert_bits(bits)
-        } else {
-            bits
-        })
-    }
-}
-
-#[bitenum(u1, exhaustive = true)]
-enum GcRawMarkBits {
-    Red = 0,
-    Green = 1,
-}
-impl GcRawMarkBits {
-    #[inline]
-    pub fn resolve<Id: CollectorId>(&self, collector: &GarbageCollector<Id>) -> GcMarkBits {
-        let bits: GcMarkBitsRepr = self.raw_value();
-        GcMarkBits::new_with_raw_value(if collector.mark_bits_inverted {
-            Self::invert_bits(bits)
-        } else {
-            bits
-        })
-    }
-
-    #[inline]
-    fn invert_bits(bits: GcMarkBitsRepr) -> GcMarkBitsRepr {
-        <GcMarkBitsRepr as arbitrary_int::Number>::MAX - bits
-    }
-}
-
-/// A bitfield for the garbage collector's state.
-///
-/// ## Default
-/// The `DEFAULT` value isn't valid here.
-/// However, it currently needs to exist fo
-/// the macro to generate the `builder` field
-#[bitfield(u32, default = 0)]
-struct GcStateBits {
-    #[bit(0, rw)]
-    forwarded: bool,
-    #[bit(1, rw)]
-    generation: GenerationId,
-    #[bit(2, rw)]
-    array: bool,
-    #[bit(3, rw)]
-    raw_mark_bits: GcRawMarkBits,
-}
-union HeaderMetadata<Id: CollectorId> {
-    type_info: &'static GcTypeInfo<Id>,
-    array_type_info: &'static GcArrayTypeInfo<Id>,
-    forward_ptr: NonNull<GcHeader<Id>>,
-}
-union AllocInfo {
-    /// The [overall size][`GcTypeLayout::overall_layout`] of this object.
-    ///
-    /// This is used to iterate over objects in the young generation.
-    ///
-    /// Objects whose size cannot fit into a `u32`
-    /// can never be allocated in the young generation.
-    ///
-    /// If this object is an array,
-    /// this is the overall size of
-    /// the header and all elements.
-    pub this_object_overall_size: u32,
-    /// The index of the object within the vector of live objects.
-    ///
-    /// This is used in the old generation.
-    pub live_object_index: u32,
-}
-
-#[repr(C, align(8))]
-pub(crate) struct GcHeader<Id: CollectorId> {
-    pub(crate) state_bits: Cell<GcStateBits>,
-    pub(crate) alloc_info: AllocInfo,
-    pub(crate) metadata: HeaderMetadata<Id>,
-    /// The id for the collector where this object is allocated.
-    ///
-    /// If the collector is a singleton (either global or thread-local),
-    /// this will be a zero sized type.
-    ///
-    /// ## Safety
-    /// The alignment of this type must be smaller than [`GcHeader::FIXED_ALIGNMENT`].
-    pub collector_id: Id,
-}
-impl<Id: CollectorId> GcHeader<Id> {
-    #[inline]
-    pub(crate) unsafe fn update_state_bits(&self, func: impl FnOnce(&mut GcStateBits)) {
-        let mut bits = self.state_bits.get();
-        func(&mut bits);
-        self.state_bits.set(bits);
-    }
-
-    /// The fixed alignment for all GC types
-    ///
-    /// Allocating a type with an alignment greater than this is an error.
-    pub const FIXED_ALIGNMENT: usize = 8;
-    /// The fixed offset from the start of the GcHeader to a regular value
-    pub const REGULAR_VALUE_OFFSET: usize = std::mem::size_of::<Self>();
-    pub const ARRAY_VALUE_OFFSET: usize = std::mem::size_of::<GcArrayHeader<Id>>();
-    const REGULAR_HEADER_LAYOUT: Layout = Layout::new::<Self>();
-    const ARRAY_HEADER_LAYOUT: Layout = Layout::new::<GcArrayHeader<Id>>();
-
-    #[inline]
-    pub fn id(&self) -> Id {
-        self.collector_id
-    }
-
-    #[inline]
-    fn resolve_type_info(&self) -> &'static GcTypeInfo<Id> {
-        unsafe {
-            if self.state_bits.get().forwarded() {
-                let forward_ptr = self.metadata.forward_ptr;
-                let forward_header = forward_ptr.as_ref();
-                debug_assert!(!forward_header.state_bits.get().forwarded());
-                forward_header.metadata.type_info
-            } else {
-                self.metadata.type_info
-            }
-        }
-    }
-
-    #[inline]
-    pub fn regular_value_ptr(&self) -> NonNull<u8> {
-        unsafe {
-            NonNull::new_unchecked(
-                (self as *const Self as *mut Self as *mut u8).add(Self::REGULAR_VALUE_OFFSET),
-            )
-        }
-    }
-
-    #[inline]
-    pub unsafe fn assume_array_header(&self) -> &'_ GcArrayHeader<Id> {
-        &*(self as *const Self as *const GcArrayHeader<Id>)
-    }
-}
-
-#[repr(C, align(8))]
-pub struct GcArrayHeader<Id: CollectorId> {
-    main_header: GcHeader<Id>,
-    /// The length of the array in elements
-    len_elements: usize,
-}
-
-impl<Id: CollectorId> GcArrayHeader<Id> {
-    #[inline]
-    fn resolve_type_info(&self) -> &'static GcArrayTypeInfo<Id> {
-        unsafe {
-            &*(self.main_header.resolve_type_info() as *const GcTypeInfo<Id>
-                as *const GcArrayTypeInfo<Id>)
-        }
-    }
-
-    #[inline]
-    pub fn array_value_ptr(&self) -> NonNull<u8> {
-        unsafe {
-            NonNull::new_unchecked(
-                (self as *const Self as *mut Self as *mut u8)
-                    .add(GcHeader::<Id>::ARRAY_VALUE_OFFSET),
-            )
-        }
-    }
-
-    #[inline]
-    pub fn layout_info(&self) -> GcArrayLayoutInfo<Id> {
-        GcArrayLayoutInfo {
-            element_layout: self.element_layout(),
-            len_elements: self.len_elements,
-            marker: PhantomData,
-        }
-    }
-
-    #[inline]
-    fn element_layout(&self) -> Layout {
-        self.resolve_type_info()
-            .element_type_info
-            .layout
-            .value_layout
-    }
-
-    #[inline]
-    fn value_layout(&self) -> Layout {
-        self.layout_info().value_layout()
-    }
-
-    #[inline]
-    fn overall_layout(&self) -> Layout {
-        self.layout_info().overall_layout()
-    }
-}
-struct GcArrayLayoutInfo<Id: CollectorId> {
-    element_layout: Layout,
-    len_elements: usize,
-    marker: PhantomData<&'static Id>,
-}
-impl<Id: CollectorId> GcArrayLayoutInfo<Id> {
-    #[inline]
-    pub const fn element_layout(&self) -> Layout {
-        self.element_layout
-    }
-
-    #[cfg_attr(not(debug_assertions), inline)]
-    fn value_layout(&self) -> Layout {
-        let element_layout = self.element_layout();
-        if cfg!(debug_assertions) {
-            debug_assert!(element_layout.align() <= GcHeader::<Id>::FIXED_ALIGNMENT);
-            debug_assert_eq!(
-                element_layout.pad_to_align(),
-                element_layout,
-                "padding should already be included"
-            );
-            let Some(repeated_size) = element_layout.size().checked_mul(self.len_elements) else {
-                panic!(
-                    "Invalid length {} triggers size overflow for {element_layout:?}",
-                    self.len_elements
-                )
-            };
-            debug_assert!(
-                Layout::from_size_align(repeated_size, element_layout.align()).is_ok(),
-                "align overflow"
-            );
-        }
-        unsafe {
-            Layout::from_size_align_unchecked(
-                element_layout.size().unchecked_mul(self.len_elements),
-                element_layout.align(),
-            )
-        }
-    }
-
-    #[cfg_attr(not(debug_assertions), inline)]
-    fn overall_layout(&self) -> Layout {
-        let value_layout = self.value_layout();
-        if cfg!(debug_assertions) {
-            let Ok((overall_layout, actual_offset)) =
-                LayoutExt(GcHeader::<Id>::ARRAY_HEADER_LAYOUT).extend(value_layout)
-            else {
-                unreachable!("layout overflow")
-            };
-            debug_assert_eq!(actual_offset, GcHeader::<Id>::ARRAY_VALUE_OFFSET);
-            debug_assert_eq!(
-                Some(overall_layout.size()),
-                value_layout
-                    .size()
-                    .checked_add(GcHeader::<Id>::ARRAY_VALUE_OFFSET)
-            );
-        }
-        unsafe {
-            Layout::from_size_align_unchecked(
-                value_layout
-                    .size()
-                    .unchecked_add(GcHeader::<Id>::ARRAY_VALUE_OFFSET),
-                GcHeader::<Id>::FIXED_ALIGNMENT,
-            )
-            .pad_to_align()
-        }
-    }
 }
 
 pub struct CollectContext<'newgc, Id: CollectorId> {
@@ -643,7 +249,7 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
                     .state_bits
                     .get()
                     .raw_mark_bits()
-                    .resolve(&self.garbage_collector.young_generation),
+                    .resolve(&self.garbage_collector.state),
                 GcMarkBits::Black
             );
             return Gc::from_raw_ptr(
@@ -659,7 +265,7 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
             .state_bits
             .get()
             .raw_mark_bits()
-            .resolve(self.garbage_collector)
+            .resolve(&self.garbage_collector.state)
         {
             GcMarkBits::White => {
                 let new_header = self.fallback_collect_gc_header(NonNull::from(header));
@@ -667,7 +273,7 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
             }
             GcMarkBits::Black => {
                 // already traced, can skip it
-                Gc::from_raw_ptr(target.as_raw_ptr())
+                Gc::from_raw_ptr(target.as_raw_ptr().cast())
             }
         }
     }
@@ -687,12 +293,13 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
                     .state_bits
                     .get()
                     .raw_mark_bits()
-                    .resolve(self.garbage_collector),
+                    .resolve(&self.garbage_collector.state),
                 GcMarkBits::White
             );
             // mark as black
             header.update_state_bits(|state_bits| {
-                state_bits.with_raw_mark_bits(GcMarkBits::Black.to_raw(self.garbage_collector));
+                state_bits
+                    .with_raw_mark_bits(GcMarkBits::Black.to_raw(&self.garbage_collector.state));
             });
             prev_generation = header.state_bits.get().generation();
             type_info = header.metadata.type_info;
@@ -707,26 +314,29 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
                         array_type_info,
                         header_ptr.as_ref().metadata.array_type_info
                     ));
-                    let array_layout = GcArrayLayoutInfo {
-                        element_layout: array_type_info.element_type_info.layout.value_layout,
-                        len_elements: header_ptr.cast::<GcArrayHeader<Id>>().as_ref().len_elements,
-                        marker: PhantomData,
-                    };
+                    let array_layout = GcArrayLayoutInfo::new_unchecked(
+                        array_type_info.element_type_info.layout.value_layout(),
+                        header_ptr.cast::<GcArrayHeader<Id>>().as_ref().len_elements,
+                    );
                     array_value_size = Some(array_layout.value_layout().size());
                     self.garbage_collector
                         .old_generation
                         .alloc_raw(ArrayAlloc {
                             layout_info: array_layout,
                             type_info: array_type_info,
+                            state: &self.garbage_collector.state,
                         })
                         .map(NonNull::cast::<GcHeader<Id>>)
                 } else {
                     array_value_size = None;
                     self.garbage_collector
                         .old_generation
-                        .alloc_raw(RegularAlloc { type_info })
+                        .alloc_raw(RegularAlloc {
+                            type_info,
+                            state: &self.garbage_collector.state,
+                        })
                 }
-                .unwrap_or_else(|| {
+                .unwrap_or_else(|_| {
                     // TODO: This panic is fatal, will cause an abort
                     panic!("Oldgen alloc failure")
                 });
@@ -820,7 +430,7 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
         let type_info = header.as_ref().main_header.metadata.type_info;
         debug_assert_eq!(type_info.trace_func, Some(trace_func));
         let array_header = header.cast::<GcArrayHeader<Id>>();
-        let element_layout = type_info.layout.value_layout;
+        let element_layout = type_info.layout.value_layout();
         let len = array_header.as_ref().len_elements;
         let element_start_ptr = array_header.as_ref().array_value_ptr();
         for i in 0..len {

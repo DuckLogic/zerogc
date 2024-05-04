@@ -44,8 +44,7 @@ pub fn rewrite_type(
             *qself = qself
                 .clone()
                 .map::<Result<_, Error>, _>(|mut qself| {
-                    qself.ty =
-                        Box::new(rewrite_type(&*qself.ty, target_type_name, &mut *rewriter)?);
+                    qself.ty = Box::new(rewrite_type(&qself.ty, target_type_name, &mut *rewriter)?);
                     Ok(qself)
                 })
                 .transpose()?;

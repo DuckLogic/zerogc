@@ -42,6 +42,13 @@ impl MimallocHeap {
     }
 
     /// A raw pointer to the underlying heap
+    ///
+    /// ## Safety
+    /// Should not unexpectedly free any allocations or destroy the arena,
+    /// as that would violate the [`Allocator`] api.
+    ///
+    /// Technically, those operations would themselves be `unsafe`,
+    /// so this is slightly redundant.
     #[inline]
     pub unsafe fn as_raw(&self) -> *mut sys::mi_heap_t {
         self.raw.as_ptr()
@@ -52,10 +59,7 @@ impl MimallocHeap {
         if ptr.is_null() {
             Err(AllocError)
         } else {
-            Ok(NonNull::from(std::slice::from_raw_parts_mut(
-                ptr as *mut u8,
-                size,
-            )))
+            Ok(NonNull::from(std::slice::from_raw_parts_mut(ptr, size)))
         }
     }
 
@@ -157,5 +161,12 @@ impl Drop for MimallocHeap {
         unsafe {
             sys::mi_heap_destroy(self.as_raw());
         }
+    }
+}
+
+impl Default for MimallocHeap {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
     }
 }

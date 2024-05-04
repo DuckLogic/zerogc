@@ -1,9 +1,8 @@
-use log::debug;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
 
-use crate::context::{GcHeader, GcTypeInfo};
+use crate::context::layout::{GcHeader, GcTypeInfo};
 use crate::{Collect, CollectContext, CollectorId, GarbageCollector};
 
 pub struct Gc<'gc, T, Id: CollectorId> {

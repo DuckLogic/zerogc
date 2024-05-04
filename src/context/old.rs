@@ -1,15 +1,10 @@
 use allocator_api2::alloc::Allocator;
-use std::alloc::Layout;
 use std::cell::{Cell, UnsafeCell};
 use std::ptr::NonNull;
 use zerogc_next_mimalloc_semisafe::heap::MimallocHeap;
 
-use crate::context::young::YoungGenerationSpace;
-use crate::context::{
-    AllocInfo, CollectStage, CollectStageTracker, GcArrayTypeInfo, GcHeader, GcMarkBits,
-    GcStateBits, GcTypeInfo, GenerationId, HeaderMetadata,
-};
-use crate::gcptr::Gc;
+use crate::context::layout::{AllocInfo, GcHeader, GcMarkBits};
+use crate::context::{CollectStage, CollectStageTracker, CollectorState, GenerationId};
 use crate::CollectorId;
 
 pub struct OldGenerationSpace<Id: CollectorId> {
@@ -19,7 +14,7 @@ pub struct OldGenerationSpace<Id: CollectorId> {
     stage: CollectStageTracker,
 }
 impl<Id: CollectorId> OldGenerationSpace<Id> {
-    pub unsafe fn sweep(&mut self) {
+    pub unsafe fn sweep(&mut self, state: &CollectorState<Id>) {
         self.stage
             .begin_stage(Some(CollectStage::Mark), CollectStage::Sweep);
         let mut next_index: u32 = 0;
@@ -27,7 +22,7 @@ impl<Id: CollectorId> OldGenerationSpace<Id> {
             let header = &mut *func.as_ptr();
             debug_assert_eq!(header.collector_id, self.collector_id);
             debug_assert_eq!(header.state_bits.get().generation(), GenerationId::Old);
-            let mark_bits = header.state_bits.get().raw_mark_bits().resolve(self);
+            let mark_bits = header.state_bits.get().raw_mark_bits().resolve(state);
             match mark_bits {
                 GcMarkBits::White => {
                     // unmarked
@@ -69,21 +64,14 @@ impl<Id: CollectorId> OldGenerationSpace<Id> {
         {
             let live_objects = &mut *self.live_objects.get();
             live_object_index = u32::try_from(live_objects.len()).unwrap();
-            live_objects.push(header_ptr);
+            live_objects.push(header_ptr.cast::<GcHeader<Id>>());
         }
         target.init_header(
             header_ptr,
             GcHeader {
-                state_bits: Cell::new(
-                    GcStateBits::builder()
-                        .with_forwarded(false)
-                        .with_generation(GenerationId::Old)
-                        .with_array(T::ARRAY)
-                        .with_raw_mark_bits(GcMarkBits::White.to_raw(self))
-                        .build(),
-                ),
+                state_bits: Cell::new(target.init_state_bits(GenerationId::Old)),
                 alloc_info: AllocInfo { live_object_index },
-                metadata: HeaderMetadata { type_info },
+                metadata: target.header_metadata(),
                 collector_id: self.collector_id,
             },
         );
@@ -92,21 +80,7 @@ impl<Id: CollectorId> OldGenerationSpace<Id> {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum OldAllocError {
+pub enum OldAllocError {
     #[error("Out of memory (oldgen)")]
     OutOfMemory,
-}
-
-unsafe impl<Id: CollectorId> super::Generation<Id> for OldGenerationSpace<Id> {
-    const ID: GenerationId = GenerationId::Old;
-
-    #[inline]
-    fn cast_young(&self) -> Option<&'_ YoungGenerationSpace<Id>> {
-        None
-    }
-
-    #[inline]
-    fn cast_old(&self) -> Option<&'_ OldGenerationSpace<Id>> {
-        Some(self)
-    }
 }

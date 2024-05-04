@@ -1,5 +1,3 @@
-use proc_macro2::TokenStream;
-
 mod collect_impl;
 pub(crate) mod helpers;
 

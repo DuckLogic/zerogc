@@ -8,10 +8,10 @@
 //! There is no copyright issue because I am the only author.
 use indexmap::{indexmap, IndexMap};
 use proc_macro2::{Ident, Span, TokenStream};
-use proc_macro_kwargs::parse::{NestedDict, NestedList, Syn};
+use proc_macro_kwargs::parse::{NestedDict, NestedList};
 use proc_macro_kwargs::{MacroArg, MacroKeywordArgs};
 use quote::quote;
-use std::process::id;
+use syn::ext::IdentExt;
 use syn::parse::ParseStream;
 use syn::{
     braced, parse_quote, Error, Expr, GenericParam, Generics, Lifetime, Path, Token, Type,
@@ -49,7 +49,7 @@ pub struct MacroInput {
     /// Requirements for implementing `NullCollect`
     ///
     /// This is unsafe (obviously) and has no static checking.
-    null_collect: Option<TraitRequirements>,
+    null_collect: TraitRequirements,
     /// The associated type `Collect::Collected<'newgc>`
     ///
     /// Implicitly takes a `'newgc` parameter
@@ -150,7 +150,7 @@ impl MacroInput {
         let zerogc_next_crate = zerogc_next_crate();
         let target_type = &self.target_type;
         let mut generics: syn::Generics = self.basic_generics();
-        let collector_id = self.setup_collector_id_generics(&mut generics);
+        let collector_id = self.setup_collector_id_generics(&mut generics)?;
         {
             let clause = self.bounds.where_clause_collect(&self.params.elements)?;
             generics
@@ -200,9 +200,9 @@ impl CustomBounds {
     ) -> Result<WhereClause, syn::Error> {
         match self.collect {
             Some(TraitRequirements::Never { span }) => {
-                return Err(syn::Error::new(span, "Collect must always be implemented"))
+                Err(syn::Error::new(span, "Collect must always be implemented"))
             }
-            Some(TraitRequirements::Always) => Ok(empty_clause()), // No requirements
+            Some(TraitRequirements::Always { span: _ }) => Ok(empty_clause()), // No requirements
             Some(TraitRequirements::Where(ref explicit)) => Ok(explicit.clone()),
             None => {
                 // generate the implicit requirements
@@ -258,15 +258,13 @@ impl MacroArg for TraitRequirements {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum CollectorIdInfo {
+    #[default]
     Any,
-    Specific { map: IndexMap<Path, Lifetime> },
-}
-impl Default for CollectorIdInfo {
-    fn default() -> Self {
-        CollectorIdInfo::Any
-    }
+    Specific {
+        map: IndexMap<Path, Lifetime>,
+    },
 }
 impl CollectorIdInfo {
     /// Create info from a single `CollectorId`,
