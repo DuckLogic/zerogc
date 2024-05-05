@@ -322,7 +322,6 @@ impl<Id: CollectorId> GcHeader<Id> {
     }
 
     #[inline]
-    #[deprecated(note = "miri doesn't like this")]
     pub fn regular_value_ptr(&self) -> NonNull<u8> {
         unsafe {
             NonNull::new_unchecked(

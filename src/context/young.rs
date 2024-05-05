@@ -3,7 +3,6 @@ use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use bumpalo::ChunkRawIter;
-use lazy_static::lazy_static;
 
 use crate::context::layout::{AllocInfo, GcHeader};
 use crate::context::GenerationId;
@@ -42,7 +41,7 @@ impl<Id: CollectorId> YoungGenerationSpace<Id> {
     pub unsafe fn alloc_raw<T: super::RawAllocTarget<Id>>(
         &self,
         target: &T,
-    ) -> Result<(NonNull<T::Header>, NonNull<u8>), YoungAllocError> {
+    ) -> Result<NonNull<T::Header>, YoungAllocError> {
         let overall_layout = target.overall_layout();
         if overall_layout.size() > Self::SIZE_LIMIT {
             return Err(YoungAllocError::SizeExceedsLimit);
@@ -62,14 +61,7 @@ impl<Id: CollectorId> YoungGenerationSpace<Id> {
                 collector_id: self.collector_id,
             },
         );
-        Ok((
-            header_ptr,
-            NonNull::new_unchecked(raw_ptr.as_ptr().add(if T::ARRAY {
-                GcHeader::<Id>::ARRAY_VALUE_OFFSET
-            } else {
-                GcHeader::<Id>::REGULAR_VALUE_OFFSET
-            })),
-        ))
+        Ok(header_ptr)
     }
 
     #[inline]
