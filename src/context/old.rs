@@ -146,7 +146,7 @@ impl<Id: CollectorId> OldGenerationSpace<Id> {
     pub unsafe fn alloc_raw<T: super::RawAllocTarget<Id>>(
         &self,
         target: &T,
-    ) -> Result<NonNull<T::Header>, OldAllocError> {
+    ) -> Result<(NonNull<T::Header>, NonNull<u8>), OldAllocError> {
         let overall_layout = target.overall_layout();
         let raw_ptr = match self.heap.allocate(overall_layout) {
             Ok(raw_ptr) => raw_ptr,
@@ -174,7 +174,14 @@ impl<Id: CollectorId> OldGenerationSpace<Id> {
                 collector_id: self.collector_id,
             },
         );
-        Ok(header_ptr)
+        Ok((
+            header_ptr,
+            NonNull::new_unchecked(raw_ptr.cast::<u8>().as_ptr().add(if T::ARRAY {
+                GcHeader::<Id>::ARRAY_VALUE_OFFSET
+            } else {
+                GcHeader::<Id>::REGULAR_VALUE_OFFSET
+            })),
+        ))
     }
 
     #[inline]

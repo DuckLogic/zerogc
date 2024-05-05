@@ -17,6 +17,7 @@ stacker = "0.1"
 zerogc-next-mimalloc-semisafe = { version = "0.1.0-alpha.1", path = "libs/mimalloc-semisafe" }
 log = "0.4.21"
 scopeguard = "1.2"
+lazy_static = "1.4.0"
 
 [build-dependencies]
 rustversion = "1"

@@ -1,4 +1,5 @@
 use std::alloc::Layout;
+use std::array;
 use std::cell::{Cell, RefCell};
 use std::error::Error;
 use std::fmt::Debug;
@@ -157,7 +158,7 @@ impl<Id: CollectorId> GarbageCollector<Id> {
     #[track_caller]
     pub fn alloc_with<T: Collect<Id>>(&self, func: impl FnOnce() -> T) -> Gc<'_, T, Id> {
         unsafe {
-            let header = self.alloc_raw(&RegularAlloc {
+            let (header, value_ptr) = self.alloc_raw(&RegularAlloc {
                 state: &self.state,
                 type_info: GcTypeInfo::new::<T>(),
             });
@@ -165,18 +166,20 @@ impl<Id: CollectorId> GarbageCollector<Id> {
                 header,
                 old_generation: &self.old_generation,
             };
-            let value_ptr = header.as_ref().regular_value_ptr().cast::<T>();
-            value_ptr.as_ptr().write(func());
+            value_ptr.as_ptr().cast::<T>().write(func());
             header
                 .as_ref()
                 .update_state_bits(|state| state.with_value_initialized(true));
             initialization_guard.defuse(); // successful initialization;
-            Gc::from_raw_ptr(value_ptr)
+            Gc::from_raw_ptr(value_ptr.cast())
         }
     }
 
     #[inline]
-    unsafe fn alloc_raw<T: RawAllocTarget<Id>>(&self, target: &T) -> NonNull<T::Header> {
+    unsafe fn alloc_raw<T: RawAllocTarget<Id>>(
+        &self,
+        target: &T,
+    ) -> (NonNull<T::Header>, NonNull<u8>) {
         match self.young_generation.alloc_raw(target) {
             Ok(res) => res,
             Err(YoungAllocError::SizeExceedsLimit) => self.alloc_raw_fallback(target),
@@ -185,7 +188,10 @@ impl<Id: CollectorId> GarbageCollector<Id> {
     }
 
     #[cold]
-    unsafe fn alloc_raw_fallback<T: RawAllocTarget<Id>>(&self, target: &T) -> NonNull<T::Header> {
+    unsafe fn alloc_raw_fallback<T: RawAllocTarget<Id>>(
+        &self,
+        target: &T,
+    ) -> (NonNull<T::Header>, NonNull<u8>) {
         self.old_generation
             .alloc_raw(target)
             .unwrap_or_else(|err| Self::oom(err))
@@ -506,7 +512,7 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
             GenerationId::Young => {
                 let array_value_size: Option<usize>;
                 // reallocate in oldgen
-                let copied_ptr = if array {
+                let (copied_header_ptr, copied_value_ptr) = if array {
                     let array_type_info = type_info.assume_array_info();
                     debug_assert!(std::ptr::eq(
                         array_type_info,
@@ -524,7 +530,9 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
                             type_info: array_type_info,
                             state: &self.garbage_collector.state,
                         })
-                        .map(NonNull::cast::<GcHeader<Id>>)
+                        .map(|(array_header_ptr, value_ptr)| {
+                            (array_header_ptr.cast::<GcHeader<Id>>(), value_ptr)
+                        })
                 } else {
                     array_value_size = None;
                     self.garbage_collector
@@ -535,28 +543,22 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
                         })
                 }
                 .unwrap_or_else(|_| {
-                    // TODO: This panic is fatal, will cause an abort
+                    // This panic is fatal, will cause an abort
                     panic!("Oldgen alloc failure")
                 });
-                copied_ptr
-                    .as_ref()
-                    .state_bits
-                    .set(header_ptr.as_ref().state_bits.get());
-                copied_ptr.as_ref().update_state_bits(|bits| {
+                copied_header_ptr.as_ref().update_state_bits(|bits| {
                     debug_assert!(!bits.forwarded());
                     bits.with_generation(GenerationId::Old)
                         .with_value_initialized(true)
+                        .with_raw_mark_bits(GcMarkBits::Black.to_raw(&self.garbage_collector.state))
                 });
                 header_ptr
                     .as_ref()
                     .update_state_bits(|bits| bits.with_forwarded(true));
-                (&mut *header_ptr.as_ptr()).metadata.forward_ptr = copied_ptr.cast();
+                (&mut *header_ptr.as_ptr()).metadata.forward_ptr = copied_header_ptr.cast();
                 // NOTE: Copy uninitialized bytes is safe here, as long as they are not read in dest
                 if array {
-                    copied_ptr
-                        .cast::<GcArrayHeader<Id>>()
-                        .as_ref()
-                        .array_value_ptr()
+                    copied_value_ptr
                         .cast::<u8>()
                         .as_ptr()
                         .copy_from_nonoverlapping(
@@ -568,9 +570,7 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
                             array_value_size.unwrap(),
                         )
                 } else {
-                    copied_ptr
-                        .as_ref()
-                        .regular_value_ptr()
+                    copied_value_ptr
                         .cast::<u8>()
                         .as_ptr()
                         .copy_from_nonoverlapping(
@@ -582,7 +582,7 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
                             type_info.layout.value_layout().size(),
                         );
                 }
-                copied_ptr
+                copied_header_ptr
             }
             GenerationId::Old => header_ptr, // no copying needed for oldgen
         };
