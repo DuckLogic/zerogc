@@ -3,7 +3,6 @@ use std::fmt::Display;
 use std::mem::ManuallyDrop;
 use std::panic::Location;
 
-pub(crate) mod bumpalo_raw;
 mod layout_helpers;
 
 pub use self::layout_helpers::{Alignment, LayoutExt};

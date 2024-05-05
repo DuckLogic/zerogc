@@ -18,6 +18,7 @@ use crate::gcptr::Gc;
 use crate::utils::AbortFailureGuard;
 use crate::Collect;
 
+mod alloc;
 pub(crate) mod layout;
 mod old;
 mod young;
