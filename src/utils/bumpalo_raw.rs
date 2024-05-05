@@ -10,6 +10,13 @@ pub struct BumpAllocRaw<Config: BumpAllocRawConfig> {
     marker: PhantomData<Config>,
 }
 impl<Config: BumpAllocRawConfig> BumpAllocRaw<Config> {
+    pub fn new() -> Self {
+        BumpAllocRaw {
+            inner: Bump::new(),
+            marker: PhantomData,
+        }
+    }
+
     #[inline(always)]
     pub fn try_alloc_layout(&self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
         assert_eq!(layout.align(), Config::FIXED_ALIGNMENT.value());
@@ -24,6 +31,11 @@ impl<Config: BumpAllocRawConfig> BumpAllocRaw<Config> {
     #[inline]
     pub unsafe fn iter_allocated_chunks_raw(&self) -> bumpalo::ChunkRawIter<'_> {
         self.inner.iter_allocated_chunks_raw()
+    }
+
+    #[inline]
+    pub fn allocated_bytes(&self) -> usize {
+        self.inner.allocated_bytes()
     }
 }
 

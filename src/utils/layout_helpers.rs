@@ -98,7 +98,7 @@ impl LayoutExt {
          * is we skip the usize::is_power_of_two check.
          */
         if new_size > Self::max_size_for_align(unsafe { Alignment::new_unchecked(new_align) }) {
-            return Err(LayoutExtError);
+            Err(LayoutExtError)
         } else {
             Ok((
                 unsafe { Layout::from_size_align_unchecked(new_size, new_align) },

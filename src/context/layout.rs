@@ -4,10 +4,12 @@ use crate::{Collect, CollectContext, CollectorId};
 use bitbybit::{bitenum, bitfield};
 use std::alloc::Layout;
 use std::cell::Cell;
+use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 /// The layout of a "regular" (non-array) type
+#[derive(Debug)]
 pub(crate) struct GcTypeLayout<Id: CollectorId> {
     /// The layout of the underlying value
     ///
@@ -104,6 +106,7 @@ impl<Id: CollectorId> GcArrayTypeInfo<Id> {
 pub type TraceFuncPtr<Id> = unsafe fn(NonNull<()>, &mut CollectContext<Id>);
 
 #[repr(C)]
+#[derive(Debug)]
 pub(crate) struct GcTypeInfo<Id: CollectorId> {
     pub(super) layout: GcTypeLayout<Id>,
     pub(super) drop_func: Option<unsafe fn(*mut ())>,
@@ -178,7 +181,7 @@ pub enum GcMarkBits {
 
 impl GcMarkBits {
     #[inline]
-    pub fn to_raw<Id: CollectorId>(&self, state: &CollectorState<Id>) -> GcRawMarkBits {
+    pub fn to_raw<Id: CollectorId>(self, state: &CollectorState<Id>) -> GcRawMarkBits {
         let bits: GcMarkBitsRepr = self.raw_value();
         GcRawMarkBits::new_with_raw_value(if state.mark_bits_inverted.get() {
             GcRawMarkBits::invert_bits(bits)
@@ -217,6 +220,7 @@ impl GcRawMarkBits {
 /// However, it currently needs to exist fo
 /// the macro to generate the `builder` field
 #[bitfield(u32, default = 0)]
+#[derive(Debug)]
 pub struct GcStateBits {
     #[bit(0, rw)]
     forwarded: bool,
@@ -226,6 +230,8 @@ pub struct GcStateBits {
     array: bool,
     #[bit(3, rw)]
     raw_mark_bits: GcRawMarkBits,
+    #[bit(4, rw)]
+    value_initialized: bool,
 }
 pub union HeaderMetadata<Id: CollectorId> {
     pub type_info: &'static GcTypeInfo<Id>,
@@ -264,12 +270,26 @@ pub(crate) struct GcHeader<Id: CollectorId> {
     /// The alignment of this type must be smaller than [`GcHeader::FIXED_ALIGNMENT`].
     pub collector_id: Id,
 }
+impl<Id: CollectorId> Debug for GcHeader<Id> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GcHeader")
+            .field("state_bits", &self.state_bits.get())
+            .field(
+                "metadata",
+                if self.state_bits.get().forwarded() {
+                    unsafe { &self.metadata.forward_ptr }
+                } else {
+                    unsafe { &self.metadata.type_info }
+                },
+            )
+            .field("collector_id", &self.collector_id)
+            .finish_non_exhaustive()
+    }
+}
 impl<Id: CollectorId> GcHeader<Id> {
     #[inline]
-    pub(crate) unsafe fn update_state_bits(&self, func: impl FnOnce(&mut GcStateBits)) {
-        let mut bits = self.state_bits.get();
-        func(&mut bits);
-        self.state_bits.set(bits);
+    pub(crate) unsafe fn update_state_bits(&self, func: impl FnOnce(GcStateBits) -> GcStateBits) {
+        self.state_bits.set(func(self.state_bits.get()));
     }
 
     /// The fixed alignment for all GC types
@@ -432,17 +452,17 @@ impl<Id: CollectorId> GcArrayLayoutInfo<Id> {
                                     }
                             );
                         }
-                        Err(e) => panic!("Overall value overflows layout"),
+                        Err(_e) => panic!("Overall value overflows layout"),
                     }
                 }
                 Err(_) => panic!("Repeated value overflows layout!"),
             }
         }
-        return Ok(GcArrayLayoutInfo {
+        Ok(GcArrayLayoutInfo {
             element_layout,
             len_elements,
             marker: PhantomData,
-        });
+        })
     }
 
     #[inline]

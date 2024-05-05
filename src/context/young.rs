@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 use bumpalo::ChunkRawIter;
 
 use crate::context::layout::{AllocInfo, GcHeader};
-use crate::context::{CollectStage, CollectStageTracker, GenerationId};
+use crate::context::GenerationId;
 use crate::utils::bumpalo_raw::{BumpAllocRaw, BumpAllocRawConfig};
 use crate::utils::Alignment;
 use crate::CollectorId;
@@ -19,25 +19,28 @@ use crate::CollectorId;
 pub struct YoungGenerationSpace<Id: CollectorId> {
     bump: BumpAllocRaw<BumpConfig<Id>>,
     collector_id: Id,
-    stage: CollectStageTracker,
 }
 impl<Id: CollectorId> YoungGenerationSpace<Id> {
+    pub unsafe fn new(id: Id) -> Self {
+        YoungGenerationSpace {
+            bump: BumpAllocRaw::new(),
+            collector_id: id,
+        }
+    }
+
     /// The maximum size to allocate in the young generation.
     ///
     /// Anything larger than this is immediately sent to the old generation.
     pub const SIZE_LIMIT: usize = 1024;
 
     pub unsafe fn sweep(&mut self) {
-        self.stage
-            .begin_stage(Some(CollectStage::Mark), CollectStage::Sweep);
         self.bump.reset();
-        self.stage.finish_stage(CollectStage::Sweep);
     }
 
     #[inline]
     pub unsafe fn alloc_raw<T: super::RawAllocTarget<Id>>(
         &self,
-        target: T,
+        target: &T,
     ) -> Result<NonNull<T::Header>, YoungAllocError> {
         let overall_layout = target.overall_layout();
         if overall_layout.size() > Self::SIZE_LIMIT {
@@ -69,16 +72,21 @@ impl<Id: CollectorId> YoungGenerationSpace<Id> {
             marker: PhantomData,
         }
     }
+
+    #[inline]
+    pub fn allocated_bytes(&self) -> usize {
+        self.bump.allocated_bytes()
+    }
 }
 #[derive(Debug, thiserror::Error)]
-enum YoungAllocError {
-    #[error("Out of memory")]
+pub enum YoungAllocError {
+    #[error("Out of memory (young-gen)")]
     OutOfMemory,
     #[error("Size exceeds young-alloc limit")]
     SizeExceedsLimit,
 }
 
-struct IterRawAllocations<'bump, Id: CollectorId> {
+pub(crate) struct IterRawAllocations<'bump, Id: CollectorId> {
     chunk_iter: ChunkRawIter<'bump>,
     remaining_chunk_info: Option<(NonNull<u8>, usize)>,
     marker: PhantomData<Id>,

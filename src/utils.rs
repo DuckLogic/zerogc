@@ -1,9 +1,102 @@
+use std::backtrace::{Backtrace, BacktraceStatus};
+use std::fmt::Display;
 use std::mem::ManuallyDrop;
+use std::panic::Location;
 
 pub(crate) mod bumpalo_raw;
 mod layout_helpers;
 
 pub use self::layout_helpers::{Alignment, LayoutExt};
+
+enum AbortReason<M: Display> {
+    Message(M),
+    FailedAbort,
+}
+
+/// A RAII guard that aborts the process if the operation fails/panics.
+///
+/// Can be used to avoid exception safety problems.
+///
+/// This guard must be explicitly dropped with [`defuse`](AbortFailureGuard::defuse).
+#[must_use]
+pub struct AbortFailureGuard<M: Display> {
+    reason: AbortReason<M>,
+    location: Option<&'static Location<'static>>,
+}
+impl<M: Display> AbortFailureGuard<M> {
+    #[inline]
+    #[track_caller]
+    pub fn new(reason: M) -> Self {
+        AbortFailureGuard {
+            reason: AbortReason::Message(reason),
+            location: Some(Location::caller()),
+        }
+    }
+
+    #[inline]
+    pub fn defuse(mut self) {
+        // replace with a dummy value and drop the real value
+        drop(std::mem::replace(
+            &mut self.reason,
+            AbortReason::FailedAbort,
+        ));
+        std::mem::forget(self);
+    }
+
+    #[inline]
+    pub fn fail(&self) -> ! {
+        self.erase().fail_impl()
+    }
+
+    #[inline]
+    fn erase(&self) -> AbortFailureGuard<&'_ dyn Display> {
+        AbortFailureGuard {
+            reason: match self.reason {
+                AbortReason::Message(ref reason) => AbortReason::Message(reason as &'_ dyn Display),
+                AbortReason::FailedAbort => AbortReason::FailedAbort,
+            },
+            location: self.location,
+        }
+    }
+}
+impl<'a> AbortFailureGuard<&'a dyn Display> {
+    #[cold]
+    #[inline(never)]
+    pub fn fail_impl(&self) -> ! {
+        match self.reason {
+            AbortReason::Message(msg) => {
+                let secondary_abort_guard = AbortFailureGuard {
+                    reason: AbortReason::<std::convert::Infallible>::FailedAbort,
+                    location: self.location,
+                };
+                eprintln!("Aborting: {msg}");
+                let backtrace = Backtrace::capture();
+                if let Some(location) = self.location {
+                    eprintln!("Location: {location}")
+                }
+                if !std::thread::panicking() {
+                    eprintln!(
+                        "WARNING: Thread not panicking (forgot to defuse AbortFailureGuard?)"
+                    );
+                }
+                if matches!(backtrace.status(), BacktraceStatus::Captured) {
+                    eprintln!("Backtrace: {backtrace}");
+                }
+                secondary_abort_guard.defuse();
+            }
+            // don't do anything, failed to print primary abort message
+            AbortReason::FailedAbort => {}
+        }
+        std::process::abort();
+    }
+}
+impl<M: Display> Drop for AbortFailureGuard<M> {
+    #[cold]
+    #[inline]
+    fn drop(&mut self) {
+        self.fail()
+    }
+}
 
 /// Transmute one type into another,
 /// without doing compile-time checks for sizes.
