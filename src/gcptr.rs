@@ -22,7 +22,7 @@ impl<'gc, T: Collect<Id>, Id: CollectorId> Gc<'gc, T, Id> {
     #[inline]
     pub(crate) fn header(&self) -> &'_ GcHeader<Id> {
         unsafe {
-            &*((self.ptr.as_ptr() as *mut u8).sub(GcHeader::<Id>::FIXED_ALIGNMENT)
+            &*((self.ptr.as_ptr() as *mut u8).sub(GcHeader::<Id>::REGULAR_VALUE_OFFSET)
                 as *mut GcHeader<Id>)
         }
     }
