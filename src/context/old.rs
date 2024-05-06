@@ -8,9 +8,10 @@ use crate::context::layout::{AllocInfo, GcHeader, GcMarkBits};
 use crate::context::{CollectorState, GenerationId};
 use crate::CollectorId;
 
-mod miri {
+mod fallback {
     use allocator_api2::alloc::AllocError;
     use std::alloc::Layout;
+    use std::collections::HashMap;
     use std::ptr::NonNull;
 
     pub struct HeapAllocFallback;
@@ -41,10 +42,23 @@ mod miri {
     }
 }
 
-#[cfg(miri)]
-type HeapAllocator = miri::HeapAllocFallback;
-#[cfg(not(miri))]
+#[cfg(any(miri, feature = "debug-alloc"))]
+type HeapAllocator = fallback::HeapAllocFallback;
+#[cfg(not(any(miri, feature = "debug-alloc")))]
 type HeapAllocator = zerogc_next_mimalloc_semisafe::heap::MimallocHeap;
+
+const DROP_NEEDS_EXPLICIT_FREE: bool = cfg!(any(miri, feature = "debug-alloc"));
+
+enum ObjectFreeCondition<'a, Id: CollectorId> {
+    /// Free the object if it has not been marked.
+    ///
+    /// Used to sweep objects.
+    Unmarked { state: &'a CollectorState<Id> },
+    /// Unconditionally free the object.
+    ///
+    /// Used to destroy the
+    Always,
+}
 
 pub struct OldGenerationSpace<Id: CollectorId> {
     // TODO: Add allocation count wrapper?
@@ -64,6 +78,10 @@ impl<Id: CollectorId> OldGenerationSpace<Id> {
     }
 
     pub unsafe fn sweep(&mut self, state: &CollectorState<Id>) {
+        self.free_live_objects(ObjectFreeCondition::Unmarked { state });
+    }
+
+    unsafe fn free_live_objects(&mut self, cond: ObjectFreeCondition<'_, Id>) {
         let mut next_index: u32 = 0;
         self.live_objects.get_mut().retain(|func| {
             if func.is_none() {
@@ -72,34 +90,40 @@ impl<Id: CollectorId> OldGenerationSpace<Id> {
             let header = &mut *func.unwrap().as_ptr();
             debug_assert_eq!(header.collector_id, self.collector_id);
             debug_assert_eq!(header.state_bits.get().generation(), GenerationId::Old);
-            let mark_bits = header.state_bits.get().raw_mark_bits().resolve(state);
-            match mark_bits {
-                GcMarkBits::White => {
-                    // unmarked
-                    if cfg!(debug_assertions) {
-                        header.alloc_info.live_object_index = u32::MAX;
+            let should_free = match cond {
+                ObjectFreeCondition::Unmarked { state } => {
+                    let mark_bits = header.state_bits.get().raw_mark_bits().resolve(state);
+                    match mark_bits {
+                        GcMarkBits::White => true,  // should free
+                        GcMarkBits::Black => false, // should not free
                     }
-                    let overall_layout = if header.state_bits.get().array() {
-                        header.assume_array_header().layout_info().overall_layout()
-                    } else {
-                        header.metadata.type_info.layout.overall_layout()
-                    };
-                    self.allocated_bytes.set(
-                        self.allocated_bytes
-                            .get()
-                            .checked_sub(overall_layout.size())
-                            .expect("allocated size underflow"),
-                    );
-                    self.heap
-                        .deallocate(NonNull::from(header).cast(), overall_layout);
-                    false
                 }
-                GcMarkBits::Black => {
-                    // marked
-                    header.alloc_info.live_object_index = next_index;
-                    next_index += 1;
-                    true
+                ObjectFreeCondition::Always => true, // always free
+            };
+            if should_free {
+                // unmarked (should free)
+                if cfg!(debug_assertions) {
+                    header.alloc_info.live_object_index = u32::MAX;
                 }
+                let overall_layout = if header.state_bits.get().array() {
+                    header.assume_array_header().layout_info().overall_layout()
+                } else {
+                    header.metadata.type_info.layout.overall_layout()
+                };
+                self.allocated_bytes.set(
+                    self.allocated_bytes
+                        .get()
+                        .checked_sub(overall_layout.size())
+                        .expect("allocated size underflow"),
+                );
+                self.heap
+                    .deallocate(NonNull::from(header).cast(), overall_layout);
+                false
+            } else {
+                // marked (should not free)
+                header.alloc_info.live_object_index = next_index;
+                next_index += 1;
+                true
             }
         });
         assert_eq!(next_index as usize, self.live_objects.get_mut().len());
@@ -180,6 +204,15 @@ impl<Id: CollectorId> OldGenerationSpace<Id> {
     #[inline]
     pub fn allocated_bytes(&self) -> usize {
         self.allocated_bytes.get()
+    }
+}
+impl<Id: CollectorId> Drop for OldGenerationSpace<Id> {
+    fn drop(&mut self) {
+        if DROP_NEEDS_EXPLICIT_FREE {
+            unsafe {
+                self.free_live_objects(ObjectFreeCondition::Always);
+            }
+        }
     }
 }
 
