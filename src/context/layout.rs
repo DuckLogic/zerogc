@@ -5,8 +5,11 @@ use bitbybit::{bitenum, bitfield};
 use std::alloc::Layout;
 use std::cell::Cell;
 use std::fmt::{Debug, Formatter};
+use std::iter::FusedIterator;
 use std::marker::PhantomData;
+use std::path::Iter;
 use std::ptr::NonNull;
+use std::thread::current;
 
 /// The layout of a "regular" (non-array) type
 #[derive(Debug)]
@@ -239,17 +242,13 @@ pub union HeaderMetadata<Id: CollectorId> {
     pub forward_ptr: NonNull<GcHeader<Id>>,
 }
 pub union AllocInfo {
-    /// The [overall size][`GcTypeLayout::overall_layout`] of this object.
+    /// The index of this object within the vector of objects which need to be dropped.
     ///
-    /// This is used to iterate over objects in the young generation.
+    /// If this object doesn't need to be dropped,
+    /// then this is `u32::MAX`
     ///
-    /// Objects whose size cannot fit into a `u32`
-    /// can never be allocated in the young generation.
-    ///
-    /// If this object is an array,
-    /// this is the overall size of
-    /// the header and all elements.
-    pub this_object_overall_size: u32,
+    /// This is used in the young generation.
+    pub nontrivial_drop_index: u32,
     /// The index of the object within the vector of live objects.
     ///
     /// This is used in the old generation.
@@ -308,7 +307,7 @@ impl<Id: CollectorId> GcHeader<Id> {
     }
 
     #[inline]
-    fn resolve_type_info(&self) -> &'static GcTypeInfo<Id> {
+    pub fn resolve_type_info(&self) -> &'static GcTypeInfo<Id> {
         unsafe {
             if self.state_bits.get().forwarded() {
                 let forward_ptr = self.metadata.forward_ptr;
@@ -333,6 +332,13 @@ impl<Id: CollectorId> GcHeader<Id> {
     #[inline]
     pub unsafe fn assume_array_header(&self) -> &'_ GcArrayHeader<Id> {
         &*(self as *const Self as *const GcArrayHeader<Id>)
+    }
+
+    #[inline]
+    pub unsafe fn invoke_destructor(&self) {
+        if let Some(drop_func) = self.resolve_type_info().drop_func {
+            drop_func(self.regular_value_ptr().as_ptr() as *mut ());
+        }
     }
 }
 
@@ -388,7 +394,57 @@ impl<Id: CollectorId> GcArrayHeader<Id> {
     fn overall_layout(&self) -> Layout {
         self.layout_info().overall_layout()
     }
+
+    #[inline]
+    pub unsafe fn iter_elements(&self) -> IterArrayElementPtr {
+        let len = self.len_elements;
+        IterArrayElementPtr {
+            element_size: self.element_layout().size(),
+            current_ptr: self.array_value_ptr(),
+            remaining_elements: len,
+        }
+    }
+
+    pub unsafe fn invoke_destructor(&self) {
+        if let Some(drop_func) = self.resolve_type_info().element_type_info.drop_func {
+            for element in self.iter_elements() {
+                drop_func(element.as_ptr() as *mut ());
+            }
+        }
+    }
 }
+
+pub struct IterArrayElementPtr {
+    element_size: usize,
+    current_ptr: NonNull<u8>,
+    remaining_elements: usize,
+}
+impl Iterator for IterArrayElementPtr {
+    type Item = NonNull<u8>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining_elements > 0 {
+            let element_ptr = self.current_ptr;
+            unsafe {
+                self.current_ptr =
+                    NonNull::new_unchecked(element_ptr.as_ptr().add(self.element_size));
+            }
+            self.remaining_elements -= 1;
+            Some(element_ptr)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining_elements, Some(self.remaining_elements))
+    }
+}
+impl ExactSizeIterator for IterArrayElementPtr {}
+impl FusedIterator for IterArrayElementPtr {}
+
 pub struct GcArrayLayoutInfo<Id: CollectorId> {
     element_layout: Layout,
     len_elements: usize,

@@ -116,6 +116,13 @@ impl<Id: CollectorId> OldGenerationSpace<Id> {
                         .checked_sub(overall_layout.size())
                         .expect("allocated size underflow"),
                 );
+                // run destructors
+                if header.state_bits.get().array() {
+                    header.assume_array_header().invoke_destructor();
+                } else {
+                    header.invoke_destructor();
+                }
+                // deallocate memory
                 self.heap
                     .deallocate(NonNull::from(header).cast(), overall_layout);
                 false

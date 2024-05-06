@@ -1,16 +1,16 @@
 use allocator_api2::alloc::{AllocError, Allocator};
 use bumpalo::Bump;
 use std::alloc::Layout;
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 
 use crate::context::alloc::{ArenaAlloc, CountingAlloc};
-use crate::context::layout::{AllocInfo, GcHeader};
-use crate::context::GenerationId;
+use crate::context::layout::{AllocInfo, GcHeader, GcMarkBits};
+use crate::context::{CollectorState, GenerationId};
 use crate::utils::Alignment;
-use crate::CollectorId;
+use crate::{CollectorId, Gc};
 
 struct YoungAlloc {
     #[cfg(feature = "debug-alloc")]
@@ -70,6 +70,8 @@ unsafe impl Allocator for YoungAlloc {
 /// The design of the allocator is heavily based on [`bumpalo`](https://crates.io/crates/bumpalo)
 pub struct YoungGenerationSpace<Id: CollectorId> {
     alloc: CountingAlloc<YoungAlloc>,
+    /// A set of objects which need destructors to be run.
+    destruction_queue: UnsafeCell<Vec<Option<NonNull<GcHeader<Id>>>>>,
     collector_id: Id,
 }
 impl<Id: CollectorId> YoungGenerationSpace<Id> {
@@ -78,6 +80,7 @@ impl<Id: CollectorId> YoungGenerationSpace<Id> {
         let bump = ManuallyDrop::new(Box::new(Bump::new()));
         YoungGenerationSpace {
             alloc: CountingAlloc::new(YoungAlloc::new()),
+            destruction_queue: UnsafeCell::new(Vec::new()),
             collector_id: id,
         }
     }
@@ -87,8 +90,56 @@ impl<Id: CollectorId> YoungGenerationSpace<Id> {
     /// Anything larger than this is immediately sent to the old generation.
     pub const SIZE_LIMIT: usize = 1024;
 
-    pub unsafe fn sweep(&mut self) {
+    pub unsafe fn sweep(&mut self, state: &CollectorState<Id>) {
+        for &element in self.destruction_queue.get_mut().iter() {
+            if let Some(header) = element {
+                debug_assert_eq!(
+                    header
+                        .as_ref()
+                        .state_bits
+                        .get()
+                        .raw_mark_bits()
+                        .resolve(state),
+                    GcMarkBits::White,
+                    "Only white objects should be in destruction queue"
+                );
+                header.as_ref().invoke_destructor();
+            }
+        }
+        self.destruction_queue.get_mut().clear();
         self.alloc.as_inner_mut().reset();
+    }
+
+    #[inline]
+    pub unsafe fn remove_destruction_queue(
+        &self,
+        header: NonNull<GcHeader<Id>>,
+        state: &CollectorState<Id>,
+    ) {
+        debug_assert_ne!(
+            header
+                .as_ref()
+                .state_bits
+                .get()
+                .raw_mark_bits()
+                .resolve(state),
+            GcMarkBits::White,
+            "Only marked objects  should be removed from the detruction queue"
+        );
+        debug_assert_eq!(
+            header.as_ref().state_bits.get().generation(),
+            GenerationId::Young
+        );
+        let drop_index = header.as_ref().alloc_info.nontrivial_drop_index;
+        if drop_index == u32::MAX {
+            debug_assert!(header.as_ref().resolve_type_info().drop_func.is_none());
+        } else {
+            debug_assert!(header.as_ref().resolve_type_info().drop_func.is_some());
+            (*self.destruction_queue.get())[drop_index as usize] = None;
+            if cfg!(debug_assertions) {
+                (*header.as_ptr()).alloc_info.nontrivial_drop_index = u32::MAX - 1;
+            }
+        }
     }
 
     #[inline]
@@ -104,12 +155,20 @@ impl<Id: CollectorId> YoungGenerationSpace<Id> {
             return Err(YoungAllocError::OutOfMemory);
         };
         let header_ptr = raw_ptr.cast::<T::Header>();
+        let drop_index = if target.needs_drop() {
+            let index = (*self.destruction_queue.get()).len();
+            (*self.destruction_queue.get()).push(Some(header_ptr.cast::<GcHeader<Id>>()));
+            assert!(index < u32::MAX as usize);
+            index as u32
+        } else {
+            u32::MAX
+        };
         target.init_header(
             header_ptr,
             GcHeader {
                 state_bits: Cell::new(target.init_state_bits(GenerationId::Young)),
                 alloc_info: AllocInfo {
-                    this_object_overall_size: overall_layout.size() as u32,
+                    nontrivial_drop_index: drop_index,
                 },
                 metadata: target.header_metadata(),
                 collector_id: self.collector_id,
@@ -121,6 +180,16 @@ impl<Id: CollectorId> YoungGenerationSpace<Id> {
     #[inline]
     pub fn allocated_bytes(&self) -> usize {
         self.alloc.allocated_bytes()
+    }
+}
+impl<Id: CollectorId> Drop for YoungGenerationSpace<Id> {
+    fn drop(&mut self) {
+        // drop all pending objects
+        for header in self.destruction_queue.get_mut().iter() {
+            if let Some(header) = header {
+                unsafe { header.as_ref().invoke_destructor() }
+            }
+        }
     }
 }
 #[derive(Debug, thiserror::Error)]

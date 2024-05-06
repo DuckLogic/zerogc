@@ -1,5 +1,3 @@
-extern crate core;
-
 pub mod collect;
 pub mod context;
 mod gcptr;

@@ -247,7 +247,7 @@ impl<Id: CollectorId> GarbageCollector<Id> {
         failure_guard.defuse();
         // now sweep
         unsafe {
-            self.young_generation.sweep();
+            self.young_generation.sweep(&self.state);
             self.old_generation.sweep(&self.state);
         }
         // touch roots to verify validity
@@ -326,6 +326,7 @@ unsafe trait RawAllocTarget<Id: CollectorId> {
     const ARRAY: bool;
     type Header: Sized;
     fn header_metadata(&self) -> HeaderMetadata<Id>;
+    fn needs_drop(&self) -> bool;
     unsafe fn init_header(&self, header_ptr: NonNull<Self::Header>, base_header: GcHeader<Id>);
     fn overall_layout(&self) -> Layout;
     #[inline]
@@ -354,6 +355,11 @@ unsafe impl<Id: CollectorId> RawAllocTarget<Id> for RegularAlloc<'_, Id> {
         HeaderMetadata {
             type_info: self.type_info,
         }
+    }
+
+    #[inline]
+    fn needs_drop(&self) -> bool {
+        self.type_info.drop_func.is_some()
     }
 
     #[inline]
@@ -390,6 +396,11 @@ unsafe impl<Id: CollectorId> RawAllocTarget<Id> for ArrayAlloc<'_, Id> {
         HeaderMetadata {
             array_type_info: self.type_info,
         }
+    }
+
+    #[inline]
+    fn needs_drop(&self) -> bool {
+        self.type_info.element_type_info.drop_func.is_some()
     }
 
     #[inline]
@@ -568,6 +579,14 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
                     .as_ref()
                     .update_state_bits(|bits| bits.with_forwarded(true));
                 (&mut *header_ptr.as_ptr()).metadata.forward_ptr = copied_ptr.cast();
+                // determine if drop is needed from header_ptr, avoiding an indirection to type_info
+                let needs_drop = header_ptr.as_ref().alloc_info.nontrivial_drop_index < u32::MAX;
+                debug_assert_eq!(needs_drop, type_info.drop_func.is_some());
+                if needs_drop {
+                    self.garbage_collector
+                        .young_generation
+                        .remove_destruction_queue(header_ptr, &self.garbage_collector.state);
+                }
                 // NOTE: Copy uninitialized bytes is safe here, as long as they are not read in dest
                 if array {
                     copied_ptr
@@ -650,14 +669,8 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
         let type_info = header.as_ref().main_header.metadata.type_info;
         debug_assert_eq!(type_info.trace_func, Some(trace_func));
         let array_header = header.cast::<GcArrayHeader<Id>>();
-        let element_layout = type_info.layout.value_layout();
-        let len = array_header.as_ref().len_elements;
-        let element_start_ptr = array_header.as_ref().array_value_ptr();
-        for i in 0..len {
-            let element = element_start_ptr
-                .as_ptr()
-                .add(i.unchecked_mul(element_layout.size()));
-            trace_func(NonNull::new_unchecked(element as *mut ()), self);
+        for element in array_header.as_ref().iter_elements() {
+            trace_func(element.cast::<()>(), self);
         }
     }
 }
