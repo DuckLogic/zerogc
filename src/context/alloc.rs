@@ -58,58 +58,46 @@ struct AllocObject {
     layout: Layout,
 }
 
-/// An allocator that supports freeing objects in bulk via the [`GroupAlloc::clear`] method.
-pub struct GroupAlloc<A: Allocator> {
+/// An arena allocator that only supports freeing objects in bulk.
+///
+/// This emulates [`bumpalo::Bump`],
+/// but allocates each object individually for better tracking.
+pub struct ArenaAlloc<A: Allocator> {
     alloc: A,
-    allocated_objects: RefCell<HashMap<NonNull<u8>, AllocObject>>,
+    allocated_objects: RefCell<Vec<AllocObject>>,
 }
-impl<A: Allocator> GroupAlloc<A> {
+impl<A: Allocator> ArenaAlloc<A> {
     pub fn new(alloc: A) -> Self {
-        GroupAlloc {
+        ArenaAlloc {
             alloc,
             allocated_objects: Default::default(),
         }
     }
 
-    pub unsafe fn reset(&self) {
-        let mut objects = self.allocated_objects.borrow_mut();
-        for (&ptr, obj) in objects.iter() {
-            assert_eq!(ptr, obj.ptr);
-            self.alloc.deallocate(ptr, obj.layout);
+    pub unsafe fn reset(&mut self) {
+        let objects = self.allocated_objects.get_mut();
+        for obj in objects.iter() {
+            self.alloc.deallocate(obj.ptr, obj.layout);
         }
         objects.clear();
     }
 }
-unsafe impl<A: Allocator> Allocator for GroupAlloc<A> {
+unsafe impl<A: Allocator> Allocator for ArenaAlloc<A> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let res = self.alloc.allocate(layout)?;
-        let mut objects = self.allocated_objects.borrow_mut();
-        match objects.entry(res.cast::<u8>()) {
-            Entry::Occupied(_) => panic!("Duplicate entries for {res:?}"),
-            Entry::Vacant(entry) => {
-                entry.insert(AllocObject {
-                    ptr: res.cast(),
-                    layout: Layout::from_size_align(res.len(), layout.align()).unwrap(),
-                });
-            }
-        }
+
+        self.allocated_objects.borrow_mut().push(AllocObject {
+            ptr: res.cast(),
+            layout: Layout::from_size_align(res.len(), layout.align()).unwrap(),
+        });
         Ok(res)
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        let mut allocated = self.allocated_objects.borrow_mut();
-        match allocated.entry(ptr) {
-            Entry::Occupied(entry) => {
-                assert_eq!(*entry.get(), AllocObject { ptr, layout });
-                entry.remove();
-            }
-            Entry::Vacant(_) => panic!("Missing entry for {ptr:?} w/ {layout:?}"),
-        }
-        drop(allocated); // release guard
-        self.alloc.deallocate(ptr, layout);
+        // dealloc is nop
     }
 }
-impl<A: Allocator> Drop for GroupAlloc<A> {
+impl<A: Allocator> Drop for ArenaAlloc<A> {
     fn drop(&mut self) {
         unsafe {
             self.reset();

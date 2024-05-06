@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 
-use crate::context::alloc::{CountingAlloc, GroupAlloc};
+use crate::context::alloc::{ArenaAlloc, CountingAlloc};
 use crate::context::layout::{AllocInfo, GcHeader};
 use crate::context::GenerationId;
 use crate::utils::Alignment;
@@ -14,7 +14,7 @@ use crate::CollectorId;
 
 struct YoungAlloc {
     #[cfg(feature = "debug-alloc")]
-    group: GroupAlloc<allocator_api2::alloc::Global>,
+    group: ArenaAlloc<allocator_api2::alloc::Global>,
     #[cfg(not(feature = "debug-alloc"))]
     bump: Bump,
 }
@@ -23,7 +23,7 @@ impl YoungAlloc {
         #[cfg(feature = "debug-alloc")]
         {
             YoungAlloc {
-                group: GroupAlloc::new(allocator_api2::alloc::Global),
+                group: ArenaAlloc::new(allocator_api2::alloc::Global),
             }
         }
         #[cfg(not(feature = "debug-alloc"))]
