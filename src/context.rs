@@ -613,11 +613,14 @@ impl<'newgc, Id: CollectorId> CollectContext<'newgc, Id> {
              * NOTE: Cannot have aliasing &mut header references during this recursion
              * The parameters to maybe_grow are completely arbitrary right now.
              */
+            #[cfg(not(miri))]
             stacker::maybe_grow(
                 4096,       // 4KB
                 128 * 1024, // 128KB
                 || self.trace_children(forwarded_ptr, trace_func),
             );
+            #[cfg(miri)]
+            self.trace_children(forwarded_ptr, trace_func);
         }
         forwarded_ptr
     }
