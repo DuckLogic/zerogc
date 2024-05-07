@@ -1,0 +1,13 @@
+[package]
+name = "zerogc-next-mimalloc-semisafe"
+description = "Somewhat safe bindings for mimalloc, used by zerogc-next"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libmimalloc-sys = { version = "0.1.37", features = ["extended"] }
+allocator-api2 = "0.2.18"
+
+[features]
+# Use the "real" nightly allocator api instead of allocator-api2
+nightly-allocapi = ["allocator-api2/nightly"]
