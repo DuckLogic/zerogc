@@ -54,7 +54,6 @@ use core::cmp::Ordering;
 use core::fmt::{self, Debug, Display, Formatter};
 use core::hash::{Hash, Hasher};
 use core::marker::{PhantomData, Unsize};
-use core::mem::{self};
 use core::ops::{CoerceUnsized, Deref, DerefMut};
 use core::ptr::NonNull;
 
@@ -68,268 +67,12 @@ mod macros;
 pub mod cell;
 pub mod prelude;
 
-/// A garbage collector implementation.
-///
-/// These implementations should be completely safe and zero-overhead.
+/// A garbage collector implementation,
+/// conforming to the zerogc API.
 pub unsafe trait GcSystem {
     /// The type of collector IDs given by this system
     type Id: CollectorId;
-    /// The type of contexts used in this sytem
-    type Context: GcContext<Id = Self::Id>;
 }
-
-/// The context of garbage collection,
-/// which can be frozen at a safepoint.
-///
-/// This is essentially used to maintain a shadow-stack to a set of roots,
-/// which are guarenteed not to be collected until a safepoint.
-///
-/// This context doesn't necessarily support allocation (see [GcSimpleAlloc] for that).
-pub unsafe trait GcContext: Sized {
-    /// The system used with this context
-    type System: GcSystem<Context = Self, Id = Self::Id>;
-    /// The type of ids used in the system
-    type Id: CollectorId;
-
-    /// Potentially perform a garbage collection, freeing
-    /// all objects that aren't reachable from the specified root.
-    ///
-    /// This is a less safe version of [GcContext::basic_safepoint]
-    /// that doesn't explicitly mark this context as "mutated".
-    /// However, just like any other safepoint,
-    /// it still logically invalidates all unreachable objects
-    /// because the collector might free them.
-    ///
-    /// ## Safety
-    /// All objects that are potentially in-use must be reachable from the specified root.
-    /// Otherwise, they may be accidentally freed during garbage collection.
-    ///
-    /// It is the user's responsibility to check this,
-    /// since this doesn't statically invalidate (or mutate)
-    /// the outstanding references.
-    unsafe fn unchecked_safepoint<T: Trace>(&self, root: &mut &mut T);
-
-    /// Potentially perform a garbage collection, freeing
-    /// all objects that aren't reachable from the specified root.
-    ///
-    /// This is what the [safepoint!] macro expands to internally.
-    /// For example
-    /// ```no_run
-    /// # use zerogc::prelude::*;
-    /// # use zerogc_derive::Trace;
-    /// # use zerogc::epsilon::{Gc, EpsilonCollectorId, EpsilonContext as ExampleContext};
-    /// # #[derive(Trace)]
-    /// # struct Obj { val: u32 }
-    /// fn example<'gc>(ctx: &'gc mut ExampleContext, root: Gc<'gc, Obj>) {
-    ///     let temp = ctx.alloc(Obj { val: 12 }); // Lives until the call to 'basic_safepoint'
-    ///     assert_eq!(temp.val, 12); // VALID
-    ///     // This is what `let root = safepoint!(ctx, root)` would expand to:
-    ///     let root = unsafe {
-    ///         /*
-    ///          * Change the lifetime of root from 'gc -> 'static
-    ///          * This is necessary so the mutation of 'basic_safepoint'
-    ///          * wont invalidate it.
-    ///          */
-    ///         let mut preserved_root: Gc<'static, Obj> = ctx.rebrand_static(root);
-    ///         /*
-    ///          * This invalidates 'temp' (because it mutates the owning context)
-    ///          * However, preserved_root is fine because it has been changed the 'static
-    ///          * lifetime.
-    ///          */
-    ///         ctx.basic_safepoint(&mut &mut preserved_root);
-    ///         /*
-    ///          *  It would be unsafe for the user to access
-    ///          * preserved_root, because its lifetime of 'static is too large.
-    ///          * The call to 'rebrand_self' changes the lifetime of preserved_root
-    ///          * back to the (new) lifetime of the context.
-    ///          *
-    ///          * The safe result is returned as the result of the block.
-    ///          * The user has chosen to re-assign the result to the `root` variable
-    ///          * via `let root = safepoint!(ctx, root)`.
-    ///          */
-    ///         ctx.rebrand_self(preserved_root)
-    ///     };
-    ///     // assert_eq!(temp.val, 12); // INVALID. `temp` was mutated and bound to the old lifetime
-    ///     assert_eq!(root.val, 4); // VALID - The lifetime has been updated
-    /// }
-    /// ```
-    ///
-    /// ## Safety
-    /// Any garbage collected objects not reachable from the roots
-    /// are invalidated after this method.
-    ///
-    /// The user must ensure that invalidated objects are not used
-    /// after the safepoint,
-    /// although the (logical) mutation of the context
-    /// should significantly assist with that.
-    #[inline]
-    unsafe fn basic_safepoint<T: Trace>(&mut self, root: &mut &mut T) {
-        self.unchecked_safepoint(root)
-    }
-
-    /// Inform the garbage collection system we are at a safepoint
-    /// and are ready for a potential garbage collection.
-    ///
-    /// Unlike a `basic_safepoint`, the collector continues to
-    /// stay at the safepoint instead of returning immediately.
-    /// The context can't be used for anything (including allocations),
-    /// until it is unfrozen.
-    ///
-    /// This allows other threads to perform collections while this
-    /// thread does other work (without using the GC).
-    ///
-    /// The current contexts roots are considered invalid
-    /// for the duration of the collection,
-    /// since the collector could potentially relocate them.
-    ///
-    /// Any parent contexts are fine and their roots will be
-    /// preserved by collections.
-    ///
-    /// ## Safety
-    /// Assumes this context is valid and not already frozen.
-    ///
-    /// Don't invoke this directly
-    unsafe fn freeze(&mut self);
-
-    /// Unfreeze this context, allowing it to be used again.
-    ///
-    /// ## Safety
-    /// Must be a valid context!
-    /// Must be currently frozen!
-    ///
-    /// Don't invoke this directly
-    unsafe fn unfreeze(&mut self);
-
-    /// Rebrand to the specified root so that it
-    /// lives for the `'static` lifetime.
-    ///
-    /// ## Safety
-    /// This function is unsafe to use directly.
-    ///
-    /// It should only be used as part of the [safepoint!] macro.
-    #[inline(always)]
-    unsafe fn rebrand_static<T>(&self, value: T) -> T::Branded
-    where
-        T: GcRebrand<'static, Self::Id>,
-        T::Branded: Sized,
-    {
-        let branded = mem::transmute_copy(&value);
-        mem::forget(value);
-        branded
-    }
-    /// Rebrand the specified root so that it
-    /// lives for the lifetime of this context.
-    ///
-    /// This effectively undoes the effect of [GcContext::rebrand_static].
-    ///
-    /// ## Safety
-    /// This function is unsafe to use directly.
-    ///
-    /// It should only be used as part of the [safepoint!] macro.
-    #[inline(always)]
-    unsafe fn rebrand_self<'gc, T>(&'gc self, value: T) -> T::Branded
-    where
-        T: GcRebrand<'gc, Self::Id>,
-        T::Branded: Sized,
-    {
-        let branded = mem::transmute_copy(&value);
-        mem::forget(value);
-        branded
-    }
-
-    /// Invoke the closure with a temporary [GcContext],
-    /// preserving the specified object as a root of garbage collection.
-    ///
-    /// This will add the specified root to the shadow stack
-    /// before invoking the closure. Therefore, any safepoints
-    /// invoked inside the closure/sub-function will implicitly preserve all
-    /// objects reachable from the root in the parent function.
-    ///
-    /// This doesn't nessicarrily imply a safepoint,
-    /// although its wrapper macro ([safepoint_recurse!]) typically does.
-    ///
-    /// ## Safety
-    /// All objects that are in use must be reachable from the specified root.
-    ///
-    /// The specified closure could trigger a collection in the sub-context,
-    /// so all live objects in the parent function need to be reachable from
-    /// the specified root.
-    ///
-    /// See the [safepoint_recurse!] macro for a safe wrapper
-    unsafe fn recurse_context<T, F, R>(&self, root: &mut &mut T, func: F) -> R
-    where
-        T: Trace,
-        F: for<'gc> FnOnce(&'gc mut Self, &'gc mut T) -> R;
-
-    /// Get the [GcSystem] associated with this context
-    fn system(&self) -> &'_ Self::System;
-
-    /// Get the id of this context
-    fn id(&self) -> Self::Id;
-}
-/// A simple interface to allocating from a [GcContext].
-///
-/// Some garbage collectors implement more complex interfaces,
-/// so implementing this is optional
-pub unsafe trait GcSimpleAlloc: GcContext {
-    /// Allocate room for a object in, but don't finish initializing it.
-    ///
-    /// ## Safety
-    /// The object **must** be initialized by the time the next collection
-    /// rolls around, so that the collector can properly trace it
-    unsafe fn alloc_uninit<'gc, T>(&'gc self) -> *mut T
-    where
-        T: GcSafe<'gc, Self::Id>;
-
-    /// Allocate the specified object in this garbage collector,
-    /// binding it to the lifetime of this collector.
-    ///
-    /// The object will never be collected until the next safepoint,
-    /// which is considered a mutation by the borrow checker and will be statically checked.
-    /// Therefore, we can statically guarantee the pointers will survive until the next safepoint.
-    ///
-    /// See `safepoint!` docs on how to properly invoke a safepoint
-    /// and transfer values across it.
-    ///
-    /// This gives a immutable reference to the resulting object.
-    /// Once allocated, the object can only be correctly modified with a `GcCell`
-    #[inline]
-    fn alloc<'gc, T>(&'gc self, value: T) -> Gc<'gc, T, Self::Id>
-    where
-        T: GcSafe<'gc, Self::Id>,
-    {
-        unsafe {
-            let ptr = self.alloc_uninit::<T>();
-            ptr.write(value);
-            Gc::from_raw(NonNull::new_unchecked(ptr))
-        }
-    }
-}
-/// The internal representation of a frozen context
-///
-/// ## Safety
-/// Don't use this directly!!!
-#[doc(hidden)]
-#[must_use]
-pub struct FrozenContext<C: GcContext> {
-    /// The frozen context
-    context: C,
-}
-impl<C: GcContext> FrozenContext<C> {
-    #[doc(hidden)]
-    #[inline]
-    pub unsafe fn new(context: C) -> Self {
-        FrozenContext { context }
-    }
-    #[doc(hidden)]
-    #[inline]
-    pub unsafe fn into_context(self) -> C {
-        self.context
-    }
-}
-
-/// A trait alias for [CollectorId]s that support [GcSimpleAlloc]
-pub trait SimpleAllocCollectorId = CollectorId where <Self as CollectorId>::Context: GcSimpleAlloc;
 
 /// A [CollectorId] that supports allocating [GcHandle]s
 ///
@@ -372,9 +115,7 @@ pub unsafe trait CollectorId:
     Copy + Eq + Hash + Debug + NullTrace + TrustedDrop + 'static + for<'gc> GcSafe<'gc, Self>
 {
     /// The type of the garbage collector system
-    type System: GcSystem<Id = Self, Context = Self::Context>;
-    /// The type of [GcContext] associated with this id.
-    type Context: GcContext<System = Self::System, Id = Self>;
+    type System: GcSystem<Id = Self>;
 
     /// Get the runtime id of the collector that allocated the [Gc]
     ///
@@ -468,7 +209,7 @@ pub struct Gc<'gc, T: ?Sized, Id: CollectorId> {
     ///
     /// The runtime instance of this value can be
     /// computed from the pointer itself: `NonNull<T>` -> `&CollectorId`
-    collector_id: PhantomData<&'gc Id::Context>,
+    collector_id: PhantomData<&'gc Id::System>,
 }
 impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
     /// Create a GC pointer from a raw pointer
@@ -742,21 +483,6 @@ pub unsafe trait GcHandle<T: GcSafe<'static, Self::Id> + ?Sized>:
      * How much does it limit flexibility?
      */
     fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R;
-
-    /// Associate this handle with the specified context,
-    /// allowing its underlying object to be accessed
-    /// as long as the context is valid.
-    ///
-    /// The underlying object can be accessed just like any
-    /// other object that would be allocated from the context.
-    /// It'll be properly collected and can even be used as a root
-    /// at the next safepoint.
-    fn bind_to<'new_gc>(
-        &self,
-        context: &'new_gc <Self::System as GcSystem>::Context,
-    ) -> Gc<'new_gc, <T as GcRebrand<'new_gc, Self::Id>>::Branded, Self::Id>
-    where
-        T: GcRebrand<'new_gc, Self::Id>;
 }
 
 /// Safely trigger a write barrier before

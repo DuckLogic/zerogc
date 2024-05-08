@@ -6,7 +6,7 @@
 //! collected program needs to use the API.
 
 // Basic collector types
-pub use crate::{Gc, GcContext, GcHandle, GcSimpleAlloc, GcSystem, GcVisitor, HandleCollectorId};
+pub use crate::{Gc, GcHandle, GcSystem, GcVisitor, HandleCollectorId};
 // Traits for user code to implement
 pub use crate::cell::GcCell;
 pub use crate::AssumeNotTraced;
