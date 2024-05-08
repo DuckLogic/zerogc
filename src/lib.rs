@@ -56,33 +56,17 @@ use core::hash::{Hash, Hasher};
 use core::marker::{PhantomData, Unsize};
 use core::mem::{self};
 use core::ops::{CoerceUnsized, Deref, DerefMut};
-use core::ptr::{DynMetadata, NonNull, Pointee};
+use core::ptr::NonNull;
 
-use vec::raw::GcRawVec;
 use zerogc_derive::unsafe_gc_impl;
 pub use zerogc_derive::{NullTrace, Trace};
 
-pub use crate::array::GcArray;
-use crate::vec::GcVec;
-
-#[macro_use] // We have macros in here!
-#[cfg(feature = "serde1")]
-pub mod serde;
 #[macro_use]
 mod manually_traced;
 #[macro_use]
 mod macros;
-#[cfg(feature = "allocator-api")]
-pub mod allocator;
-pub mod array;
 pub mod cell;
-pub mod epsilon;
-#[cfg(feature = "errors")]
-pub mod errors;
-#[cfg(feature = "hashmap-impl")]
-pub mod hash_map;
 pub mod prelude;
-pub mod vec;
 
 /// Invoke the closure with a temporary [GcContext],
 /// then perform a safepoint afterwards.
@@ -456,6 +440,7 @@ pub unsafe trait GcSimpleAlloc: GcContext {
     unsafe fn alloc_uninit<'gc, T>(&'gc self) -> *mut T
     where
         T: GcSafe<'gc, Self::Id>;
+
     /// Allocate the specified object in this garbage collector,
     /// binding it to the lifetime of this collector.
     ///
@@ -478,150 +463,6 @@ pub unsafe trait GcSimpleAlloc: GcContext {
             ptr.write(value);
             Gc::from_raw(NonNull::new_unchecked(ptr))
         }
-    }
-    /// Allocate a [GcString](`crate::array::GcString`), copied from the specified source
-    #[inline]
-    fn alloc_str<'gc>(&'gc self, src: &str) -> array::GcString<'gc, Self::Id> {
-        let bytes = self.alloc_slice_copy(src.as_bytes());
-        // SAFETY: Guaranteed by the original `src`
-        unsafe { array::GcString::from_utf8_unchecked(bytes) }
-    }
-
-    /// Wrap the specified error in a dynamically dispatched [GcError](`self::errors::GcError`)
-    ///
-    /// Uses a [GcHandle] to ensure the result lives for `'static`,
-    /// and thus can implement `std::error::Error` and conversion into `anyhow::Error`.
-    #[cfg(feature = "errors")]
-    #[cold]
-    fn alloc_error<'gc, T>(&'gc self, src: T) -> crate::errors::GcError<Self::Id>
-    where
-        T: crate::errors::GcErrorType<'gc, Self::Id>,
-        <T as GcRebrand<'static, Self::Id>>::Branded: 'static,
-        Self::Id: HandleCollectorId,
-    {
-        crate::errors::GcError::from_gc_allocated(self.alloc(src))
-    }
-
-    /// Allocate a slice with the specified length,
-    /// whose memory is uninitialized
-    ///
-    /// ## Safety
-    /// The slice **MUST** be initialized by the next safepoint.
-    /// By the time the next collection rolls around,
-    /// the collector will assume its entire contents are initialized.
-    ///
-    /// In particular, the traditional way to implement a [Vec] is wrong.
-    /// It is unsafe to leave the range of memory `[len, capacity)` uninitialized.
-    unsafe fn alloc_uninit_slice<'gc, T>(&'gc self, len: usize) -> *mut T
-    where
-        T: GcSafe<'gc, Self::Id>;
-    /// Allocate a slice, copied from the specified input
-    fn alloc_slice_copy<'gc, T>(&'gc self, src: &[T]) -> GcArray<'gc, T, Self::Id>
-    where
-        T: GcSafe<'gc, Self::Id> + Copy,
-    {
-        unsafe {
-            let res_ptr = self.alloc_uninit_slice::<T>(src.len());
-            res_ptr.copy_from_nonoverlapping(src.as_ptr(), src.len());
-            GcArray::from_raw_ptr(NonNull::new_unchecked(res_ptr), src.len())
-        }
-    }
-    /// Allocate an array, taking ownership of the values in
-    /// the specified vec.
-    #[inline]
-    #[cfg(any(feature = "alloc", feature = "std"))]
-    fn alloc_array_from_vec<'gc, T>(&'gc self, mut src: Vec<T>) -> GcArray<'gc, T, Self::Id>
-    where
-        T: GcSafe<'gc, Self::Id>,
-    {
-        unsafe {
-            let ptr = src.as_ptr();
-            let len = src.len();
-            /*
-             * NOTE: Don't steal ownership of the
-             * source Vec until *after* we allocate.
-             *
-             * It is possible allocation panics in
-             * which case we want to free the source elements.
-             */
-            let dest = self.alloc_uninit_slice::<T>(len);
-            /*
-             * NOTE: From here to the end,
-             * we should be infallible.
-             */
-            src.set_len(0);
-            dest.copy_from_nonoverlapping(ptr, len);
-            let res = GcArray::from_raw_ptr(NonNull::new_unchecked(ptr as *mut _), len);
-            drop(src);
-            res
-        }
-    }
-    /// Allocate a slice by filling it with results from the specified closure.
-    ///
-    /// The closure receives the target index as its only argument.
-    ///
-    /// ## Safety
-    /// The closure must always succeed and never panic.
-    ///
-    /// Otherwise, the gc may end up tracing the values even though they are uninitialized.
-    #[inline]
-    unsafe fn alloc_slice_fill_with<'gc, T, F>(
-        &'gc self,
-        len: usize,
-        mut func: F,
-    ) -> GcArray<'gc, T, Self::Id>
-    where
-        T: GcSafe<'gc, Self::Id>,
-        F: FnMut(usize) -> T,
-    {
-        let res_ptr = self.alloc_uninit_slice::<T>(len);
-        for i in 0..len {
-            res_ptr.add(i).write(func(i));
-        }
-        GcArray::from_raw_ptr(NonNull::new_unchecked(res_ptr), len)
-    }
-    /// Allocate a slice of the specified length,
-    /// initializing everything to `None`
-    #[inline]
-    fn alloc_slice_none<'gc, T>(&'gc self, len: usize) -> GcArray<'gc, Option<T>, Self::Id>
-    where
-        T: GcSafe<'gc, Self::Id>,
-    {
-        unsafe { self.alloc_slice_fill_with(len, |_idx| None) }
-    }
-    /// Allocate a slice by repeatedly copying a single value.
-    #[inline]
-    fn alloc_slice_fill_copy<'gc, T>(&'gc self, len: usize, val: T) -> GcArray<'gc, T, Self::Id>
-    where
-        T: GcSafe<'gc, Self::Id> + Copy,
-    {
-        unsafe { self.alloc_slice_fill_with(len, |_idx| val) }
-    }
-    /// Create a new [GcRawVec] with the specified capacity
-    /// and an implicit reference to this [GcContext].
-    fn alloc_raw_vec_with_capacity<'gc, T>(
-        &'gc self,
-        capacity: usize,
-    ) -> <Self::Id as CollectorId>::RawVec<'gc, T>
-    where
-        T: GcSafe<'gc, Self::Id>;
-    /// Create a new [GcVec] with zero initial length,
-    /// with an implicit reference to this [GcContext].
-    #[inline]
-    fn alloc_vec<'gc, T>(&'gc self) -> GcVec<'gc, T, Self::Id>
-    where
-        T: GcSafe<'gc, Self::Id>,
-    {
-        unsafe { crate::vec::GcVec::from_raw(self.alloc_raw_vec_with_capacity::<T>(0)) }
-    }
-    /// Allocate a new [GcVec] with the specified capacity
-    /// and an implicit reference to this [GcContext]
-    #[inline]
-    fn alloc_vec_with_capacity<'gc, T>(&'gc self, capacity: usize) -> GcVec<'gc, T, Self::Id>
-    where
-        T: GcSafe<'gc, Self::Id>,
-    {
-        unsafe { crate::vec::GcVec::from_raw(self.alloc_raw_vec_with_capacity::<T>(capacity)) }
     }
 }
 /// The internal representation of a frozen context
@@ -694,13 +535,6 @@ pub unsafe trait CollectorId:
     type System: GcSystem<Id = Self, Context = Self::Context>;
     /// The type of [GcContext] associated with this id.
     type Context: GcContext<System = Self::System, Id = Self>;
-    /// The implementation of [GcRawVec] for this type.
-    ///
-    /// May be [crate::vec::raw::Unsupported] if vectors are unsupported.
-    type RawVec<'gc, T: GcSafe<'gc, Self>>: crate::vec::raw::GcRawVec<'gc, T, Id = Self>;
-    /// The raw representation of `GcArray` pointers
-    /// in this collector.
-    type ArrayPtr: crate::array::repr::GcArrayPtr<Id = Self>;
 
     /// Get the runtime id of the collector that allocated the [Gc]
     ///
@@ -710,16 +544,6 @@ pub unsafe trait CollectorId:
     where
         T: ?Sized,
         'gc: 'a;
-
-    /// Resolve the CollectorId for the specified [GcArray]'s representation.
-    ///
-    /// This is the [GcArray] counterpart of `from_gc_ptr`
-    fn resolve_array_id<'a, 'gc, T>(array: &'a GcArray<'gc, T, Self>) -> &'a Self
-    where
-        'gc: 'a;
-
-    /// Resolve the length of the specified array
-    fn resolve_array_len<T>(repr: &GcArray<'_, T, Self>) -> usize;
 
     /// Perform a write barrier before writing to a garbage collected field
     ///
@@ -1512,39 +1336,6 @@ pub unsafe trait GcVisitor: Sized {
     /// ## Safety
     /// Undefined behavior if the GC pointer isn't properly visited.
     unsafe fn trace_gc<'gc, T, Id>(&mut self, gc: &mut Gc<'gc, T, Id>) -> Result<(), Self::Err>
-    where
-        T: GcSafe<'gc, Id>,
-        Id: CollectorId;
-
-    /// Visit a garbage collected trait object.
-    ///
-    /// ## Safety
-    /// The trait object must point to a garbage collected object.
-    unsafe fn trace_trait_object<'gc, T, Id>(
-        &mut self,
-        gc: &mut Gc<'gc, T, Id>,
-    ) -> Result<(), Self::Err>
-    where
-        T: ?Sized + GcSafe<'gc, Id> + Pointee<Metadata = DynMetadata<T>> + DynTrace<'gc, Id>,
-        Id: CollectorId;
-
-    /// Visit a garbage collected vector.
-    ///
-    /// ## Safety
-    /// Undefined behavior if the vector is invalid.
-    unsafe fn trace_vec<'gc, T, V>(&mut self, raw: &mut V) -> Result<(), Self::Err>
-    where
-        T: GcSafe<'gc, V::Id>,
-        V: GcRawVec<'gc, T>;
-
-    /// Visit a garbage collected array.
-    ///
-    /// ## Safety
-    /// Undefined behavior if the array is invalid.
-    unsafe fn trace_array<'gc, T, Id>(
-        &mut self,
-        array: &mut GcArray<'gc, T, Id>,
-    ) -> Result<(), Self::Err>
     where
         T: GcSafe<'gc, Id>,
         Id: CollectorId;

@@ -52,7 +52,7 @@ license = "MIT"
 edition = "2018"
 
 [features]
-default = ["std", "epsilon", "epsilon-arena-alloc"]
+default = ["std"]
 # Depend on the standard library (optional)
 #
 # This implements tracing for most standard library types.
@@ -62,20 +62,3 @@ std = ["alloc"]
 #
 # This implements `Trace` for `Box` and collections like `Vec`
 alloc = []
-# Emulate the `core::alloc::Allocator` api
-#
-# NOTE: This doesn't *necessarily* require the 'alloc'
-# feature (because the API itself is in 'core')
-allocator-api = []
-# Our custom hashmap implementation
-hashmap-impl = ["allocator-api", "hashbrown", "ahash"]
-# Support a 'GcError' type that implements 'std::error::Error'
-# by wrapping a 'GcHandle'
-errors = []
-# Serde support
-serde1 = ["serde", "zerogc-derive/__serde-internal", "arrayvec/serde", "indexmap/serde-1", "hashbrown/serde"]
-# Support the "epsilon" no-op collector
-epsilon = []
-# Configure the "epsilon" collector use arena allocation
-# (on by default)
-epsilon-arena-alloc = ["epsilon", "bumpalo"]
