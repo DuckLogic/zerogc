@@ -16,7 +16,7 @@ use core::cell::Cell;
 
 use zerogc_derive::unsafe_gc_impl;
 
-use crate::{CollectorId, GcDirectBarrier, GcRebrand, GcSafe, NullTrace, Trace};
+use crate::prelude::*;
 
 /// A `Cell` pointing to a garbage collected object.
 ///

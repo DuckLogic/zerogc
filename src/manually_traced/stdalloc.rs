@@ -2,13 +2,10 @@
 //!
 //! These can be used in `#![no_std]` crates without requiring
 //! the entire standard library.
-#[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-#[cfg(not(feature = "std"))]
 use alloc::string::String;
 use alloc::sync::Arc;
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use crate::prelude::*;
