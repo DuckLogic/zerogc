@@ -23,7 +23,6 @@ unsafe_gc_impl! {
         // Delegate to slice
         visitor.#trace_func::<[T]>(#b**self as #b [T])
     },
-    deserialize => unstable_horrible_hack,
 }
 unsafe_gc_impl! {
     target => Box<T>,
@@ -35,7 +34,6 @@ unsafe_gc_impl! {
     trace_template => |self, visitor| {
         visitor.#trace_func::<T>(#b **self)
     },
-    deserialize => unstable_horrible_hack,
 }
 // We can only trace `Rc` and `Arc` if the inner type implements `TraceImmutable`
 unsafe_gc_impl! {
