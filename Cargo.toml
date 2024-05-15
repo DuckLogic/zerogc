@@ -62,3 +62,5 @@ std = ["alloc"]
 #
 # This implements `Trace` for `Box` and collections like `Vec`
 alloc = []
+# Use nightly features
+nightly = ["zerogc-derive/nightly"]

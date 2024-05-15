@@ -1,19 +1,8 @@
-#![feature(
-    ptr_metadata, // RFC 2580 - Pointer meta
-    coerce_unsized, // RFC 0982 - DST coercion
+// Unstable features
+#![cfg_attr(feature = "nightly", feature(
+    coerce_unsized,  // RFC 0982 - DST coercion
     unsize,
-    trait_alias, // RFC 1733 - Trait aliases
-    // Needed for epsilon collector:
-    negative_impls, // More elegant than marker types
-    alloc_layout_extra,
-    const_mut_refs,
-    const_option,
-    slice_range, // Convenient for bounds checking :)
-)]
-#![cfg_attr(feature = "error", backtrace)]
-#![cfg_attr(feature = "allocator-api", feature(allocator_api))]
-#![feature(maybe_uninit_slice)]
-#![feature(new_uninit)]
+))]
 #![deny(missing_docs)]
 #![allow(
     clippy::missing_safety_doc, // TODO: Add missing safety docs and make this #[deny(...)]

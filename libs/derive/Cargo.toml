@@ -26,3 +26,6 @@ proc-macro-kwargs = "0.1.1"
 indexmap = "1"
 itertools = "0.10.1"
 
+
+[features]
+nightly = []

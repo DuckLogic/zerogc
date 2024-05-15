@@ -310,16 +310,6 @@ pub unsafe trait GcSafe<'gc, Id: CollectorId>: Trace + TrustedDrop {
         V: GcVisitor;
 }
 
-/// A [GcSafe] type with all garbage-collected pointers
-/// erased to the `'static`  type.
-///
-/// This should generally only be used by internal code.
-///
-/// ## Safety
-/// This type is incredibly unsafe. It eliminates all the safety invariants
-/// of lifetimes.
-pub trait GcSafeErased<Id: CollectorId> = GcSafe<'static, Id>;
-
 /// A wrapper type that assumes its contents don't need to be traced
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug)]

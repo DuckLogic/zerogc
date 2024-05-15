@@ -12,7 +12,7 @@ use syn::{
     Path, PathArguments, Type, TypeParam, TypePath,
 };
 
-use crate::{FromLitStr, MetaList};
+use crate::{FromLitStr, MetaList, WarningList};
 
 type ExpandFunc<'a> = &'a mut dyn FnMut(
     TraceDeriveKind,
@@ -79,9 +79,9 @@ impl TraceGenerics {
             .iter()
             .filter(|param| !param.ignore && !param.collector_id)
     }
-    fn normalize(&mut self) -> Result<(), Error> {
+    fn normalize(&mut self, warnings: &WarningList) -> Result<(), Error> {
         for tp in &mut self.type_params {
-            tp.normalize()?;
+            tp.normalize(warnings)?;
         }
         if let Some(ref gc) = self.gc_lifetime {
             if self.ignored_lifetimes.contains(gc) {
@@ -158,7 +158,7 @@ pub struct TraceTypeParam {
     collector_id: bool,
 }
 impl TraceTypeParam {
-    fn normalize(&mut self) -> Result<(), Error> {
+    fn normalize(&mut self, warnings: &WarningList) -> Result<(), Error> {
         if self.ignore && self.collector_id {
             return Err(Error::custom(
                 "Type parameter can't be ignored but also collector_id",
@@ -166,6 +166,7 @@ impl TraceTypeParam {
         }
         if self.ident == "Id" && !self.collector_id {
             crate::emit_warning(
+                warnings,
                 "Type parameter is named `Id` but isn't marked #[zerogc(collector_id)]. Specify collector_id = false if this is intentional.",
                 self.ident.span()
             )
@@ -431,9 +432,14 @@ impl TraceDeriveInput {
             .cloned()
             .collect()
     }
-    pub fn normalize(&mut self, kind: TraceDeriveKind) -> Result<(), Error> {
+    pub fn normalize(
+        &mut self,
+        kind: TraceDeriveKind,
+        warnings: &WarningList,
+    ) -> Result<(), Error> {
         if *self.nop_trace {
             crate::emit_warning(
+                warnings,
                 "#[zerogc(nop_trace)] is deprecated (use #[derive(NullTrace)] instead)",
                 self.nop_trace.span(),
             )
@@ -475,7 +481,7 @@ impl TraceDeriveInput {
                 tp.collector_id = true;
             }
         }
-        self.generics.normalize()?;
+        self.generics.normalize(warnings)?;
 
         if self.is_copy && self.unsafe_skip_drop {
             return Err(Error::custom(
@@ -484,6 +490,7 @@ impl TraceDeriveInput {
         }
         if self.is_copy && matches!(kind, TraceDeriveKind::NullTrace) {
             crate::emit_warning(
+                warnings,
                 "#[zerogc(copy)] is meaningless on NullTrace",
                 self.ident.span(),
             )

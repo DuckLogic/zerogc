@@ -16,7 +16,7 @@ use syn::{
     PathArguments, PredicateType, Token, Type, TypeParamBound, WhereClause, WherePredicate,
 };
 
-use super::zerogc_crate;
+use super::{zerogc_crate, WarningList};
 use indexmap::{indexmap, IndexMap};
 use quote::{quote, quote_spanned};
 use syn::ext::IdentExt;
@@ -202,6 +202,7 @@ impl MacroInput {
         generics
     }
     pub fn expand_output(&self) -> Result<TokenStream, Error> {
+        let warnings = WarningList::new();
         let zerogc_crate = zerogc_crate();
         let target_type = &self.target_type;
         let trace_impl = self.expand_trace_impl(true)?.expect("Trace impl required");
@@ -226,10 +227,11 @@ impl MacroInput {
         } else {
             quote!()
         };
-        let deserialize_impl = self.expand_deserialize_impl()?;
+        let deserialize_impl = self.expand_deserialize_impl(&warnings)?;
         let rebrand_impl = self.expand_rebrand_impl()?;
         let trusted_drop = self.expand_trusted_drop_impl();
         Ok(quote! {
+            #warnings
             #trace_impl
             #trace_immutable_impl
             #trusted_drop
@@ -335,7 +337,10 @@ impl MacroInput {
         })
     }
 
-    fn expand_deserialize_impl(&self) -> Result<Vec<Option<TokenStream>>, Error> {
+    fn expand_deserialize_impl(
+        &self,
+        warnings: &WarningList,
+    ) -> Result<Vec<Option<TokenStream>>, Error> {
         let zerogc_crate = zerogc_crate();
         let target_type = &self.target_type;
         let strategy = match self.deserialize_strategy {
@@ -369,7 +374,7 @@ impl MacroInput {
                     };
                     match replaced_params.segments.last_mut().unwrap().arguments {
                         PathArguments::None => {
-                            crate::emit_warning(r##"The "horrible hack" isn't necessary if the type doesn't have generic args...."##, span);
+                            crate::emit_warning(warnings, r##"The "horrible hack" isn't necessary if the type doesn't have generic args...."##, span);
                         },
                         PathArguments::Parenthesized(_) => {
                             return Err(Error::new(

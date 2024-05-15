@@ -3,9 +3,15 @@
 use core::cmp::Ordering;
 use core::fmt::{self, Debug, Display, Formatter};
 use core::hash::{Hash, Hasher};
-use core::marker::{PhantomData, Unsize};
-use core::ops::{CoerceUnsized, Deref};
+use core::marker::PhantomData;
+use core::ops::Deref;
 use core::ptr::NonNull;
+
+// nightly feature: Unsized coercion
+#[cfg(feature = "nightly")]
+use std::marker::Unsize;
+#[cfg(feature = "nightly")]
+use std::ops::CoerceUnsized;
 
 use crate::system::{CollectorId, HandleCollectorId};
 use crate::trace::barrier::GcDirectBarrier;
@@ -284,6 +290,7 @@ where
 {
 }
 
+#[cfg(feature = "nightly")] // nightly feature: CoerceUnsized
 impl<'gc, T, U, Id> CoerceUnsized<Gc<'gc, U, Id>> for Gc<'gc, T, Id>
 where
     T: ?Sized + GcSafe<'gc, Id> + Unsize<U>,
