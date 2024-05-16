@@ -13,7 +13,7 @@ use std::marker::Unsize;
 #[cfg(feature = "nightly")]
 use std::ops::CoerceUnsized;
 
-use crate::system::{CollectorId, HandleCollectorId};
+use crate::system::CollectorId;
 use crate::trace::barrier::GcDirectBarrier;
 use crate::trace::{GcRebrand, GcSafe, GcVisitor, Trace, TrustedDrop};
 
@@ -91,19 +91,6 @@ impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
             collector_id: PhantomData,
             value,
         }
-    }
-    /// Create a [GcHandle] referencing this object,
-    /// allowing it to be used without a context
-    /// and referenced across safepoints.
-    ///
-    /// Requires that the collector [supports handles](`HandleCollectorId`)
-    #[inline]
-    pub fn create_handle(&self) -> Id::Handle<T::Branded>
-    where
-        Id: HandleCollectorId,
-        T: GcRebrand<'static, Id>,
-    {
-        Id::create_handle(*self)
     }
 
     /// Get a reference to the system

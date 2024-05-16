@@ -3,37 +3,13 @@
 use core::fmt::Debug;
 use core::hash::Hash;
 
-use crate::trace::{Gc, GcRebrand, GcSafe, NullTrace, TrustedDrop};
+use crate::trace::{Gc, GcSafe, NullTrace, TrustedDrop};
 
 /// A garbage collector implementation,
 /// conforming to the zerogc API.
 pub unsafe trait GcSystem {
     /// The type of collector IDs given by this system
     type Id: CollectorId;
-}
-
-/// A [CollectorId] that supports allocating [GcHandle]s
-///
-/// Not all collectors necessarily support handles.
-pub unsafe trait HandleCollectorId: CollectorId {
-    /// The type of [GcHandle] for this collector.
-    ///
-    /// This is parameterized by the *erased* type,
-    /// not by the original type.
-    type Handle<T>: GcHandle<T, System = Self::System, Id = Self>
-    where
-        T: GcSafe<'static, Self> + ?Sized;
-
-    /// Create a handle to the specified GC pointer,
-    /// which can be used without a context
-    ///
-    /// NOTE: Users should only use from [Gc::create_handle].
-    ///
-    /// The system is implicit in the [Gc]
-    #[doc(hidden)]
-    fn create_handle<'gc, T>(gc: Gc<'gc, T, Self>) -> Self::Handle<T::Branded>
-    where
-        T: GcSafe<'gc, Self> + GcRebrand<'static, Self> + ?Sized;
 }
 
 /// Uniquely identifies the collector in case there are
@@ -85,53 +61,4 @@ pub unsafe trait CollectorId:
     /// ## Safety
     /// Undefined behavior if the associated collector no longer exists.
     unsafe fn assume_valid_system(&self) -> &Self::System;
-}
-
-/// A owned handle which points to a garbage collected object.
-///
-/// This is considered a root by the garbage collector that is independent
-/// of any specific [GcContext]. Safepoints
-/// don't need to be informed of this object for collection to start.
-/// The root is manually managed by user-code, much like a [Box] or
-/// a reference counted pointer.
-///
-/// This can be cloned and stored independently from a context,
-/// bridging the gap between native memory and managed memory.
-/// These are useful to pass to C APIs or any other code
-/// that doesn't cooperate with zerogc.
-///
-/// ## Tracing
-/// The object behind this handle is already considered a root of the collection.
-/// It should always be considered reachable by the garbage collector.
-///
-/// Validity is tracked by this smart-pointer and not by tracing.
-/// Therefore it is safe to implement [NullTrace] for handles.
-/*
- * TODO: Should we drop the Clone requirement?
- */
-pub unsafe trait GcHandle<T: GcSafe<'static, Self::Id> + ?Sized>:
-    Sized + Clone + NullTrace + for<'gc> GcSafe<'gc, Self::Id>
-{
-    /// The type of the system used with this handle
-    type System: GcSystem<Id = Self::Id>;
-    /// The type of [CollectorId] used with this sytem
-    type Id: CollectorId;
-
-    /// Access this handle inside the closure,
-    /// possibly associating it with the specified
-    ///
-    /// This is accesses the object within "critical section"
-    /// that will **block collections**
-    /// for as long as the closure is in use.
-    ///
-    /// These calls cannot be invoked recursively or they
-    /// may cause a deadlock.
-    ///
-    /// This is similar in purpose to JNI's [GetPrimitiveArrayCritical](https://docs.oracle.com/javase/8/docs/technotes/guides/jni/spec/functions.html#GetPrimitiveArrayCritical_ReleasePrimitiveArrayCritical).
-    /// However it never performs a copy, it is just guarenteed to block any collections.
-    /*
-     * TODO: Should we require this of all collectors?
-     * How much does it limit flexibility?
-     */
-    fn use_critical<R>(&self, func: impl FnOnce(&T) -> R) -> R;
 }
