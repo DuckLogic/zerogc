@@ -49,7 +49,7 @@ version = "0.2.0-alpha.7"
 authors = ["Techcable <git+zerogc@techcable.net>"]
 repository = "https://github.com/DuckLogic/zerogc"
 license = "MIT"
-edition = "2018"
+edition = "2021"
 
 [features]
 default = ["std"]
