@@ -9,30 +9,18 @@ edition.workspace = true
 readme = "README.md"
 
 [dependencies]
-scopeguard = "1.1"
+scopeguard = "1"
 inherent = "1"
 # Manually included tracing support for third party libraries
 # Providing support for these important libraries,
 # gives zerogc batteries included support.
-indexmap = { version = "1.6", optional = true }
-parking_lot = { version = "0.11", optional = true }
+indexmap = { version = "2", optional = true }
+parking_lot = { version = "0.12", optional = true }
 arrayvec = { version = "0.7", optional = true }
 anyhow = { version = "1", optional = true }
-# Serde support (optional)
-serde = { version = "1", optional = true, features = ["derive"] }
+hashbrown = { version = "0.14.5", optional = true }
 # Used for macros
 zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.6" }
-# Used for the "epsilon" no-op collector
-bumpalo = { version = "3", optional = true }
-# Used for our custom hashmap
-ahash = { version = "0.7.0", default-features = false, optional = true }
-
-[dependencies.hashbrown]
-# Hashbrown is used for our custom hashmap implementation
-# We also implement Trace regardless
-version = "0.11"
-optional = true
-features = ["raw", "nightly"]
 
 [dev-dependencies]
 serde_json = "1"
