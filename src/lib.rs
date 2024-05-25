@@ -42,6 +42,7 @@ mod manually_traced;
 #[macro_use]
 mod macros;
 pub mod cell;
+pub mod context;
 pub mod prelude;
 pub mod system;
 pub mod trace;
@@ -56,3 +57,8 @@ pub use self::trace::*;
 /// Used by the derive code
 #[doc(hidden)]
 pub fn assert_copy<T: Copy>() {}
+
+/// Internal module for sealing trait implementations.
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}

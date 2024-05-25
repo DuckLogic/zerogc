@@ -9,11 +9,12 @@ use core::ptr::NonNull;
 
 // nightly feature: Unsized coercion
 #[cfg(feature = "nightly")]
-use std::marker::Unsize;
+use core::marker::Unsize;
 #[cfg(feature = "nightly")]
-use std::ops::CoerceUnsized;
+use core::ops::CoerceUnsized;
 
-use crate::system::CollectorId;
+use crate::context::GcContext;
+use crate::system::{CollectorId, GcHeader};
 use crate::trace::barrier::GcDirectBarrier;
 use crate::trace::{GcRebrand, GcSafe, GcVisitor, Trace, TrustedDrop};
 
@@ -73,11 +74,11 @@ pub struct Gc<'gc, T: ?Sized, Id: CollectorId> {
     /// See the comments on 'Lifetime' for details.
     value: NonNull<T>,
     /// Marker struct used to statically identify the collector's type,
-    /// and indicate that 'gc is a logical reference the system.
+    /// and indicate that 'gc is a logical reference the context.
     ///
     /// The runtime instance of this value can be
     /// computed from the pointer itself: `NonNull<T>` -> `&CollectorId`
-    collector_id: PhantomData<&'gc Id::System>,
+    collector_id: PhantomData<&'gc GcContext<Id>>,
 }
 impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
     /// Create a GC pointer from a raw pointer
@@ -101,35 +102,54 @@ impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
     /// Although it could be restricted to the lifetime of the [CollectorId]
     /// (in theory that may have an internal pointer) it will still live for '&self'.
     #[inline]
-    pub fn system(&self) -> &'_ Id::System {
+    pub fn system(self: &Self) -> &'_ Id::System {
         // This assumption is safe - see the docs
-        unsafe { self.collector_id().assume_valid_system() }
+        unsafe { Gc::id(*self).assume_valid_system() }
     }
 }
 impl<'gc, T: ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
     /// The value of the underlying pointer
     #[inline(always)]
-    pub const fn value(&self) -> &'gc T {
-        unsafe { *(&self.value as *const NonNull<T> as *const &'gc T) }
+    pub const fn value(this: Self) -> &'gc T {
+        unsafe { this.value.as_ref() }
     }
+
     /// Cast this reference to a raw pointer
     ///
     /// ## Safety
-    /// It's undefined behavior to mutate the
-    /// value.
+    /// It's undefined behavior to mutate the value.
     /// The pointer is only valid as long as
     /// the reference is.
+    ///
+    /// Moving collectors may change the pointer during a collection.
+    #[inline(always)]
+    pub unsafe fn raw_ptr(this: Self) -> NonNull<T> {
+        this.value
+    }
+
+    /// Get a reference to the object's header.
+    ///
+    /// This is a ["regular" header](GcRegularHeader), not an array header.
+    ///
+    /// ## Safety
+    /// It is undefined behavior to use the header incorrectly.
+    ///
+    /// As described in [`CollectorId::determine_header`],
+    /// the header may not be valid for the full `'gc` lifetime
+    /// if a collection is in progress.
+    /// Normally, user code can't be called during a collection
+    /// and does not need to handle this scenario.
     #[inline]
-    pub unsafe fn as_raw_ptr(&self) -> *mut T {
-        self.value.as_ptr() as *const T as *mut T
+    pub unsafe fn header(this: &Self) -> &'_ Id::RegularHeader {
+        Id::determine_header(this)
     }
 
     /// Get a reference to the collector's id
     ///
-    /// The underlying collector it points to is not necessarily always valid
+    /// The underlying collector it points to is not necessarily always valid.
     #[inline]
-    pub fn collector_id(&self) -> &'_ Id {
-        Id::from_gc_ptr(self)
+    pub fn id(this: Self) -> Id {
+        unsafe { Gc::header(&this).id() }
     }
 }
 
@@ -173,7 +193,7 @@ impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Deref for Gc<'gc, T, Id>
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
-        self.value()
+        unsafe { &*self.value.as_ptr() }
     }
 }
 unsafe impl<'gc, O, V, Id> GcDirectBarrier<'gc, Gc<'gc, O, Id>> for Gc<'gc, V, Id>
@@ -199,58 +219,58 @@ impl<'gc, T: ?Sized, Id: CollectorId> Clone for Gc<'gc, T, Id> {
 impl<'gc, T: GcSafe<'gc, Id> + Hash, Id: CollectorId> Hash for Gc<'gc, T, Id> {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.value().hash(state)
+        Gc::value(*self).hash(state)
     }
 }
 impl<'gc, T: GcSafe<'gc, Id> + PartialEq, Id: CollectorId> PartialEq for Gc<'gc, T, Id> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         // NOTE: We compare by value, not identity
-        self.value() == other.value()
+        Gc::value(*self) == Gc::value(*other)
     }
 }
 impl<'gc, T: GcSafe<'gc, Id> + Eq, Id: CollectorId> Eq for Gc<'gc, T, Id> {}
 impl<'gc, T: GcSafe<'gc, Id> + PartialEq, Id: CollectorId> PartialEq<T> for Gc<'gc, T, Id> {
     #[inline]
     fn eq(&self, other: &T) -> bool {
-        self.value() == other
+        Gc::value(*self) == other
     }
 }
 impl<'gc, T: GcSafe<'gc, Id> + PartialOrd, Id: CollectorId> PartialOrd for Gc<'gc, T, Id> {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.value().partial_cmp(other.value())
+        Gc::value(*self).partial_cmp(Gc::value(*other))
     }
 }
 impl<'gc, T: GcSafe<'gc, Id> + PartialOrd, Id: CollectorId> PartialOrd<T> for Gc<'gc, T, Id> {
     #[inline]
     fn partial_cmp(&self, other: &T) -> Option<Ordering> {
-        self.value().partial_cmp(other)
+        Gc::value(*self).partial_cmp(other)
     }
 }
 impl<'gc, T: GcSafe<'gc, Id> + Ord, Id: CollectorId> Ord for Gc<'gc, T, Id> {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
-        self.value().cmp(other)
+        Gc::value(*self).cmp(other)
     }
 }
 impl<'gc, T: ?Sized + GcSafe<'gc, Id> + Debug, Id: CollectorId> Debug for Gc<'gc, T, Id> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         if !f.alternate() {
             // Pretend we're a newtype by default
-            f.debug_tuple("Gc").field(&self.value()).finish()
+            f.debug_tuple("Gc").field(&Gc::value(*self)).finish()
         } else {
             // Alternate spec reveals `collector_id`
             f.debug_struct("Gc")
-                .field("collector_id", &self.collector_id)
-                .field("value", &self.value())
+                .field("collector_id", &Gc::id(*self))
+                .field("value", &Gc::value(*self))
                 .finish()
         }
     }
 }
 impl<'gc, T: ?Sized + GcSafe<'gc, Id> + Display, Id: CollectorId> Display for Gc<'gc, T, Id> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        Display::fmt(&self.value(), f)
+        Display::fmt(Gc::value(*self), f)
     }
 }
 
