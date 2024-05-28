@@ -114,6 +114,7 @@ impl UntrustedAllocInit {
     /// This is completely safe,
     /// since no assumptions are made.
     #[inline(always)]
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         UntrustedAllocInit { _priv: () }
     }
@@ -205,6 +206,11 @@ pub unsafe trait GcArrayHeader: GcHeader {
     /// Return the length of the array,
     /// in terms of the elements.
     fn len(&self) -> usize;
+    /// Check if the array is empty.
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Uniquely identifies the collector in case there are

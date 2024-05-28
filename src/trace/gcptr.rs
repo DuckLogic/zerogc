@@ -98,13 +98,13 @@ impl<'gc, T: GcSafe<'gc, Id> + ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
     ///
     /// ## Safety
     /// This is based on the assumption that a [GcSystem] must outlive
-    /// all of the pointers it owns.
+    /// all the pointers it owns.
     /// Although it could be restricted to the lifetime of the [CollectorId]
     /// (in theory that may have an internal pointer) it will still live for '&self'.
     #[inline]
-    pub fn system(self: &Self) -> &'_ Id::System {
+    pub fn system(this: &Self) -> &'_ Id::System {
         // This assumption is safe - see the docs
-        unsafe { Gc::id(*self).assume_valid_system() }
+        unsafe { Gc::id(*this).assume_valid_system() }
     }
 }
 impl<'gc, T: ?Sized, Id: CollectorId> Gc<'gc, T, Id> {
