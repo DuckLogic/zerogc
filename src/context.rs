@@ -5,6 +5,8 @@
 use crate::system::{GcContextState, TrustedAllocInit, UntrustedAllocInit};
 use crate::{CollectorId, Gc, GcSafe};
 
+pub mod handle;
+
 /// A single context for interfacing with a garbage collector.
 ///
 /// For any given collector, there should be only one of these per thread.
@@ -33,6 +35,58 @@ impl<Id: CollectorId> GcContext<Id> {
         unsafe {
             self.state.safepoint();
         }
+    }
+
+    /// Test if a safepoint needs to be invoked.
+    ///
+    /// This should return true if [`GcContext::is_gc_needed`] does,
+    /// but also should return true if other threads are
+    /// already blocked at a safepoint.
+    ///
+    /// In a single-threaded scenario, the two tests should be equivalent.
+    /// See docs for [`GcContext::is_gc_needed`] for why the two tests are seperate.
+    ///
+    /// This can be used to avoid the overhead of mutation.
+    /// For example, consider the following code:
+    /// ```
+    /// # use zerogc::prelude::*;
+    ///
+    /// fn run<Id: CollectorId>(ctx: &GcContext<Id>) {
+    ///     let mut index = 0;
+    ///     const LIMIT: usize = 100_000;
+    ///     let total =
+    ///     while index < LIMIT {
+    ///         {
+    ///             let cached = expensive_pure_computation(ctx);
+    ///             while index < LIMIT && !ctx.is_safepoint_needed() {
+    ///                 index % cached.len()
+    ///             }
+    ///         }
+    ///         // a safepoint was deemed necessary, which would invalidate the `cached` object.
+    ///     }
+    /// }
+    ///
+    /// fn expensive_pure_computation<Id: CollectorId>(ctx: &GcContext<Id>) -> Gc<'_, String, Id>
+    /// # { unreachable!() }
+    /// ```
+    #[inline]
+    pub fn is_safepoint_needed(&self) -> bool {
+        self.state.is_safepoint_needed()
+    }
+
+    /// Test if a garbage collection is needed.
+    ///
+    /// This is a weaker test than [`GcContext::is_safepoint_needed`],
+    /// which this does not check if other threads are blocked.
+    ///
+    /// This function is distinct from [`GcContext::is_safepoint_needed`] because user code
+    /// may already have ways to atomically signal other executing threads.
+    /// In that case, there is no need to check if other threads are blocked.
+    ///
+    /// In a single-threaded context, the two tests are equivalent.
+    #[inline]
+    pub fn is_gc_needed(&self) -> bool {
+        self.state.is_gc_needed()
     }
 
     /// Trigger a [`safepoint`](Self::safepoint) and force a garbage collection.

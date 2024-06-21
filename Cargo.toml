@@ -9,6 +9,12 @@ edition.workspace = true
 readme = "README.md"
 
 [dependencies]
+# NOTE: Require an implementation of the abort that doesn't panic
+#
+# This can currently be done by enabling `std` or `libc`
+libabort = { version = "0.1.7", default-features = false, features = ["always-immediate-abort"] }
+# This provides a fallback `Allocator` API for stable rust.
+allocator-api2 = { version = "0.2.18", default-features = false, features = ["alloc"] }
 # Manually included tracing support for third party libraries
 # Providing support for these important libraries,
 # gives zerogc batteries included support.
@@ -19,6 +25,8 @@ anyhow = { version = "1", optional = true }
 hashbrown = { version = "0.14.5", optional = true }
 # Used for macros
 zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.6" }
+# Static assertions
+static_assertions = "1.1"
 
 [dev-dependencies]
 serde_json = "1"
@@ -42,11 +50,19 @@ default = ["std"]
 # Depend on the standard library (optional)
 #
 # This implements tracing for most standard library types.
-std = ["alloc"]
-# Depend on `extern crate alloc` in addition to the Rust `core`
-# This is implied by using the standard library (feature="std")
+std = ["alloc", "allocator-api2/std", "libabort/std"]
+# Implement `Trace` for types in `extern crate alloc` in addition to the Rust `core`.
+# This supports types like `alloc::box::Box` and `alloc::vec::Vec`
 #
-# This implements `Trace` for `Box` and collections like `Vec`
+# This is implied by using the standard library (feature="std")
+# Regardless of the presence or absence of this feature,
+# the implementation currently relies on the `alloc` crate (but this may change in the future).
 alloc = []
+# Enables support for thread-safe collectors.
+#
+# This requires the `std` feature to be enabled.
+sync = []
 # Use nightly features
 nightly = ["zerogc-derive/nightly"]
+# Use the nightly `Allocator` api
+nightly-allocator = ["allocator-api2/nightly"]

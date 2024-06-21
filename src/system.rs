@@ -1,10 +1,50 @@
 //! Defines the [`GcSystem`] API for collector backends.d
 
-use crate::sealed::Sealed;
 use core::fmt::Debug;
 use core::hash::Hash;
+use core::marker::PhantomData;
 
 use crate::trace::{Gc, GcSafe, NullTrace, TrustedDrop};
+
+pub(crate) mod threads;
+
+/// Indicates whether a collector is thread-safe.
+///
+/// Most of the functions and types in this trait are logically private.
+/// Accessing them is not subject to semver guarantees.
+pub unsafe trait GcThreadSafety:
+    threads::ThreadSafetyInternal + crate::sealed::Sealed
+{
+}
+
+/// A collector which is not thread-safe. This is `!Send` and `!Sync`.
+pub struct NotSyncCollector {
+    /// Indicates `!Send` and `!Sync`
+    marker: PhantomData<*const ()>,
+}
+
+unsafe impl GcThreadSafety for NotSyncCollector {}
+unsafe impl threads::ThreadSafetyInternal for NotSyncCollector {
+    type ReferenceCounter = self::threads::NotSyncReferenceCounter;
+}
+impl crate::sealed::Sealed for NotSyncCollector {}
+
+static_assertions::assert_not_impl_any!(NotSyncCollector: Send, Sync);
+
+/// A collector which is thread-safe.
+///
+/// This is both `Send` and `Sync`.
+pub struct SyncCollector {
+    _priv: (),
+}
+
+unsafe impl GcThreadSafety for SyncCollector {}
+unsafe impl threads::ThreadSafetyInternal for SyncCollector {
+    type ReferenceCounter = self::threads::AtomicReferenceCounter;
+}
+impl crate::sealed::Sealed for SyncCollector {}
+
+static_assertions::assert_impl_all!(SyncCollector: Send, Sync);
 
 /// A garbage collector implementation,
 /// conforming to the zerogc API.
@@ -41,8 +81,14 @@ pub unsafe trait GcContextState {
     /// Return a reference to the owning system.
     fn system(&self) -> &'_ <Self::Id as CollectorId>::System;
 
-    /// Indicate that .
+    /// Indicate that the collector has reached a safepoint.
     unsafe fn safepoint(&mut self);
+
+    /// Check if a safepoint is needed.
+    fn is_safepoint_needed(&self) -> bool;
+
+    /// Check if a gc is needed.
+    fn is_gc_needed(&self) -> bool;
 
     /// Unconditionally force a garbage collection
     unsafe fn force_collect(&mut self);
@@ -100,7 +146,7 @@ impl TrustedAllocInit {
 unsafe impl AllocInitSafety for TrustedAllocInit {
     const MIGHT_PANIC: bool = false;
 }
-impl Sealed for TrustedAllocInit {}
+impl crate::sealed::Sealed for TrustedAllocInit {}
 
 /// Indicates that the initialization function is untrusted,
 /// and could possibly fail via panicking.
@@ -122,7 +168,7 @@ impl UntrustedAllocInit {
 unsafe impl AllocInitSafety for UntrustedAllocInit {
     const MIGHT_PANIC: bool = true;
 }
-impl Sealed for UntrustedAllocInit {}
+impl crate::sealed::Sealed for UntrustedAllocInit {}
 
 /// The header for a garbage-collected object.
 ///

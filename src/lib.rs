@@ -8,6 +8,7 @@
     clippy::missing_safety_doc, // TODO: Add missing safety docs and make this #[deny(...)]
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(feature = "nightly-allocator", feature(allocator_api))]
 //! Zero overhead tracing garbage collection for rust,
 //! by abusing the borrow checker.
 //!
