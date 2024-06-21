@@ -3,6 +3,8 @@ name = "zerogc-next-mimalloc-semisafe"
 description = "Somewhat safe bindings for mimalloc, used by zerogc-next"
 version.workspace = true
 edition.workspace = true
+# do not publish - prototype
+publish = false
 
 [dependencies]
 libmimalloc-sys = { version = "0.1.37", features = ["extended"] }

@@ -1,8 +1,10 @@
 [package]
 name = "zerog-next-macros"
-description = "Procedural macros for zerogc-next"
+description = "Procedural macros for zerogc-next (prototype)"
 version.workspace = true
 edition.workspace = true
+# do not publish - prototype
+publish = false
 
 [lib]
 proc-macro = true

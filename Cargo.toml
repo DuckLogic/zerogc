@@ -1,8 +1,10 @@
 [package]
 name = "zerogc-next"
-description = "Redesign of the zerogc API"
+description = "Prototype redesign of the zerogc API"
 version.workspace = true
 edition.workspace = true
+# Do not publish - prototype
+publish = false
 
 [dependencies]
 bumpalo = {  version = "3.16", features = ["allocator-api2"] }
