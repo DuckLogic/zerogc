@@ -1,7 +1,19 @@
 # zerogc-next (v0.3)
-A safe garbage-collector API for rust.
+A **prototype** of the next version of [zerogc], a safe garbage-collector API for rust.
 
-This is intended to be replacement/redesign for the [zerogc](https://github.com/DuckLogic/zerogc) API for the 0.3 release. The API used in v0.1/v0.2 is currently known to be unsound.
+## Warning
+**PLEASE DO NOT USE THIS CODE! IT IS A PROTOTYPE!**
 
-It's as if types are being copied from ones with the old gc lifetime `'gc` into types with a new gc lifetime `'newgc`.
+Prefer the more polished implementation that will be released in v0.3 of [zerogc].
 
+## Motivation
+The API used in zerogc v0.1/v0.2 is currently known to be unsound. This is a safe replacement that successfully executes under [miri].
+
+The design is based around "virtual copies" (a better name might be "phantom copies"), as-if types are being copied from an old lifetime `'gc` into types with a new gc lifetime `'newgc`.
+
+
+
+While this is the API that is exposed publicly, a different `unsafe` API is used in practice to avoid the need for copies in some cases.
+
+[miri]: https://github.com/rust-lang/miri
+[zerogc]: https://github.com/DuckLogic/zerogc
