@@ -9,30 +9,24 @@ edition.workspace = true
 readme = "README.md"
 
 [dependencies]
-scopeguard = "1.1"
-inherent = "1"
+# NOTE: Require an implementation of the abort that doesn't panic
+#
+# This can currently be done by enabling `std` or `libc`
+libabort = { version = "0.1.7", default-features = false, features = ["always-immediate-abort"] }
+# This provides a fallback `Allocator` API for stable rust.
+allocator-api2 = { version = "0.2.18", default-features = false, features = ["alloc"] }
 # Manually included tracing support for third party libraries
 # Providing support for these important libraries,
 # gives zerogc batteries included support.
-indexmap = { version = "1.6", optional = true }
-parking_lot = { version = "0.11", optional = true }
+indexmap = { version = "2", optional = true }
+parking_lot = { version = "0.12", optional = true }
 arrayvec = { version = "0.7", optional = true }
 anyhow = { version = "1", optional = true }
-# Serde support (optional)
-serde = { version = "1", optional = true, features = ["derive"] }
+hashbrown = { version = "0.14.5", optional = true }
 # Used for macros
 zerogc-derive = { path = "libs/derive", version = "0.2.0-alpha.6" }
-# Used for the "epsilon" no-op collector
-bumpalo = { version = "3", optional = true }
-# Used for our custom hashmap
-ahash = { version = "0.7.0", default-features = false, optional = true }
-
-[dependencies.hashbrown]
-# Hashbrown is used for our custom hashmap implementation
-# We also implement Trace regardless
-version = "0.11"
-optional = true
-features = ["raw", "nightly"]
+# Static assertions
+static_assertions = "1.1"
 
 [dev-dependencies]
 serde_json = "1"
@@ -49,33 +43,26 @@ version = "0.2.0-alpha.7"
 authors = ["Techcable <git+zerogc@techcable.net>"]
 repository = "https://github.com/DuckLogic/zerogc"
 license = "MIT"
-edition = "2018"
+edition = "2021"
 
 [features]
-default = ["std", "epsilon", "epsilon-arena-alloc"]
+default = ["std"]
 # Depend on the standard library (optional)
 #
 # This implements tracing for most standard library types.
-std = ["alloc"]
-# Depend on `extern crate alloc` in addition to the Rust `core`
+std = ["alloc", "allocator-api2/std", "libabort/std"]
+# Implement `Trace` for types in `extern crate alloc` in addition to the Rust `core`.
+# This supports types like `alloc::box::Box` and `alloc::vec::Vec`
+#
 # This is implied by using the standard library (feature="std")
-#
-# This implements `Trace` for `Box` and collections like `Vec`
+# Regardless of the presence or absence of this feature,
+# the implementation currently relies on the `alloc` crate (but this may change in the future).
 alloc = []
-# Emulate the `core::alloc::Allocator` api
+# Enables support for thread-safe collectors.
 #
-# NOTE: This doesn't *necessarily* require the 'alloc'
-# feature (because the API itself is in 'core')
-allocator-api = []
-# Our custom hashmap implementation
-hashmap-impl = ["allocator-api", "hashbrown", "ahash"]
-# Support a 'GcError' type that implements 'std::error::Error'
-# by wrapping a 'GcHandle'
-errors = []
-# Serde support
-serde1 = ["serde", "zerogc-derive/__serde-internal", "arrayvec/serde", "indexmap/serde-1", "hashbrown/serde"]
-# Support the "epsilon" no-op collector
-epsilon = []
-# Configure the "epsilon" collector use arena allocation
-# (on by default)
-epsilon-arena-alloc = ["epsilon", "bumpalo"]
+# This requires the `std` feature to be enabled.
+sync = []
+# Use nightly features
+nightly = ["zerogc-derive/nightly"]
+# Use the nightly `Allocator` api
+nightly-allocator = ["allocator-api2/nightly"]

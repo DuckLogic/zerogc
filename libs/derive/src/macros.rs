@@ -13,10 +13,10 @@ use syn::parse::ParseStream;
 use syn::spanned::Spanned;
 use syn::{
     braced, parse_quote, Error, Expr, GenericArgument, GenericParam, Generics, Lifetime, Path,
-    PathArguments, PredicateType, Token, Type, TypeParamBound, WhereClause, WherePredicate,
+    PredicateType, Token, Type, TypeParamBound, WhereClause, WherePredicate,
 };
 
-use super::zerogc_crate;
+use super::{zerogc_crate, WarningList};
 use indexmap::{indexmap, IndexMap};
 use quote::{quote, quote_spanned};
 use syn::ext::IdentExt;
@@ -61,34 +61,6 @@ impl MacroArg for CollectorIdInfo {
             })
         } else {
             Err(stream.error("Expected either `*`, a path, or a map of Path => Lifetime"))
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum DeserializeStrategy {
-    UnstableHorribleHack(Span),
-    Delegate(Span),
-    ExplicitClosure(KnownArgClosure),
-}
-impl MacroArg for DeserializeStrategy {
-    fn parse_macro_arg(stream: ParseStream) -> syn::Result<Self> {
-        mod kw {
-            syn::custom_keyword!(unstable_horrible_hack);
-            syn::custom_keyword!(delegate);
-        }
-        if stream.peek(Token![|]) {
-            Ok(DeserializeStrategy::ExplicitClosure(
-                KnownArgClosure::parse_with_fixed_args(stream, &["ctx", "deserializer"])?,
-            ))
-        } else if stream.peek(kw::unstable_horrible_hack) {
-            let span = stream.parse::<kw::unstable_horrible_hack>()?.span;
-            Ok(DeserializeStrategy::UnstableHorribleHack(span))
-        } else if stream.peek(kw::delegate) {
-            let span = stream.parse::<kw::delegate>()?.span;
-            Ok(DeserializeStrategy::Delegate(span))
-        } else {
-            Err(stream.error("Unknown deserialize strategy. Try specifying an explicit closure |ctx, deserializer| { <code> }"))
         }
     }
 }
@@ -143,8 +115,6 @@ pub struct MacroInput {
     trace_mut_closure: Option<VisitClosure>,
     #[kwarg(optional, rename = "trace_immutable")]
     trace_immutable_closure: Option<VisitClosure>,
-    #[kwarg(optional, rename = "deserialize")]
-    deserialize_strategy: Option<DeserializeStrategy>,
 }
 impl MacroInput {
     fn parse_visitor(&self) -> syn::Result<VisitImpl> {
@@ -202,6 +172,7 @@ impl MacroInput {
         generics
     }
     pub fn expand_output(&self) -> Result<TokenStream, Error> {
+        let warnings = WarningList::new();
         let zerogc_crate = zerogc_crate();
         let target_type = &self.target_type;
         let trace_impl = self.expand_trace_impl(true)?.expect("Trace impl required");
@@ -226,17 +197,16 @@ impl MacroInput {
         } else {
             quote!()
         };
-        let deserialize_impl = self.expand_deserialize_impl()?;
         let rebrand_impl = self.expand_rebrand_impl()?;
         let trusted_drop = self.expand_trusted_drop_impl();
         Ok(quote! {
+            #warnings
             #trace_impl
             #trace_immutable_impl
             #trusted_drop
             #null_trace_impl
             #(#gcsafe_impl)*
             #(#rebrand_impl)*
-            #(#deserialize_impl)*
         })
     }
     fn expand_trace_impl(&self, mutable: bool) -> Result<Option<TokenStream>, Error> {
@@ -335,90 +305,6 @@ impl MacroInput {
         })
     }
 
-    fn expand_deserialize_impl(&self) -> Result<Vec<Option<TokenStream>>, Error> {
-        let zerogc_crate = zerogc_crate();
-        let target_type = &self.target_type;
-        let strategy = match self.deserialize_strategy {
-            Some(ref strategy) => strategy,
-            _ => return Ok(Vec::new()),
-        };
-        if !crate::DESERIALIZE_ENABLED {
-            return Ok(Vec::new());
-        }
-        let de_lt = parse_quote!('deserialize);
-        self.for_each_id_type(self.basic_generics(), true, |mut generics, id_type, gc_lt| {
-            generics.params.push(parse_quote!('deserialize));
-            generics.make_where_clause().predicates.extend(
-                match self.bounds.deserialize_clause(id_type, gc_lt, &de_lt, &self.params.elements) {
-                    Some(clause) => clause.predicates,
-                    None => return Ok(None)
-                }
-            );
-            crate::sort_params(&mut generics);
-            let deserialize = match *strategy {
-                DeserializeStrategy::Delegate(_span) => {
-                    // NOTE: quote_spanned messes up hygiene
-                    quote! { {
-                        <Self as serde::de::Deserialize<'deserialize>>::deserialize(deserializer)
-                    } }
-                },
-                DeserializeStrategy::UnstableHorribleHack(span) => {
-                    let mut replaced_params = match self.target_type {
-                        Type::Path(syn::TypePath { qself: None, ref path }) => path.clone(),
-                        _ => return Err(syn::Error::new(self.target_type.span(), r##"To use the "horrible hack" strategy for deserilaztion, the type must be a 'path' type (without a qualified self)"##))
-                    };
-                    match replaced_params.segments.last_mut().unwrap().arguments {
-                        PathArguments::None => {
-                            crate::emit_warning(r##"The "horrible hack" isn't necessary if the type doesn't have generic args...."##, span);
-                        },
-                        PathArguments::Parenthesized(_) => {
-                            return Err(Error::new(
-                                self.target_type.span(),
-                                r##"NYI: The "horrible hack" deserialization strategy doesn't support paranthesized generics"##
-                            ))
-                        },
-                        PathArguments::AngleBracketed(ref mut args) => {
-                            for arg in args.args.iter_mut() {
-                                match *arg {
-                                    GenericArgument::Type(ref mut tp) => {
-                                        *tp = parse_quote!(zerogc::serde::hack::DeserializeHackWrapper::<#tp, #id_type>)
-                                    },
-                                    GenericArgument::Constraint(ref c) => {
-                                        return Err(syn::Error::new(c.span(), "NYI: Horrible hack support for 'constraints'"))
-                                    },
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    quote_spanned! { span =>
-                        let hack = <#replaced_params as serde::de::Deserialize<'deserialize>>::deserialize(deserializer)?;
-                        /*
-                         * SAFETY: Should be safe to go from Vec<T> -> Vec<U> and HashMap<K, V> -> HashMap<U, L>
-                         * as long as the reprs are transparent
-                         *
-                         * TODO: If this is safe, why does transmute not like Option<Hack<T>> -> Option<T>
-                         */
-                        Ok(unsafe { zerogc::serde::hack::transmute_mismatched::<#replaced_params, Self>(hack) })
-                    }
-                },
-                DeserializeStrategy::ExplicitClosure(ref closure) => {
-                    let mut tokens = TokenStream::new();
-                    use quote::ToTokens;
-                    closure.brace.surround(&mut tokens, |tokens| closure.body.to_tokens(tokens));
-                    tokens
-                }
-            };
-            let (impl_generics, _, where_clause) = generics.split_for_impl();
-            Ok(Some(quote! {
-                impl #impl_generics #zerogc_crate::serde::GcDeserialize<#gc_lt, #de_lt, #id_type> for #target_type #where_clause {
-                    fn deserialize_gc<D: serde::Deserializer<'deserialize>>(ctx: &#gc_lt <#id_type as zerogc::CollectorId>::Context, deserializer: D) -> Result<Self, D::Error> {
-                        #deserialize
-                    }
-                }
-            }))
-        })
-    }
     fn for_each_id_type<R>(
         &self,
         mut generics: Generics,
@@ -587,7 +473,7 @@ impl MacroInput {
 #[derive(Debug, Clone)]
 pub struct KnownArgClosure {
     body: TokenStream,
-    brace: ::syn::token::Brace,
+    _brace: ::syn::token::Brace,
 }
 impl KnownArgClosure {
     pub fn parse_with_fixed_args(input: ParseStream, fixed_args: &[&str]) -> syn::Result<Self> {
@@ -629,7 +515,7 @@ impl KnownArgClosure {
         let body = body.parse::<TokenStream>()?;
         Ok(KnownArgClosure {
             body: quote!({ #body }),
-            brace,
+            _brace: brace,
         })
     }
 }
@@ -677,8 +563,6 @@ pub struct CustomBounds {
     /// The requirements to implement `TrustedDrop`
     #[kwarg(optional, rename = "TrustedDrop")]
     trusted_drop: Option<TraitRequirements>,
-    #[kwarg(optional, rename = "GcDeserialize")]
-    deserialize: Option<TraitRequirements>,
     #[kwarg(optional)]
     visit_inside_gc: Option<Syn<WhereClause>>,
 }
@@ -741,36 +625,6 @@ impl CustomBounds {
                 .extend(self.trace_where_clause(generic_params).predicates)
         }
         Ok(res)
-    }
-    fn deserialize_clause(
-        &self,
-        id_type: &Path,
-        gc_lt: &Lifetime,
-        de_lt: &Lifetime,
-        generic_params: &[GenericParam],
-    ) -> Option<WhereClause> {
-        let zerogc_crate = zerogc_crate();
-        match self.deserialize {
-            Some(TraitRequirements::Never) => None, // skip this impl
-            Some(TraitRequirements::Always) => Some(empty_clause()), // No requirements
-            Some(TraitRequirements::Where(ref explicit)) => Some(explicit.clone()),
-            None => {
-                create_clause_with_default_and_ignored(
-                    &self.trace_immutable,
-                    generic_params,
-                    vec![
-                        parse_quote!(#zerogc_crate::serde::GcDeserialize<#gc_lt, #de_lt, #id_type>),
-                    ],
-                    Some(&mut |param| {
-                        /*
-                         * HACK: Ignore `Id: GcSafe<'gc, Id>` bound because type inference is unable
-                         * to resolve it.
-                         */
-                        matches!(param, GenericParam::Type(ref tp) if Some(&tp.ident) == id_type.get_ident())
-                    }),
-                )
-            }
-        }
     }
 }
 fn create_clause_with_default(

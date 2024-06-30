@@ -98,8 +98,7 @@ macro_rules! unsafe_trace_lock {
 /// (which are already undefined behavior for tracing).
 #[macro_export]
 macro_rules! unsafe_trace_primitive {
-    ($target:ty) => (unsafe_trace_primitive!($target; @ deserialize => delegate););
-    ($target:ty; @ $(deserialize => $strategy:ident)?) => {
+    ($target:ty) => {
         unsafe_gc_impl! {
             target => $target,
             params => [],
@@ -108,13 +107,10 @@ macro_rules! unsafe_trace_primitive {
             NEEDS_DROP => core::mem::needs_drop::<$target>(),
             collector_id => *,
             trace_template => |self, visitor| { /* nop */ Ok(()) },
-            $(deserialize => $strategy)*
         }
         unsafe impl<'gc, OwningRef> $crate::GcDirectBarrier<'gc, OwningRef> for $target {
             #[inline(always)]
-            unsafe fn write_barrier(
-                &self, _owner: &OwningRef, _field_offset: usize,
-            ) {
+            unsafe fn write_barrier(&self, _owner: &OwningRef, _field_offset: usize) {
                 /*
                  * TODO: We don't have any GC fields,
                  * so what does it mean to have a write barrier?

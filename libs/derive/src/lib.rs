@@ -1,14 +1,15 @@
-#![feature(
+#![cfg_attr(feature = "nightly", feature(
     proc_macro_tracked_env, // Used for `DEBUG_DERIVE`
     proc_macro_span, // Used for source file ids
     proc_macro_diagnostic, // Used for warnings
-)]
+))]
 extern crate proc_macro;
 
 use crate::derive::TraceDeriveKind;
 use darling::{FromDeriveInput, FromMeta};
 use proc_macro2::{Span, TokenStream};
-use quote::{quote, ToTokens};
+use quote::{quote, quote_spanned, ToTokens};
+use std::cell::RefCell;
 use std::fmt::Display;
 use std::io::Write;
 use syn::parse::Parse;
@@ -77,10 +78,45 @@ pub(crate) fn sort_params(generics: &mut Generics) {
     generics.params = pairs.into_iter().collect();
 }
 
-pub(crate) fn emit_warning(msg: impl ToString, span: Span) {
-    let mut d = proc_macro::Diagnostic::new(proc_macro::Level::Warning, msg.to_string());
-    d.set_spans(span.unwrap());
-    d.emit();
+struct WarningList {
+    warnings: RefCell<Vec<TokenStream>>,
+}
+impl WarningList {
+    pub fn new() -> Self {
+        WarningList {
+            warnings: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl ToTokens for WarningList {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let warnings = self.warnings.borrow();
+        tokens.extend(warnings.iter().cloned());
+    }
+
+    fn into_token_stream(self) -> TokenStream
+    where
+        Self: Sized,
+    {
+        self.warnings.into_inner().into_iter().collect()
+    }
+}
+
+pub(crate) fn emit_warning(list: &WarningList, msg: impl ToString, span: Span) {
+    #[cfg(feature = "nightly")]
+    {
+        let mut d = proc_macro::Diagnostic::new(proc_macro::Level::Warning, msg.to_string());
+        d.set_spans(span.unwrap());
+        d.emit();
+    }
+    // Fallback for warnings on stable
+    if cfg!(not(feature = "nightly")) {
+        let text = msg.to_string();
+        list.warnings.borrow_mut().push(quote_spanned! { span =>
+            #[deprecated(note = #text)]
+        });
+    }
 }
 
 pub(crate) fn move_bounds_to_where_clause(mut generics: Generics) -> Generics {
@@ -181,31 +217,18 @@ pub fn derive_trace(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     res
 }
 
-pub(crate) const DESERIALIZE_ENABLED: bool = cfg!(feature = "__serde-internal");
-
-#[proc_macro_derive(GcDeserialize, attributes(zerogc))]
-pub fn gc_deserialize(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let res = From::from(
-        impl_derive_trace(&input, TraceDeriveKind::Deserialize)
-            .unwrap_or_else(|e| e.write_errors()),
-    );
-    debug_derive(
-        "derive(GcDeserialize)",
-        &input.ident.to_string(),
-        &format_args!("#[derive(GcDeserialize) for {}", input.ident),
-        &res,
-    );
-    res
-}
-
 fn impl_derive_trace(
     input: &DeriveInput,
     kind: TraceDeriveKind,
 ) -> Result<TokenStream, darling::Error> {
+    let warnings = WarningList::new();
     let mut input = derive::TraceDeriveInput::from_derive_input(input)?;
-    input.normalize(kind)?;
-    input.expand(kind)
+    input.normalize(kind, &warnings)?;
+    let first = input.expand(kind)?;
+    Ok(quote! {
+        #warnings
+        #first
+    })
 }
 
 /// A list like `#[zerogc(a, b, c)] parsed as a `Punctuated<T, Token![,]>`,
@@ -243,6 +266,12 @@ pub(crate) fn is_explicitly_unsized(param: &syn::TypeParam) -> bool {
     })
 }
 
+#[cfg(not(feature = "nightly"))]
+fn span_file_loc(_span: Span) -> String {
+    "Span(?)".into()
+}
+
+#[cfg(feature = "nightly")]
 fn span_file_loc(span: Span) -> String {
     /*
      * Source file identifiers in the form `<file_name>:<lineno>`
@@ -260,8 +289,17 @@ fn span_file_loc(span: Span) -> String {
 
 fn debug_derive(key: &str, target: &dyn ToString, message: &dyn Display, value: &dyn Display) {
     let target = target.to_string();
-    // TODO: Use proc_macro::tracked_env::var
-    match ::proc_macro::tracked_env::var("DEBUG_DERIVE") {
+    let fetch_env_func: fn(&'static str) -> Result<String, std::env::VarError>;
+    // TODO: Use proc_macro::tracked_env::var unconditionally
+    #[cfg(feature = "nightly")]
+    {
+        fetch_env_func = ::proc_macro::tracked_env::var;
+    }
+    #[cfg(not(feature = "nightly"))]
+    {
+        fetch_env_func = |s: &'static str| std::env::var(s);
+    }
+    match fetch_env_func("DEBUG_DERIVE") {
         Ok(ref var) if var == "*" || var == "1" || var.is_empty() => {}
         Ok(ref var) if var == "0" => {
             return; /* disabled */

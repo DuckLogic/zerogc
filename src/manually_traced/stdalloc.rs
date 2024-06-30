@@ -2,13 +2,10 @@
 //!
 //! These can be used in `#![no_std]` crates without requiring
 //! the entire standard library.
-#[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-#[cfg(not(feature = "std"))]
 use alloc::string::String;
 use alloc::sync::Arc;
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use crate::prelude::*;
@@ -26,7 +23,6 @@ unsafe_gc_impl! {
         // Delegate to slice
         visitor.#trace_func::<[T]>(#b**self as #b [T])
     },
-    deserialize => unstable_horrible_hack,
 }
 unsafe_gc_impl! {
     target => Box<T>,
@@ -38,7 +34,6 @@ unsafe_gc_impl! {
     trace_template => |self, visitor| {
         visitor.#trace_func::<T>(#b **self)
     },
-    deserialize => unstable_horrible_hack,
 }
 // We can only trace `Rc` and `Arc` if the inner type implements `TraceImmutable`
 unsafe_gc_impl! {

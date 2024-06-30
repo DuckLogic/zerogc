@@ -21,7 +21,7 @@ unsafe_gc_impl! {
     collector_id => *,
     trace_mut => |self, visitor| {
         for idx in 0..self.len() {
-            let (key, value) = self.get_index_mut(idx).unwrap();
+            let (key, value) = indexmap::map::MutableKeys::get_index_mut2(self, idx).unwrap();
             visitor.trace::<K>(key)?;
             visitor.trace::<V>(value)?;
         }

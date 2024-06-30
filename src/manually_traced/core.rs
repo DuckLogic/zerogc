@@ -9,7 +9,6 @@ use core::marker::PhantomData;
 use core::num::Wrapping;
 
 use crate::prelude::*;
-use crate::GcDirectBarrier;
 
 use zerogc_derive::unsafe_gc_impl;
 
@@ -17,14 +16,10 @@ macro_rules! trace_tuple {
     { $single_param:ident } => {
         trace_tuple_impl!();
         trace_tuple_impl!($single_param);
-        #[cfg(feature = "serde1")]
-        deser_tuple_impl!($single_param);
     };
     { $first_param:ident, $($param:ident),* } => {
         trace_tuple! { $($param),* }
         trace_tuple_impl!( $first_param, $($param),*);
-        #[cfg(feature = "serde1")]
-        deser_tuple_impl!($first_param, $($param),*);
     };
 }
 
@@ -108,60 +103,6 @@ macro_rules! trace_tuple_impl {
     };
 }
 
-#[cfg(feature = "serde1")]
-macro_rules! deser_tuple_impl {
-    ( $($param:ident),+ ) => {
-
-        impl<'gc, 'de, Id: $crate::CollectorId, $($param),*> $crate::serde::GcDeserialize<'gc, 'de, Id> for ($($param,)*)
-            where $($param: $crate::serde::GcDeserialize<'gc, 'de, Id>),* {
-            #[allow(non_snake_case, unused)]
-            fn deserialize_gc<Deser: serde::Deserializer<'de>>(
-                ctx: &'gc <Id as $crate::CollectorId>::Context,
-                deser: Deser
-            ) -> Result<Self, <Deser as serde::Deserializer<'de>>::Error> {
-                use serde::de::{Visitor, Error, SeqAccess};
-                use std::marker::PhantomData;
-                use $crate::{CollectorId, GcSystem};
-                struct TupleVisitor<'gc, 'de, Id: $crate::CollectorId, $($param: $crate::serde::GcDeserialize<'gc, 'de, Id>),*> {
-                    ctx: &'gc Id::Context,
-                    marker: PhantomData<(&'de (), ( $($param,)*) )>
-                }
-                impl<'gc, 'de, Id: CollectorId, $($param: $crate::serde::GcDeserialize<'gc, 'de, Id>),*>
-                     Visitor<'de> for TupleVisitor<'gc, 'de, Id, $($param),*> {
-                    type Value = ($($param,)*);
-                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                        let mut count = 0;
-                        $(
-                            let $param = ();
-                            count += 1;
-                        )*
-                        write!(f, "a tuple of len {}", count)
-                    }
-                    fn visit_seq<SeqAcc: SeqAccess<'de>>(self, mut seq: SeqAcc) -> Result<Self::Value, SeqAcc::Error> {
-                        let mut idx = 0;
-                        $(
-                            let $param = match seq.next_element_seed($crate::serde::GcDeserializeSeed::new(self.ctx))? {
-                                Some(value) => value,
-                                None => return Err(Error::invalid_length(idx, &self))
-                            };
-                            idx += 1;
-                        )*
-                        Ok(($($param,)*))
-                    }
-                }
-                let mut len = 0;
-                $(
-                    let _hack = PhantomData::<$param>;
-                    len += 1;
-                )*
-                deser.deserialize_tuple(len, TupleVisitor {
-                    marker: PhantomData, ctx
-                })
-            }
-        }
-    };
-}
-
 unsafe_trace_primitive!(i8);
 unsafe_trace_primitive!(i16);
 unsafe_trace_primitive!(i32);
@@ -177,7 +118,7 @@ unsafe_trace_primitive!(f64);
 unsafe_trace_primitive!(bool);
 unsafe_trace_primitive!(char);
 // TODO: Get proper support for unsized types (issue #15)
-unsafe_trace_primitive!(&'static str; @);
+unsafe_trace_primitive!(&'static str);
 
 unsafe_gc_impl! {
     target => PhantomData<T>,
@@ -349,7 +290,6 @@ unsafe_gc_impl! {
             Some(ref #mutability value) => visitor.#trace_func::<T>(value),
         }
     },
-    deserialize => unstable_horrible_hack,
 }
 unsafe impl<'gc, OwningRef, V> GcDirectBarrier<'gc, OwningRef> for Option<V>
 where
@@ -387,7 +327,6 @@ unsafe_gc_impl! {
         visitor.#trace_func(#b self.0)
     },
     collector_id => *,
-    deserialize => unstable_horrible_hack,
 }
 
 #[cfg(test)]
