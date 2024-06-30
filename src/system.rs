@@ -3,48 +3,10 @@
 use core::fmt::Debug;
 use core::hash::Hash;
 use core::marker::PhantomData;
+use zerogc::context::handle::GcHandleImpl;
+use zerogc::Trace;
 
 use crate::trace::{Gc, GcSafe, NullTrace, TrustedDrop};
-
-pub(crate) mod threads;
-
-/// Indicates whether a collector is thread-safe.
-///
-/// Most of the functions and types in this trait are logically private.
-/// Accessing them is not subject to semver guarantees.
-pub unsafe trait GcThreadSafety:
-    threads::ThreadSafetyInternal + crate::sealed::Sealed
-{
-}
-
-/// A collector which is not thread-safe. This is `!Send` and `!Sync`.
-pub struct NotSyncCollector {
-    /// Indicates `!Send` and `!Sync`
-    marker: PhantomData<*const ()>,
-}
-
-unsafe impl GcThreadSafety for NotSyncCollector {}
-unsafe impl threads::ThreadSafetyInternal for NotSyncCollector {
-    type ReferenceCounter = self::threads::NotSyncReferenceCounter;
-}
-impl crate::sealed::Sealed for NotSyncCollector {}
-
-static_assertions::assert_not_impl_any!(NotSyncCollector: Send, Sync);
-
-/// A collector which is thread-safe.
-///
-/// This is both `Send` and `Sync`.
-pub struct SyncCollector {
-    _priv: (),
-}
-
-unsafe impl GcThreadSafety for SyncCollector {}
-unsafe impl threads::ThreadSafetyInternal for SyncCollector {
-    type ReferenceCounter = self::threads::AtomicReferenceCounter;
-}
-impl crate::sealed::Sealed for SyncCollector {}
-
-static_assertions::assert_impl_all!(SyncCollector: Send, Sync);
 
 /// A garbage collector implementation,
 /// conforming to the zerogc API.
@@ -252,6 +214,7 @@ pub unsafe trait GcArrayHeader: GcHeader {
     /// Return the length of the array,
     /// in terms of the elements.
     fn len(&self) -> usize;
+
     /// Check if the array is empty.
     #[inline]
     fn is_empty(&self) -> bool {
@@ -283,8 +246,11 @@ pub unsafe trait CollectorId:
     type ContextState: GcContextState<Id = Self>;
     /// The header for a garbage-collected array.
     type ArrayHeader: GcArrayHeader<Id = Self>;
-    /// The header for a regulalar [`Gc`] object
+    /// The header for a regular [`Gc`] object
     type RegularHeader: GcRegularHeader<Id = Self>;
+    /// A thread-local handle to garbage-collected objects,
+    /// guaranteed to be preserved across collections.
+    type LocalHandle<T: Trace>: GcHandleImpl<T, Id = Self>;
 
     /// Determine the [regular header](GcRegularHeader) for the specified [Gc] object.
     ///
@@ -325,4 +291,9 @@ pub unsafe trait CollectorId:
     /// The lifetime of the returned system must be correct,
     /// and not used after the collector no longer exists.
     unsafe fn assume_valid_system<'a>(self) -> &'a Self::System;
+}
+
+/// A thread-safe [`CollectorId`]
+pub trait CollectorIdSync: CollectorId + Sync {
+    type SyncHandle<T: Trace>: GcHandleImpl<T, Id = Self> + Sync;
 }
